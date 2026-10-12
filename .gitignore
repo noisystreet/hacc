@@ -1,0 +1,32 @@
+# Build output
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# CMake / tooling
+compile_commands.json
+.cache/
+.clangd/
+*.gcda
+*.gcno
+
+# hacc 中间产物（-keep）
+*.cudafe1.*
+*.ptx
+*.cubin
+*.fatbin
+
+# Local configuration
+.env
+.env.local
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

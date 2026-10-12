@@ -1,0 +1,32 @@
+hacc
+Copyright (c) 2026 coolrt contributors
+
+This product is licensed under the Apache License, Version 2.0 with LLVM
+Exceptions. See LICENSE and https://llvm.org/LICENSE.txt.
+
+==============================================================================
+Third-party components
+==============================================================================
+
+This product depends on the following third-party components. They are NOT
+vendored into this repository; they are obtained at configure time via CMake
+FetchContent/ExternalProject pinned to a specific revision, or supplied by the
+user through -DHACC_EDG_ROOT (see docs/adr/0005-licensing-and-edg-distribution.md).
+
+1. EDG C/C++ Front End
+   Project: https://github.com/edgcpp/compiler
+   Maintained by The C++ Alliance (https://edgcpp.org)
+   License: Apache License v2.0 with LLVM Exceptions
+   Copyright: Edison Design Group / The C++ Alliance.
+   The full license text is reproduced in LICENSE.
+
+2. LLVM / Clang (NVPTX target and IR infrastructure)
+   Project: https://github.com/llvm/llvm-project
+   License: Apache License v2.0 with LLVM Exceptions
+   The full license text is reproduced in LICENSE.
+
+Any generated device image (PTX/cubin) and generated host code produced by
+hacc embed portions of hacc's own runtime support and, where applicable,
+portions of the above components. The LLVM Exception permits such embedded
+portions to be redistributed in Object form without complying with Sections
+4(a), 4(b) and 4(d) of the Apache License, Version 2.0.
