@@ -199,6 +199,25 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
   `verify_attrs.sh` 实测通过。
 - **（已细化）CUDA 属性清单**：见 [cuda-attributes.md](cuda-attributes.md)（`coolfe++` ↔ `coolicc` 契约）；
   后续按 S1/S2 补 `cool_restrict`/`cool_launch_bounds`/`cool_forceinline`/`cool_noinline`。
-- 复核二进制 IL 往返：本构建下 `cdisp <file>` 对现有 `*.cil` 报
-  `invalid intermediate language file`（疑似格式/参数不符），待查；当前用 `--il_display`
-  重定向落盘已能满足检索需求。
+- **（已查清）二进制 IL 往返**：`cdisp` 取**位置参数**（`cdisp <il-file>`；依据源码
+  `il_display.c:8920` `file_name = argv[optind]`），二进制 IL 由 `cpfe ... -o <file>` 产出
+  （文件头 `EDG IL file (v7.0)`）。
+  - 无属性源码：`cdisp` 正常（exit 0）。
+  - **含任意 `__attribute__` 的源码：`cdisp` 断言崩溃**（`Internal error: assertion failed at
+    "il_display.c", line 210 in disp_ptr_value`，SIGABRT/exit 134）——**与 `RECORD_UNRECOGNIZED_ATTRIBUTES`
+    无关**（EDG 已知属性如 `aligned`/`unused` 同样触发），属 **EDG `cdisp` 显示路径的 bug**。
+  - 结论：**IL 本身正确**（`--il_display` 与 `verify_attrs.sh` 均能读到属性）；仅 `cdisp` 的
+    `disp_ptr_value` 在「条目指针落在数组基址之前」时断言失败（据 `il_display.c:210` 的
+    `check_assertion(offset >= 0)` 推断）。**当前用 `--il_display` 重定向落盘已满足检索需求**；
+    `cdisp` 崩溃可上报 EDG 上游。
+
+  **最小复现（可直接复制）**：
+
+  ```sh
+  CPFE=build/il_spike/edg/build/gcc/bin/cpfe
+  CDISP=build/il_spike/edg/build/gcc/bin/cdisp
+  BASE=build/il_spike/edg/bases/docker/dev-env/gcc
+  printf 'int __attribute__((unused)) u;\n' > /tmp/t.cpp
+  "$CPFE" --edg_base_dir "$BASE" --g++ -N -o /tmp/t.cil /tmp/t.cpp   # 产出二进制 IL
+  "$CDISP" /tmp/t.cil                                                # 断言崩溃（exit 134）
+  ```
