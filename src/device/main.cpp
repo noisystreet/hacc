@@ -41,15 +41,17 @@ std::string read_all(std::istream& in) {
     return ss.str();
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
+// 命令行选项。
+struct Options {
     std::string input_path;
     std::string output_path;
     std::string emit = "ptx";  // 默认发射 PTX（M1.1）
     bool from_il = false;      // M1.2.2：输入为 EDG 二进制 IL（.cil）
-    hacc::device::NvptxOptions opts;
+    hacc::device::NvptxOptions nvptx;
+};
 
+// 解析命令行。返回 0 表示继续；非 0 为应直接返回的退出码（--help/--version/错误）。
+int parse_args(int argc, char** argv, Options* out) {
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (std::strcmp(a, "--version") == 0) {
@@ -61,15 +63,15 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (std::strncmp(a, "-arch=", 6) == 0) {
-            opts.arch = a + 6;
+            out->nvptx.arch = a + 6;
             continue;
         }
         if (std::strcmp(a, "-o") == 0 && i + 1 < argc) {
-            output_path = argv[++i];
+            out->output_path = argv[++i];
             continue;
         }
         if (std::strcmp(a, "--from-il") == 0) {
-            from_il = true;
+            out->from_il = true;
             continue;
         }
         if (std::strncmp(a, "--emit=", 7) == 0) {
@@ -79,81 +81,80 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx / il-list）\n", mode);
                 return 2;
             }
-            emit = mode;
+            out->emit = mode;
             continue;
         }
         if (a[0] == '-') {
             std::fprintf(stderr, "coolicc: 未知选项 %s\n", a);
             return 2;
         }
-        input_path = a;
+        out->input_path = a;
     }
+    return -1;  // 继续执行
+}
 
-    // M1.2.1：--emit=il-list 从 EDG 二进制 IL 读回并列出 routine。
-    if (emit == "il-list") {
-        if (input_path.empty()) {
-            std::fprintf(stderr, "coolicc: --emit=il-list 需要输入 .cil 文件\n");
-            return 2;
-        }
-        std::vector<hacc::device::IlRoutine> routines;
-        std::string err;
-        if (!hacc::device::list_routines(input_path, &routines, &err)) {
-            std::fprintf(stderr, "coolicc: 读回 IL 失败: %s\n", err.c_str());
-            return 1;
-        }
-        std::string out_text;
-        for (const auto& r : routines) {
-            out_text += r.name;
-            if (r.is_kernel) {
-                out_text += "  [kernel]";
-            }
-            out_text += '\n';
-        }
-        if (output_path.empty()) {
-            std::fwrite(out_text.data(), 1, out_text.size(), stdout);
-        } else {
-            std::ofstream out(output_path, std::ios::binary);
-            if (!out) {
-                std::fprintf(stderr, "coolicc: 无法写入 %s\n", output_path.c_str());
-                return 1;
-            }
-            out << out_text;
-        }
-        return 0;
+// 把文本写入 output_path（空则 stdout）。成功返回 true。
+bool write_output(const std::string& text, const std::string& output_path) {
+    if (output_path.empty()) {
+        std::fwrite(text.data(), 1, text.size(), stdout);
+        return true;
     }
-
-    // M1.2.2：--from-il 输入为 EDG 二进制 IL（.cil），先翻译为 LLVM IR 再发射。
-    if (from_il) {
-        if (input_path.empty()) {
-            std::fprintf(stderr, "coolicc: --from-il 需要输入 .cil 文件\n");
-            return 2;
-        }
-        std::string ptx;
-        std::string err;
-        if (!hacc::device::emit_ptx_from_il(input_path, opts, &ptx, &err)) {
-            std::fprintf(stderr, "coolicc: IL → PTX 失败: %s\n", err.c_str());
-            return 1;
-        }
-        if (output_path.empty()) {
-            std::fwrite(ptx.data(), 1, ptx.size(), stdout);
-        } else {
-            std::ofstream out(output_path, std::ios::binary);
-            if (!out) {
-                std::fprintf(stderr, "coolicc: 无法写入 %s\n", output_path.c_str());
-                return 1;
-            }
-            out << ptx;
-        }
-        return 0;
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out) {
+        std::fprintf(stderr, "coolicc: 无法写入 %s\n", output_path.c_str());
+        return false;
     }
+    out << text;
+    return true;
+}
 
+// M1.2.1：--emit=il-list 从 EDG 二进制 IL 读回并列出 routine。
+int run_il_list(const Options& o) {
+    if (o.input_path.empty()) {
+        std::fprintf(stderr, "coolicc: --emit=il-list 需要输入 .cil 文件\n");
+        return 2;
+    }
+    std::vector<hacc::device::IlRoutine> routines;
+    std::string err;
+    if (!hacc::device::list_routines(o.input_path, &routines, &err)) {
+        std::fprintf(stderr, "coolicc: 读回 IL 失败: %s\n", err.c_str());
+        return 1;
+    }
+    std::string out_text;
+    for (const auto& r : routines) {
+        out_text += r.name;
+        if (r.is_kernel) {
+            out_text += "  [kernel]";
+        }
+        out_text += '\n';
+    }
+    return write_output(out_text, o.output_path) ? 0 : 1;
+}
+
+// M1.2.2：--from-il 输入为 EDG 二进制 IL（.cil），先翻译为 LLVM IR 再发射。
+int run_from_il(const Options& o) {
+    if (o.input_path.empty()) {
+        std::fprintf(stderr, "coolicc: --from-il 需要输入 .cil 文件\n");
+        return 2;
+    }
+    std::string ptx;
+    std::string err;
+    if (!hacc::device::emit_ptx_from_il(o.input_path, o.nvptx, &ptx, &err)) {
+        std::fprintf(stderr, "coolicc: IL → PTX 失败: %s\n", err.c_str());
+        return 1;
+    }
+    return write_output(ptx, o.output_path) ? 0 : 1;
+}
+
+// M1.1：从文件/stdin 读入 LLVM IR 文本并发射 PTX。
+int run_emit_ptx(const Options& o) {
     std::string ir;
-    if (input_path.empty()) {
+    if (o.input_path.empty()) {
         ir = read_all(std::cin);
     } else {
-        std::ifstream in(input_path, std::ios::binary);
+        std::ifstream in(o.input_path, std::ios::binary);
         if (!in) {
-            std::fprintf(stderr, "coolicc: 无法打开输入 %s\n", input_path.c_str());
+            std::fprintf(stderr, "coolicc: 无法打开输入 %s\n", o.input_path.c_str());
             return 1;
         }
         ir = read_all(in);
@@ -161,20 +162,27 @@ int main(int argc, char** argv) {
 
     std::string ptx;
     std::string err;
-    if (!hacc::device::emit_ptx(ir, opts, &ptx, &err)) {
+    if (!hacc::device::emit_ptx(ir, o.nvptx, &ptx, &err)) {
         std::fprintf(stderr, "coolicc: 发射 PTX 失败: %s\n", err.c_str());
         return 1;
     }
+    return write_output(ptx, o.output_path) ? 0 : 1;
+}
 
-    if (output_path.empty()) {
-        std::fwrite(ptx.data(), 1, ptx.size(), stdout);
-    } else {
-        std::ofstream out(output_path, std::ios::binary);
-        if (!out) {
-            std::fprintf(stderr, "coolicc: 无法写入 %s\n", output_path.c_str());
-            return 1;
-        }
-        out << ptx;
+}  // namespace
+
+int main(int argc, char** argv) {
+    Options o;
+    const int parse_rc = parse_args(argc, argv, &o);
+    if (parse_rc >= 0) {
+        return parse_rc;
     }
-    return 0;
+
+    if (o.emit == "il-list") {
+        return run_il_list(o);
+    }
+    if (o.from_il) {
+        return run_from_il(o);
+    }
+    return run_emit_ptx(o);
 }

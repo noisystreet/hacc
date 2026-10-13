@@ -7,11 +7,18 @@ CMAKE ?= cmake
 CTEST ?= ctest
 CLANG_FORMAT ?= clang-format
 CLANG_TIDY ?= clang-tidy
+LIZARD ?= lizard
+
+# lizard 阈值（见 whitelizard.txt 的历史债务白名单）
+CCN_THRESHOLD ?= 15
+FUNC_LENGTH_THRESHOLD ?= 200
+LIZARD_PATHS := src include tests
+LIZARD_WHITELIST := whitelizard.txt
 
 SRC_DIRS := src tests samples include
 FMT_FILES := $(shell find $(SRC_DIRS) -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \) 2>/dev/null)
 
-.PHONY: all configure build test fmt fmt-check lint check clean
+.PHONY: all configure build test fmt fmt-check lint ccn check clean
 
 all: build
 
@@ -41,7 +48,15 @@ lint: configure
 		$(CLANG_TIDY) -p $(BUILD_DIR) $(FMT_FILES) || \
 		echo "clang-tidy not found; skipping"
 
-check: fmt-check build test
+# 圈复杂度（CCN）与函数长度门禁；历史债务见 $(LIZARD_WHITELIST)。
+ccn:
+	@command -v $(LIZARD) >/dev/null 2>&1 && \
+		$(LIZARD) $(LIZARD_PATHS) -l cpp \
+			-C $(CCN_THRESHOLD) -L $(FUNC_LENGTH_THRESHOLD) \
+			-W $(LIZARD_WHITELIST) -w || \
+		echo "lizard not found; skipping"
+
+check: fmt-check ccn build test
 
 clean:
 	rm -rf $(BUILD_DIR)

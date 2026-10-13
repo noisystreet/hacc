@@ -35,16 +35,36 @@ std::string stem_of(const std::string& path) {
     return (dot == std::string::npos) ? base : base.substr(0, dot);
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    hacc::frontend::EdgInvokeOptions opts;
+// 命令行选项。
+struct Options {
+    hacc::frontend::EdgInvokeOptions edg;
     std::string input_path;
     std::string il_output;   // 显式 -o
     std::string il_text;     // 显式 --emit-il-text=...
     bool want_text = false;  // 是否产出文本（默认 true）
     bool text_explicit = false;
+};
 
+// 处理需要单个值的选项（-o / --cpfe / --edg-base-dir）。
+// 命中则消费下一个参数并返回 true；未命中返回 false。
+bool take_value_option(const char* a, int* i, int argc, char** argv, Options* out) {
+    if (std::strcmp(a, "-o") == 0 && *i + 1 < argc) {
+        out->il_output = argv[++(*i)];
+        return true;
+    }
+    if (std::strcmp(a, "--cpfe") == 0 && *i + 1 < argc) {
+        out->edg.cpfe_path = argv[++(*i)];
+        return true;
+    }
+    if (std::strcmp(a, "--edg-base-dir") == 0 && *i + 1 < argc) {
+        out->edg.edg_base_dir = argv[++(*i)];
+        return true;
+    }
+    return false;
+}
+
+// 解析命令行。返回 0 表示继续；非 0 为应直接返回的退出码（--help/--version/错误）。
+int parse_args(int argc, char** argv, Options* out) {
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (std::strcmp(a, "--version") == 0) {
@@ -55,59 +75,65 @@ int main(int argc, char** argv) {
             std::fputs(kUsage, stdout);
             return 0;
         }
-        if (std::strcmp(a, "-o") == 0 && i + 1 < argc) {
-            il_output = argv[++i];
-            continue;
-        }
-        if (std::strcmp(a, "--cpfe") == 0 && i + 1 < argc) {
-            opts.cpfe_path = argv[++i];
-            continue;
-        }
-        if (std::strcmp(a, "--edg-base-dir") == 0 && i + 1 < argc) {
-            opts.edg_base_dir = argv[++i];
+        if (take_value_option(a, &i, argc, argv, out)) {
             continue;
         }
         if (std::strncmp(a, "--emit-il-text", 14) == 0) {
-            want_text = true;
-            text_explicit = true;
+            out->want_text = true;
+            out->text_explicit = true;
             if (a[14] == '=') {
-                il_text = a + 15;
+                out->il_text = a + 15;
             }
             continue;
         }
         if ((std::strcmp(a, "-I") == 0 || std::strcmp(a, "-D") == 0) && i + 1 < argc) {
-            opts.extra_args.push_back(a);
-            opts.extra_args.push_back(argv[++i]);
+            out->edg.extra_args.push_back(a);
+            out->edg.extra_args.push_back(argv[++i]);
             continue;
         }
         if (a[0] == '-') {
             std::fprintf(stderr, "coolfe++: 未知选项 %s\n", a);
             return 2;
         }
-        input_path = a;
+        out->input_path = a;
+    }
+    return -1;  // 继续执行
+}
+
+// 推导默认输出名（方案 §7.1 方案 ②）：二进制 IL + 文本 IL。
+void resolve_outputs(Options* o) {
+    if (o->il_output.empty()) {
+        o->il_output = stem_of(o->input_path) + ".cil";
+    }
+    if (!o->text_explicit) {
+        o->want_text = true;
+    }
+    if (o->want_text && o->il_text.empty()) {
+        o->il_text = stem_of(o->input_path) + ".il.txt";
+    }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    Options o;
+    const int parse_rc = parse_args(argc, argv, &o);
+    if (parse_rc >= 0) {
+        return parse_rc;
     }
 
-    if (input_path.empty()) {
+    if (o.input_path.empty()) {
         std::fprintf(stderr, "coolfe++: 缺少输入文件。用 -h 查看用法。\n");
         return 2;
     }
 
-    // 默认产出：二进制 IL + 文本 IL（方案 §7.1 方案 ②）。
-    if (il_output.empty()) {
-        il_output = stem_of(input_path) + ".cil";
-    }
-    if (!text_explicit) {
-        want_text = true;
-    }
-    if (want_text && il_text.empty()) {
-        il_text = stem_of(input_path) + ".il.txt";
-    }
+    resolve_outputs(&o);
 
-    opts.input_path = input_path;
-    opts.il_output_path = il_output;
-    opts.il_text_path = want_text ? il_text : std::string();
+    o.edg.input_path = o.input_path;
+    o.edg.il_output_path = o.il_output;
+    o.edg.il_text_path = o.want_text ? o.il_text : std::string();
 
-    hacc::frontend::EdgInvokeResult r = hacc::frontend::invoke_cpfe(opts);
+    hacc::frontend::EdgInvokeResult r = hacc::frontend::invoke_cpfe(o.edg);
     if (!r.stderr_text.empty()) {
         std::fputs(r.stderr_text.c_str(), stderr);
     }
@@ -120,9 +146,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::fprintf(stderr, "coolfe++: IL → %s", il_output.c_str());
-    if (want_text) {
-        std::fprintf(stderr, "（文本 %s）", il_text.c_str());
+    std::fprintf(stderr, "coolfe++: IL → %s", o.il_output.c_str());
+    if (o.want_text) {
+        std::fprintf(stderr, "（文本 %s）", o.il_text.c_str());
     }
     std::fputc('\n', stderr);
     return 0;

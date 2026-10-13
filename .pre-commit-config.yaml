@@ -15,3 +15,9 @@ repos:
         entry: make check
         language: system
         pass_filenames: false
+
+      - id: ccn-check
+        name: ccn check (lizard)
+        entry: make ccn
+        language: system
+        pass_filenames: false
