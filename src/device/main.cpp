@@ -50,16 +50,36 @@ struct Options {
     hacc::device::NvptxOptions nvptx;
 };
 
+// 处理立即返回的选项（--version / -h / --help）。
+// 命中则打印并返回 true（调用方应 return 0）。
+bool handle_immediate_option(const char* a) {
+    if (std::strcmp(a, "--version") == 0) {
+        std::printf("coolicc %s\n", hacc::version());
+        return true;
+    }
+    if (std::strcmp(a, "-h") == 0 || std::strcmp(a, "--help") == 0) {
+        std::fputs(kUsage, stdout);
+        return true;
+    }
+    return false;
+}
+
+// 解析 --emit=<mode>。合法返回 true 并写 *emit_out；非法打印错误并返回 false。
+bool parse_emit_mode(const char* mode, std::string* emit_out) {
+    // 一期支持 ptx（M1.1）与 il-list（M1.2.1）；cubin 属后续阶段（M6）。
+    if (std::strcmp(mode, "ptx") != 0 && std::strcmp(mode, "il-list") != 0) {
+        std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx / il-list）\n", mode);
+        return false;
+    }
+    *emit_out = mode;
+    return true;
+}
+
 // 解析命令行。返回 0 表示继续；非 0 为应直接返回的退出码（--help/--version/错误）。
 int parse_args(int argc, char** argv, Options* out) {
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
-        if (std::strcmp(a, "--version") == 0) {
-            std::printf("coolicc %s\n", hacc::version());
-            return 0;
-        }
-        if (std::strcmp(a, "-h") == 0 || std::strcmp(a, "--help") == 0) {
-            std::fputs(kUsage, stdout);
+        if (handle_immediate_option(a)) {
             return 0;
         }
         if (std::strncmp(a, "-arch=", 6) == 0) {
@@ -75,13 +95,9 @@ int parse_args(int argc, char** argv, Options* out) {
             continue;
         }
         if (std::strncmp(a, "--emit=", 7) == 0) {
-            // 一期支持 ptx（M1.1）与 il-list（M1.2.1）；cubin 属后续阶段（M6）。
-            const char* mode = a + 7;
-            if (std::strcmp(mode, "ptx") != 0 && std::strcmp(mode, "il-list") != 0) {
-                std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx / il-list）\n", mode);
+            if (!parse_emit_mode(a + 7, &out->emit)) {
                 return 2;
             }
-            out->emit = mode;
             continue;
         }
         if (a[0] == '-') {

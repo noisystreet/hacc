@@ -114,23 +114,80 @@ a_scope_ptr read_file_scope(const std::string& cil_path, FILE** file_out, std::s
     return file_scope;
 }
 
-// 整型 kind → LLVM 整型类型。
-llvm::Type* map_integer_type(a_type_ptr t, llvm::LLVMContext& ctx) {
-    switch (t->variant.integer.int_kind) {
-        case ik_char:
-        case ik_signed_char:
-        case ik_unsigned_char:
-            return llvm::Type::getInt8Ty(ctx);
-        case ik_short:
-        case ik_unsigned_short:
-            return llvm::Type::getInt16Ty(ctx);
-        case ik_int:
-        case ik_unsigned_int:
-            return llvm::Type::getInt32Ty(ctx);
+// 是否为 64 位整型 kind。
+bool is_64bit_integer_kind(an_integer_kind kind) {
+    switch (kind) {
         case ik_long:
         case ik_unsigned_long:
         case ik_long_long:
         case ik_unsigned_long_long:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 是否为 32 位整型 kind。
+bool is_32bit_integer_kind(an_integer_kind kind) {
+    switch (kind) {
+        case ik_int:
+        case ik_unsigned_int:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 是否为 16 位整型 kind。
+bool is_16bit_integer_kind(an_integer_kind kind) {
+    switch (kind) {
+        case ik_short:
+        case ik_unsigned_short:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 是否为 8 位整型 kind。
+bool is_8bit_integer_kind(an_integer_kind kind) {
+    switch (kind) {
+        case ik_char:
+        case ik_signed_char:
+        case ik_unsigned_char:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 整型 kind → 位宽（bit）。未覆盖的 kind 返回 0。
+unsigned edg_integer_bit_width(an_integer_kind kind) {
+    if (is_64bit_integer_kind(kind)) {
+        return 64;
+    }
+    if (is_32bit_integer_kind(kind)) {
+        return 32;
+    }
+    if (is_16bit_integer_kind(kind)) {
+        return 16;
+    }
+    if (is_8bit_integer_kind(kind)) {
+        return 8;
+    }
+    return 0;
+}
+
+// 整型 kind → LLVM 整型类型。
+llvm::Type* map_integer_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    switch (edg_integer_bit_width(t->variant.integer.int_kind)) {
+        case 8:
+            return llvm::Type::getInt8Ty(ctx);
+        case 16:
+            return llvm::Type::getInt16Ty(ctx);
+        case 32:
+            return llvm::Type::getInt32Ty(ctx);
+        case 64:
             return llvm::Type::getInt64Ty(ctx);
         default:
             fail("不支持的整型 kind（M1.2.3 仅覆盖 8/16/32/64 位）");
@@ -285,27 +342,26 @@ llvm::Value* translate_assign(an_expr_node_ptr operands, KernelContext& kc) {
     return val;
 }
 
-// 二元算术（+ - * / %）：按操作数类型选浮点/整型指令。
-llvm::Value* translate_arith(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
-    an_expr_node_ptr a = binary_operands(expr->variant.operation.operands, "二元算术运算符");
-    an_expr_node_ptr b = a->next;
-    llvm::Value* va = translate_expr(a, kc);
-    llvm::Value* vb = translate_expr(b, kc);
-    const bool is_fp = expr->type != nullptr && expr->type->kind == tk_float;
-    if (is_fp) {
-        switch (op) {
-            case eok_add:
-                return kc.builder.CreateFAdd(va, vb);
-            case eok_subtract:
-                return kc.builder.CreateFSub(va, vb);
-            case eok_multiply:
-                return kc.builder.CreateFMul(va, vb);
-            case eok_divide:
-                return kc.builder.CreateFDiv(va, vb);
-            default:
-                fail("浮点不支持取余（M1.2.3）");
-        }
+// 浮点二元算术（+ - * /）；取余不支持。
+llvm::Value* emit_fp_arith(an_expr_operator_kind op, llvm::Value* va, llvm::Value* vb,
+                           KernelContext& kc) {
+    switch (op) {
+        case eok_add:
+            return kc.builder.CreateFAdd(va, vb);
+        case eok_subtract:
+            return kc.builder.CreateFSub(va, vb);
+        case eok_multiply:
+            return kc.builder.CreateFMul(va, vb);
+        case eok_divide:
+            return kc.builder.CreateFDiv(va, vb);
+        default:
+            fail("浮点不支持取余（M1.2.3）");
     }
+}
+
+// 整型二元算术（+ - * / %）；除法/取余按符号性选指令。
+llvm::Value* emit_int_arith(an_expr_operator_kind op, bool is_unsigned, llvm::Value* va,
+                            llvm::Value* vb, KernelContext& kc) {
     switch (op) {
         case eok_add:
             return kc.builder.CreateAdd(va, vb);
@@ -314,12 +370,23 @@ llvm::Value* translate_arith(an_expr_operator_kind op, an_expr_node_ptr expr, Ke
         case eok_multiply:
             return kc.builder.CreateMul(va, vb);
         case eok_divide:
-            return is_unsigned_integer(expr->type) ? kc.builder.CreateUDiv(va, vb)
-                                                   : kc.builder.CreateSDiv(va, vb);
+            return is_unsigned ? kc.builder.CreateUDiv(va, vb) : kc.builder.CreateSDiv(va, vb);
         default:
-            return is_unsigned_integer(expr->type) ? kc.builder.CreateURem(va, vb)
-                                                   : kc.builder.CreateSRem(va, vb);
+            return is_unsigned ? kc.builder.CreateURem(va, vb) : kc.builder.CreateSRem(va, vb);
     }
+}
+
+// 二元算术（+ - * / %）：按操作数类型选浮点/整型指令。
+llvm::Value* translate_arith(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr a = binary_operands(expr->variant.operation.operands, "二元算术运算符");
+    an_expr_node_ptr b = a->next;
+    llvm::Value* va = translate_expr(a, kc);
+    llvm::Value* vb = translate_expr(b, kc);
+    const bool is_fp = expr->type != nullptr && expr->type->kind == tk_float;
+    if (is_fp) {
+        return emit_fp_arith(op, va, vb, kc);
+    }
+    return emit_int_arith(op, is_unsigned_integer(expr->type), va, vb, kc);
 }
 
 // 浮点比较指令。
@@ -341,12 +408,9 @@ llvm::Value* emit_fp_compare(an_expr_operator_kind op, llvm::Value* va, llvm::Va
     }
 }
 
-// 按操作数类型（浮点/有符号/无符号）发射比较指令。
-llvm::Value* emit_compare(an_expr_operator_kind op, bool is_fp, bool is_unsigned, llvm::Value* va,
-                          llvm::Value* vb, KernelContext& kc) {
-    if (is_fp) {
-        return emit_fp_compare(op, va, vb, kc);
-    }
+// 整型比较指令（按有符号/无符号选）。
+llvm::Value* emit_int_compare(an_expr_operator_kind op, bool is_unsigned, llvm::Value* va,
+                              llvm::Value* vb, KernelContext& kc) {
     switch (op) {
         case eok_lt:
             return is_unsigned ? kc.builder.CreateICmpULT(va, vb)
@@ -365,6 +429,15 @@ llvm::Value* emit_compare(an_expr_operator_kind op, bool is_fp, bool is_unsigned
         default:
             return kc.builder.CreateICmpNE(va, vb);
     }
+}
+
+// 按操作数类型（浮点/有符号/无符号）发射比较指令。
+llvm::Value* emit_compare(an_expr_operator_kind op, bool is_fp, bool is_unsigned, llvm::Value* va,
+                          llvm::Value* vb, KernelContext& kc) {
+    if (is_fp) {
+        return emit_fp_compare(op, va, vb, kc);
+    }
+    return emit_int_compare(op, is_unsigned, va, vb, kc);
 }
 
 // 比较（< <= > >= == !=）：按操作数类型选浮点/有符号/无符号指令。
@@ -640,6 +713,36 @@ a_variable_ptr nth_parameter(a_scope_ptr body_scope, unsigned idx) {
     return nullptr;
 }
 
+// 从 routine 类型构建 LLVM 函数类型（返回类型 + 参数类型列表）。
+llvm::FunctionType* make_kernel_function_type(a_type_ptr fn_type, llvm::LLVMContext& ctx) {
+    llvm::Type* ret_ty = map_type(fn_type->variant.routine.return_type, ctx);
+    std::vector<llvm::Type*> param_tys;
+    a_routine_type_supplement_ptr supp = fn_type->variant.routine.extra_info;
+    if (supp != nullptr) {
+        for (a_param_type_ptr p = supp->param_type_list; p != nullptr; p = p->next) {
+            param_tys.push_back(map_type(p->type, ctx));
+        }
+    }
+    return llvm::FunctionType::get(ret_ty, param_tys, false);
+}
+
+// 为每个参数建 alloca 并 store 入参（便于取址与赋值），
+// 并把 EDG 参数变量与 alloca 关联（按声明顺序）。
+void bind_parameters(llvm::Function* fn, a_scope_ptr body_scope, KernelContext& kc) {
+    unsigned idx = 0;
+    for (llvm::Argument& arg : fn->args()) {
+        llvm::AllocaInst* slot = kc.builder.CreateAlloca(arg.getType(), nullptr, arg.getName());
+        kc.builder.CreateStore(&arg, slot);
+        if (body_scope != nullptr) {
+            a_variable_ptr pv = nth_parameter(body_scope, idx);
+            if (pv != nullptr) {
+                kc.locals[pv] = slot;
+            }
+        }
+        ++idx;
+    }
+}
+
 // 为内核建 Function：参数 + 函数体。
 llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
     llvm::LLVMContext& ctx = module.getContext();
@@ -653,17 +756,7 @@ llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
     if (fn_type == nullptr || fn_type->kind != tk_routine) {
         fail("内核的 routine 类型无效");
     }
-    llvm::Type* ret_ty = map_type(fn_type->variant.routine.return_type, ctx);
-
-    std::vector<llvm::Type*> param_tys;
-    a_routine_type_supplement_ptr supp = fn_type->variant.routine.extra_info;
-    if (supp != nullptr) {
-        for (a_param_type_ptr p = supp->param_type_list; p != nullptr; p = p->next) {
-            param_tys.push_back(map_type(p->type, ctx));
-        }
-    }
-
-    llvm::FunctionType* llvm_fn_ty = llvm::FunctionType::get(ret_ty, param_tys, false);
+    llvm::FunctionType* llvm_fn_ty = make_kernel_function_type(fn_type, ctx);
     llvm::Function* fn =
         llvm::Function::Create(llvm_fn_ty, llvm::GlobalValue::ExternalLinkage, name, &module);
     fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
@@ -680,20 +773,7 @@ llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
         body_scope = find_function_scope(r);
     }
 
-    // 参数：为每个参数建 alloca 并 store 入参（便于取址与赋值）。
-    unsigned idx = 0;
-    for (llvm::Argument& arg : fn->args()) {
-        llvm::AllocaInst* slot = kc.builder.CreateAlloca(arg.getType(), nullptr, arg.getName());
-        kc.builder.CreateStore(&arg, slot);
-        // 把 EDG 参数变量与 alloca 关联（按声明顺序）。
-        if (body_scope != nullptr) {
-            a_variable_ptr pv = nth_parameter(body_scope, idx);
-            if (pv != nullptr) {
-                kc.locals[pv] = slot;
-            }
-        }
-        ++idx;
-    }
+    bind_parameters(fn, body_scope, kc);
 
     // 翻译函数体顶层 block。
     if (body_scope != nullptr && body_scope->assoc_block != nullptr) {

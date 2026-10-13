@@ -28,6 +28,54 @@ std::string normalize_arch(const std::string& arch) {
 
 }  // namespace
 
+// 解析 LLVM IR 文本为 Module；失败时把诊断写入 *err_out 并返回 nullptr。
+std::unique_ptr<llvm::Module> parse_ir_module(const std::string& llvm_ir, llvm::LLVMContext& ctx,
+                                              std::string* err_out) {
+    llvm::SMDiagnostic diag;
+    std::unique_ptr<llvm::Module> mod =
+        llvm::parseIR(llvm::MemoryBufferRef(llvm::StringRef(llvm_ir), "<hacc-ir>"), diag, ctx);
+    if (!mod && err_out) {
+        std::string msg;
+        llvm::raw_string_ostream os(msg);
+        diag.print("coolicc", os);
+        *err_out = os.str();
+    }
+    return mod;
+}
+
+// 为 nvptx64-nvidia-cuda 创建目标机；失败时写 *err_out 并返回 nullptr。
+std::unique_ptr<llvm::TargetMachine> make_nvptx_target_machine(const std::string& triple,
+                                                               const std::string& cpu,
+                                                               std::string* err_out) {
+    std::string triple_err;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, triple_err);
+    if (target == nullptr) {
+        if (err_out) *err_out = "lookupTarget failed: " + triple_err;
+        return nullptr;
+    }
+    llvm::TargetOptions target_opts;
+    std::string features;
+    auto tm = std::unique_ptr<llvm::TargetMachine>(
+        target->createTargetMachine(triple, cpu, features, target_opts, llvm::Reloc::PIC_));
+    if (!tm && err_out) *err_out = "createTargetMachine failed for cpu=" + cpu;
+    return tm;
+}
+
+// 用目标机把 Module 发射为 PTX 文本；失败时写 *err_out 并返回 false。
+bool emit_ptx_from_module(llvm::Module& mod, llvm::TargetMachine& tm, std::string* ptx_out,
+                          std::string* err_out) {
+    llvm::SmallString<0> ptx;
+    llvm::raw_svector_ostream ptx_os(ptx);
+    llvm::legacy::PassManager pm;
+    if (tm.addPassesToEmitFile(pm, ptx_os, nullptr, llvm::CodeGenFileType::AssemblyFile)) {
+        if (err_out) *err_out = "addPassesToEmitFile failed (no asm printer for target)";
+        return false;
+    }
+    pm.run(mod);
+    if (ptx_out) *ptx_out = std::string(ptx.str());
+    return true;
+}
+
 bool emit_ptx(const std::string& llvm_ir, const NvptxOptions& opts, std::string* ptx_out,
               std::string* err_out) {
     // 初始化 NVPTX 目标（幂等；多次调用安全）。
@@ -37,37 +85,17 @@ bool emit_ptx(const std::string& llvm_ir, const NvptxOptions& opts, std::string*
     LLVMInitializeNVPTXAsmPrinter();
 
     llvm::LLVMContext ctx;
-    llvm::SMDiagnostic diag;
-    std::unique_ptr<llvm::Module> mod =
-        llvm::parseIR(llvm::MemoryBufferRef(llvm::StringRef(llvm_ir), "<hacc-ir>"), diag, ctx);
+    std::unique_ptr<llvm::Module> mod = parse_ir_module(llvm_ir, ctx, err_out);
     if (!mod) {
-        if (err_out) {
-            std::string msg;
-            llvm::raw_string_ostream os(msg);
-            diag.print("coolicc", os);
-            *err_out = os.str();
-        }
         return false;
     }
 
     // 目标三元组：nvptx64-nvidia-cuda（方案 §6.1）。
     mod->setTargetTriple("nvptx64-nvidia-cuda");
 
-    std::string triple_err;
-    const llvm::Target* target =
-        llvm::TargetRegistry::lookupTarget(mod->getTargetTriple(), triple_err);
-    if (target == nullptr) {
-        if (err_out) *err_out = "lookupTarget failed: " + triple_err;
-        return false;
-    }
-
-    llvm::TargetOptions target_opts;
     std::string cpu = normalize_arch(opts.arch);
-    std::string features;
-    auto tm = std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(
-        mod->getTargetTriple(), cpu, features, target_opts, llvm::Reloc::PIC_));
+    auto tm = make_nvptx_target_machine(mod->getTargetTriple(), cpu, err_out);
     if (!tm) {
-        if (err_out) *err_out = "createTargetMachine failed for cpu=" + cpu;
         return false;
     }
     mod->setDataLayout(tm->createDataLayout());
@@ -77,17 +105,7 @@ bool emit_ptx(const std::string& llvm_ir, const NvptxOptions& opts, std::string*
         return false;
     }
 
-    llvm::SmallString<0> ptx;
-    llvm::raw_svector_ostream ptx_os(ptx);
-    llvm::legacy::PassManager pm;
-    if (tm->addPassesToEmitFile(pm, ptx_os, nullptr, llvm::CodeGenFileType::AssemblyFile)) {
-        if (err_out) *err_out = "addPassesToEmitFile failed (no asm printer for target)";
-        return false;
-    }
-    pm.run(*mod);
-
-    if (ptx_out) *ptx_out = std::string(ptx.str());
-    return true;
+    return emit_ptx_from_module(*mod, *tm, ptx_out, err_out);
 }
 
 }  // namespace hacc::device

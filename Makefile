@@ -10,7 +10,7 @@ CLANG_TIDY ?= clang-tidy
 LIZARD ?= lizard
 
 # lizard 阈值（见 whitelizard.txt 的历史债务白名单）
-CCN_THRESHOLD ?= 15
+CCN_THRESHOLD ?= 10
 FUNC_LENGTH_THRESHOLD ?= 200
 LIZARD_PATHS := src include tests
 LIZARD_WHITELIST := whitelizard.txt

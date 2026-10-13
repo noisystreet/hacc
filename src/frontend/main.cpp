@@ -63,6 +63,29 @@ bool take_value_option(const char* a, int* i, int argc, char** argv, Options* ou
     return false;
 }
 
+// 处理 --emit-il-text[=F]。命中返回 true。
+bool take_emit_il_text_option(const char* a, Options* out) {
+    if (std::strncmp(a, "--emit-il-text", 14) != 0) {
+        return false;
+    }
+    out->want_text = true;
+    out->text_explicit = true;
+    if (a[14] == '=') {
+        out->il_text = a + 15;
+    }
+    return true;
+}
+
+// 处理 -I <dir> / -D <macro>（透传给 cpfe）。命中返回 true。
+bool take_include_option(const char* a, int* i, int argc, char** argv, Options* out) {
+    if ((std::strcmp(a, "-I") != 0 && std::strcmp(a, "-D") != 0) || *i + 1 >= argc) {
+        return false;
+    }
+    out->edg.extra_args.push_back(a);
+    out->edg.extra_args.push_back(argv[++(*i)]);
+    return true;
+}
+
 // 解析命令行。返回 0 表示继续；非 0 为应直接返回的退出码（--help/--version/错误）。
 int parse_args(int argc, char** argv, Options* out) {
     for (int i = 1; i < argc; ++i) {
@@ -78,17 +101,10 @@ int parse_args(int argc, char** argv, Options* out) {
         if (take_value_option(a, &i, argc, argv, out)) {
             continue;
         }
-        if (std::strncmp(a, "--emit-il-text", 14) == 0) {
-            out->want_text = true;
-            out->text_explicit = true;
-            if (a[14] == '=') {
-                out->il_text = a + 15;
-            }
+        if (take_emit_il_text_option(a, out)) {
             continue;
         }
-        if ((std::strcmp(a, "-I") == 0 || std::strcmp(a, "-D") == 0) && i + 1 < argc) {
-            out->edg.extra_args.push_back(a);
-            out->edg.extra_args.push_back(argv[++i]);
+        if (take_include_option(a, &i, argc, argv, out)) {
             continue;
         }
         if (a[0] == '-') {

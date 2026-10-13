@@ -93,6 +93,68 @@ std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts, bool for_
     return args;
 }
 
+// 子进程：把 stderr 重定向到管道写端；若 stdout_path 非空，stdout 重定向到该文件。
+// 任一步失败返回 false（调用方应 _exit(127)）。
+bool setup_child_stdio(int pipe_write_fd, const std::string& stdout_path) {
+    if (dup2(pipe_write_fd, STDERR_FILENO) < 0) {
+        return false;
+    }
+    if (stdout_path.empty()) {
+        return true;
+    }
+    FILE* f = std::fopen(stdout_path.c_str(), "wb");
+    if (f == nullptr) {
+        return false;
+    }
+    const bool ok = dup2(fileno(f), STDOUT_FILENO) >= 0;
+    std::fclose(f);
+    return ok;
+}
+
+// 子进程：exec cpfe（不返回；失败时打印并 _exit(127)）。
+[[noreturn]] void exec_cpfe(const std::string& cpfe, const std::vector<std::string>& args) {
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 2);
+    argv.push_back(const_cast<char*>(cpfe.c_str()));
+    for (const auto& a : args) {
+        argv.push_back(const_cast<char*>(a.c_str()));
+    }
+    argv.push_back(nullptr);
+    execvp(cpfe.c_str(), argv.data());
+    // exec 失败。
+    std::fprintf(stderr, "coolfe++: 无法执行 %s: %s\n", cpfe.c_str(), std::strerror(errno));
+    _exit(127);
+}
+
+// 父进程：读子进程 stderr 到 *stderr_out，等待退出并解析状态。
+// 返回 true 表示 cpfe 正常退出（exit 0）。
+bool collect_child_result(int pipe_read_fd, pid_t pid, std::string* stderr_out, int* exit_code_out,
+                          std::string* error_out) {
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipe_read_fd, buf, sizeof(buf))) > 0) {
+        stderr_out->append(buf, static_cast<size_t>(n));
+    }
+    close(pipe_read_fd);
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        *error_out = std::string("waitpid 失败: ") + std::strerror(errno);
+        return false;
+    }
+    if (WIFEXITED(status)) {
+        *exit_code_out = WEXITSTATUS(status);
+        return *exit_code_out == 0;
+    }
+    if (WIFSIGNALED(status)) {
+        *exit_code_out = 128 + WTERMSIG(status);
+        *error_out = "cpfe 被信号终止";
+        return false;
+    }
+    *error_out = "cpfe 异常退出";
+    return false;
+}
+
 // 执行一次 cpfe：stderr 收集到 *stderr_out；若 stdout_path 非空，stdout 重定向到该文件。
 // 返回 true 表示 cpfe 正常退出（exit 0）。
 bool run_cpfe_once(const std::string& cpfe, const std::vector<std::string>& args,
@@ -115,61 +177,16 @@ bool run_cpfe_once(const std::string& cpfe, const std::vector<std::string>& args
     if (pid == 0) {
         // 子进程：stderr → 管道；stdout → 文本 IL 文件（若需要）。
         close(pipefd[0]);
-        if (dup2(pipefd[1], STDERR_FILENO) < 0) {
+        if (!setup_child_stdio(pipefd[1], stdout_path)) {
             _exit(127);
         }
         close(pipefd[1]);
-
-        if (!stdout_path.empty()) {
-            FILE* f = std::fopen(stdout_path.c_str(), "wb");
-            if (f == nullptr) {
-                _exit(127);
-            }
-            if (dup2(fileno(f), STDOUT_FILENO) < 0) {
-                _exit(127);
-            }
-            std::fclose(f);
-        }
-
-        std::vector<char*> argv;
-        argv.reserve(args.size() + 2);
-        argv.push_back(const_cast<char*>(cpfe.c_str()));
-        for (const auto& a : args) {
-            argv.push_back(const_cast<char*>(a.c_str()));
-        }
-        argv.push_back(nullptr);
-        execvp(cpfe.c_str(), argv.data());
-        // exec 失败。
-        std::fprintf(stderr, "coolfe++: 无法执行 %s: %s\n", cpfe.c_str(), std::strerror(errno));
-        _exit(127);
+        exec_cpfe(cpfe, args);
     }
 
     // 父进程：读 stderr。
     close(pipefd[1]);
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        stderr_out->append(buf, static_cast<size_t>(n));
-    }
-    close(pipefd[0]);
-
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
-        *error_out = std::string("waitpid 失败: ") + std::strerror(errno);
-        return false;
-    }
-
-    if (WIFEXITED(status)) {
-        *exit_code_out = WEXITSTATUS(status);
-        return *exit_code_out == 0;
-    }
-    if (WIFSIGNALED(status)) {
-        *exit_code_out = 128 + WTERMSIG(status);
-        *error_out = "cpfe 被信号终止";
-        return false;
-    }
-    *error_out = "cpfe 异常退出";
-    return false;
+    return collect_child_result(pipefd[0], pid, stderr_out, exit_code_out, error_out);
 }
 
 EdgInvokeResult invoke_cpfe(const EdgInvokeOptions& opts) {
