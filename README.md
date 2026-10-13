@@ -67,6 +67,7 @@ build/coolicc --emit=ptx -arch=sm_80 tests/golden/device/empty_kernel.ll
 | --- | --- |
 | [compiler-implementation-plan.md](docs/compiler-implementation-plan.md) | 编译器实现方案（主文档）：架构、流水线、目录、里程碑、风险 |
 | [m1.2-il-to-llvm-plan.md](docs/m1.2-il-to-llvm-plan.md) | M1.2 方案：EDG IL → LLVM IR（选型、翻译核心、分步实施） |
+| [edg-il-reference.md](docs/edg-il-reference.md) | EDG IL 表项速查（字段级参考，依据 `il_def.h`） |
 | [ADR 0001](docs/adr/0001-edg-cpp-frontend.md) | 前端采用开源 EDG C++ 前端 |
 | [ADR 0002](docs/adr/0002-llvm-nvptx-device-backend.md) | 设备端走 LLVM IR → NVPTX → PTX |
 | [ADR 0003](docs/adr/0003-host-stub-fatbin-registration.md) | 主机桩 + 内嵌映像注册，`<<<>>>` → `coolLaunchKernel` |
