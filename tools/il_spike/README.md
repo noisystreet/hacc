@@ -14,8 +14,9 @@
 - 许可：Apache-2.0 WITH LLVM-exception
 
 ```sh
-tools/il_spike/fetch_edg.sh            # 稀疏检出 + 构建 cpfe
+tools/il_spike/fetch_edg.sh            # 稀疏检出 + 构建 cpfe（已带 RECORD_UNRECOGNIZED_ATTRIBUTES=1）
 tools/il_spike/run.sh inputs/kernel_probe.cpp   # 导出 IL
+tools/il_spike/verify_attrs.sh         # 验证未知属性是否随 IL 传递（A2 决策 (a)）
 ```
 
 ## 构建要点（`fetch_edg.sh`）
@@ -26,6 +27,9 @@ tools/il_spike/run.sh inputs/kernel_probe.cpp   # 导出 IL
   「Failed to process cmakedef」。
 - CMake：`-G Ninja -DCMAKE_BUILD_TYPE=Debug -DEDG_MACRO_CONF=linux-gcc -DEDG_BUILD_LIB=OFF`
   （`EDG_BUILD_LIB=OFF` 跳过需要 `EDG_BASE` 的运行时库）。
+- **A2 决策 (a)**：额外加 `-DCMAKE_CXX_FLAGS=-DRECORD_UNRECOGNIZED_ATTRIBUTES=1`，
+  让 EDG 把未知/自定义属性记录进 IL。**必须用 `CMAKE_CXX_FLAGS`**——EDG 把 `.c` 源当
+  C++ 编译（`set_source_files_properties(... LANGUAGE CXX)`），`CMAKE_C_FLAGS` 不生效。
 - 产物：`build/il_spike/edg/build/gcc/bin/{cpfe,cpfe-cp,cdisp,eccp,mk_errinfo,...}`。
 
 ## 导出 IL
@@ -158,15 +162,25 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
 - 配套：把「CUDA 属性清单」固定成一份文档/枚举（见下），供 `coolfe++` 前置改写与 `coolicc` 消费对齐。
 - 升级路径：属性清单稳定后，再按 `attribute.c` 的 6 步 recipe 升级到 (b)（届时另开 ADR/方案修订）。
 
-**落地要点（待实现）：**
+**落地（已实现）：**
 
-1. 在 hacc 的 EDG 构建里注入 `RECORD_UNRECOGNIZED_ATTRIBUTES=TRUE`。
+1. `fetch_edg.sh` 已注入 `-DCMAKE_CXX_FLAGS=-DRECORD_UNRECOGNIZED_ATTRIBUTES=1`。
    注意 EDG 把 `.c` 源当 **C++** 编译（`set_source_files_properties(... LANGUAGE CXX)`），
    故须用 **`CMAKE_CXX_FLAGS`**（`CMAKE_C_FLAGS` 不生效）。
 2. 该变量是**全局量**：阶段 B（链接 EDG 前端库）可在运行期置真；阶段 A（调 `edgcpfe`）需构建期定义。
 3. 属性以 `__attribute__((…))` 承载（或由 `coolfe++` 前置改写生成），IL 中表现为
    `file-scope attribute@…`（`kind: unrecognized`、带 `name`/`arguments`），并挂到实体
    `source_corresp.attributes:`。
+4. 验证脚本 `verify_attrs.sh`：对 `inputs/kernel_probe_attr2.cpp` 断言
+   `cool_shared` / `cool_global` / `address_space` 出现在 IL 且存在 `kind: unrecognized` 条目。
+   **实测通过（exit 0）**：
+
+   ```text
+   OK   attribute in IL: cool_shared
+   OK   attribute in IL: cool_global
+   OK   attribute in IL: address_space
+   OK   IL contains 'kind: unrecognized' entries
+   ```
 
 **CUDA 属性清单（初稿，待细化）：**
 
@@ -182,9 +196,9 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
 
 ## 待办（下一步）
 
-- **（已定）(a)/(b) 取舍 = (a)**；据此回写方案 §5.2 / [ADR 0001](../../docs/adr/0001-edg-cpp-frontend.md)
-  （架构文档，需人工批准后修改）。
-- 实现 (a)：在 hacc 的 EDG 构建里注入 `RECORD_UNRECOGNIZED_ATTRIBUTES=TRUE`（用 `CMAKE_CXX_FLAGS`）。
+- **（已定）(a)/(b) 取舍 = (a)**；方案 §5.2 / [ADR 0001](../../docs/adr/0001-edg-cpp-frontend.md) 已回写。
+- **（已实现）(a)**：`fetch_edg.sh` 注入 `RECORD_UNRECOGNIZED_ATTRIBUTES=1`（`CMAKE_CXX_FLAGS`），
+  `verify_attrs.sh` 实测通过。
 - 细化上面的「CUDA 属性清单」，与 `coolfe++` 前置改写、`coolicc` 消费对齐。
 - 复核二进制 IL 往返：本构建下 `cdisp <file>` 对现有 `*.cil` 报
   `invalid intermediate language file`（疑似格式/参数不符），待查；当前用 `--il_display`

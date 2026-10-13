@@ -23,10 +23,16 @@ git -C "$EDG_DIR" sparse-checkout set --cone \
 git -C "$EDG_DIR" checkout
 
 # 注意：dev_tools/bin 需要存在，否则 CMake 找不到 edg-cmakedef。
+#
+# RECORD_UNRECOGNIZED_ATTRIBUTES=TRUE（A2 决策 (a)）：让 EDG 把「未知/自定义」属性
+# （CUDA 关键字拟以 __attribute__((…)) 承载）记录进 IL，而非告警丢弃。
+# 关键：EDG 把 .c 源当 C++ 编译（set_source_files_properties(... LANGUAGE CXX)），
+#       故必须用 CMAKE_CXX_FLAGS；CMAKE_C_FLAGS 不生效。
 cmake -S "$EDG_DIR" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Debug \
     -DEDG_MACRO_CONF=linux-gcc \
-    -DEDG_BUILD_LIB=OFF
+    -DEDG_BUILD_LIB=OFF \
+    -DCMAKE_CXX_FLAGS=-DRECORD_UNRECOGNIZED_ATTRIBUTES=1
 cmake --build "$BUILD_DIR" -j
 
 echo "cpfe: $BUILD_DIR/bin/cpfe"
