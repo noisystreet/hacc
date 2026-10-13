@@ -78,14 +78,18 @@
 - [x] **M1.2.0 前端（`.cu` → EDG IL）**：**已实现**——`coolfe++` 以子进程调 `cpfe` 产出
       二进制 IL（`-o`）+ 人类可读文本 IL（`--il_display`）；`-DHACC_WITH_EDG=ON` 注入默认路径。
       测试：`unit_edg_invoke`、`golden_frontend_empty_kernel[_text]`。见 CHANGELOG。
-- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0 已完成**——见
+- [x] **M1.2.1 设备端 IL 读回（`.cil` → routine 列表）**：**已实现**——`coolicc` 新增 `--emit=il-list`，
+      链接 EDG 前端库（`-DHACC_WITH_EDG=ON`）用 `il_read` 读回二进制 IL，列出 file scope 的 routine
+      并标记内核（`cool_global` 属性）。新增 `src/device/il_read_backend.{hpp,cpp}`（EDG 适配层，
+      EDG 类型不外泄）与未启用 EDG 时的 stub；测试：`golden_device_il_list_empty_kernel`。见 CHANGELOG。
+- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0/M1.2.1 已完成**——见
       [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。核心结论：EDG IL 是**内存树**（非文本契约），
       采用**链接 EDG 前端库、内存遍历 IL**（官方「逐函数翻译后丢弃」路径）；阶段 A 的「IL 文件」是
       **二进制 IL**（`il_read` 读回），非文本解析。
       **已拍板**：① `coolicc` 直接链接 EDG 库；② IL 文件 = 二进制 IL；③ 翻译核心 = 独立库
       （`src/device/il_to_llvm/`）；④ **IL 须能 dump 成人类可读**（`cdisp` 对含属性 IL 崩溃，
       改用 `coolfe++` 落文本 + 自建 `hacc-il-dump`，见方案 §7.1）。
-      **下一步**：M1.2.1（`coolicc` 链接 EDG 库，`il_read` 读回并打印 routine 列表）。
+      **下一步**：M1.2.2（遍历最小内核 function scope，建空 `Function`（`ptx_kernel`），产出 `.visible .entry`）。
 
 ## C. 工程 / 流程
 
