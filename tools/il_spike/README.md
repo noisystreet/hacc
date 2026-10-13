@@ -171,13 +171,17 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
 3. 属性以 `__attribute__((…))` 承载（或由 `coolfe++` 前置改写生成），IL 中表现为
    `file-scope attribute@…`（`kind: unrecognized`、带 `name`/`arguments`），并挂到实体
    `source_corresp.attributes:`。
-4. 验证脚本 `verify_attrs.sh`：对 `inputs/kernel_probe_attr2.cpp` 断言
-   `cool_shared` / `cool_global` / `address_space` 出现在 IL 且存在 `kind: unrecognized` 条目。
+4. 验证脚本 `verify_attrs.sh`：对 `inputs/kernel_probe_attr2.cpp` 断言清单中的属性名
+   出现在 IL 的 `name:` 字段（严格匹配，避免注释/变量名假阳性），且存在 `kind: unrecognized` 条目；
+   前置缺失（cpfe/EDG base/输入）或 cpfe 失败时给出清晰报错并返回 2。
    **实测通过（exit 0）**：
 
    ```text
    OK   attribute in IL: cool_shared
    OK   attribute in IL: cool_global
+   OK   attribute in IL: cool_device
+   OK   attribute in IL: cool_host
+   OK   attribute in IL: cool_constant
    OK   attribute in IL: address_space
    OK   IL contains 'kind: unrecognized' entries
    ```
@@ -193,6 +197,9 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
 | `__constant__` | `cool_constant` | 常量内存（地址空间） |
 | 地址空间 | `cool_address_space(n)` | 或复用 `address_space` |
 | `__syncthreads()` | （普通调用） | 同步点，IL 中即 routine 调用；如需专门标记另议 |
+
+> `verify_attrs.sh` 的 `EXPECTED` 与探针 `inputs/kernel_probe_attr2.cpp` 覆盖上表前 6 项
+> （`cool_address_space` 暂以 `address_space` 探针代替；`__syncthreads` 非属性，未纳入断言）。
 
 ## 待办（下一步）
 
