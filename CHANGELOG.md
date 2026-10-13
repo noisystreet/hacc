@@ -32,6 +32,13 @@
   属性的**无参内核**，建空 `Function`（调用约定 `ptx_kernel`，属性 `nvptx-kernel`）。
   新增 golden 测试 `golden_device_il_to_ptx_empty_kernel`（`.cu` → `.cil` → PTX）。
 
+### Changed
+
+- **EDG 改为非 ASan 构建，`coolicc` 不再带 ASan**：EDG 在 Linux+Debug 下默认开 ASan
+  （`EDG_CPFE_USE_ASAN`），迫使链接方 `coolicc` 也带 `-fsanitize=address`（发布隐患）。
+  现 `tools/il_spike/fetch_edg.sh` 传 `-DEDG_CPFE_USE_ASAN=OFF` 重建 EDG，
+  `CMakeLists.txt` 去掉 `coolicc` 的 `-fsanitize=address`；`coolicc` 不再依赖 `libasan.so`。
+
 ### Fixed
 
 - **M1.2.0 `coolfe++` 产出的二进制 IL 无效**：`cpfe` 的 `--il_display` 与 `-o <真实文件>` 不能在同一次

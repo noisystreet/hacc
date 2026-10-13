@@ -55,7 +55,8 @@ target_link_libraries(coolicc PRIVATE hacc_support)
 # 链接对象集：EDG 的 cdisp 目标（src/cmake/cdisp）——它是 EDG 专为「读二进制 IL +
 # 显示」构建的独立工具，对象集恰好是 il_read + standalone_utility_*_init 所需的最小集，
 # 且只有 il_display.c.o 含 main（必须排除，否则与 coolicc 的 main 冲突）。
-# 注意：EDG 对象是 ASan 构建（EDG_CPFE_USE_ASAN=TRUE），故 coolicc 必须 -fsanitize=address。
+# 注意：EDG 对象**不再**是 ASan 构建（fetch_edg.sh 已传 -DEDG_CPFE_USE_ASAN=OFF），
+# 故 coolicc 无需 -fsanitize=address，可产出干净的发布二进制。
 if(HACC_WITH_EDG)
     # EDG 的 cdisp 对象目录（由 tools/il_spike/fetch_edg.sh 构建）。
     set(HACC_EDG_CDISP_OBJDIR
@@ -89,9 +90,6 @@ if(HACC_WITH_EDG)
         RECORD_BACKING_EXPRS_WITH_IL_LOWERING=1
         SUN_EXTENSIONS_ALLOWED=1
         STANDALONE_IL_DISPLAY=1)
-    # EDG 对象是 ASan 构建，链接方必须同样开启 ASan。
-    target_compile_options(coolicc PRIVATE -fsanitize=address)
-    target_link_options(coolicc PRIVATE -fsanitize=address)
     target_link_libraries(coolicc PRIVATE ${HACC_EDG_CDISP_OBJS})
 else()
     target_sources(coolicc PRIVATE src/device/il_read_backend_stub.cpp)

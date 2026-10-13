@@ -28,10 +28,15 @@ git -C "$EDG_DIR" checkout
 # （CUDA 关键字拟以 __attribute__((…)) 承载）记录进 IL，而非告警丢弃。
 # 关键：EDG 把 .c 源当 C++ 编译（set_source_files_properties(... LANGUAGE CXX)），
 #       故必须用 CMAKE_CXX_FLAGS；CMAKE_C_FLAGS 不生效。
+#
+# EDG_CPFE_USE_ASAN=OFF：EDG 在 Linux+Debug 下默认开 ASan（src/CMakeLists.txt:64-75），
+# 会把 EDG 对象编成 ASan 版，迫使链接方（coolicc）也带 -fsanitize=address。
+# 为让 coolicc 产出「干净」的发布二进制，这里显式关闭 ASan。
 cmake -S "$EDG_DIR" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Debug \
     -DEDG_MACRO_CONF=linux-gcc \
     -DEDG_BUILD_LIB=OFF \
+    -DEDG_CPFE_USE_ASAN=OFF \
     -DCMAKE_CXX_FLAGS=-DRECORD_UNRECOGNIZED_ATTRIBUTES=1
 cmake --build "$BUILD_DIR" -j
 
