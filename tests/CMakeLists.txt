@@ -36,6 +36,14 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         COMMAND grep -q "empty_kernel" "${_ek_txt}")
     set_tests_properties(golden_frontend_empty_kernel_text PROPERTIES
         DEPENDS golden_frontend_empty_kernel)
+
+    # M1.2.1 golden：coolicc 读回 .cil，列出 file scope 的 routine（应含内核名）。
+    # 依赖 golden_frontend_empty_kernel 先产出 .cil。
+    add_test(NAME golden_device_il_list_empty_kernel
+        COMMAND coolicc --emit=il-list "${_ek_cil}")
+    set_tests_properties(golden_device_il_list_empty_kernel PROPERTIES
+        PASS_REGULAR_EXPRESSION "empty_kernel"
+        DEPENDS golden_frontend_empty_kernel)
 endif()
 
 # M1.1 golden：LLVM IR → PTX（仅当 coolicc 编译了 LLVM 后端时）。

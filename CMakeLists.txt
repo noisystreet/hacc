@@ -49,6 +49,54 @@ endif()
 add_executable(coolicc src/device/main.cpp)
 target_link_libraries(coolicc PRIVATE hacc_support)
 
+# HACC_WITH_EDG：coolicc 链接 EDG 前端库，用 il_read 读回二进制 IL（M1.2.1）。
+# 关闭时走 stub（il_read_backend_stub.cpp），--emit=il-list 明确报错。
+#
+# 链接对象集：EDG 的 cdisp 目标（src/cmake/cdisp）——它是 EDG 专为「读二进制 IL +
+# 显示」构建的独立工具，对象集恰好是 il_read + standalone_utility_*_init 所需的最小集，
+# 且只有 il_display.c.o 含 main（必须排除，否则与 coolicc 的 main 冲突）。
+# 注意：EDG 对象是 ASan 构建（EDG_CPFE_USE_ASAN=TRUE），故 coolicc 必须 -fsanitize=address。
+if(HACC_WITH_EDG)
+    # EDG 的 cdisp 对象目录（由 tools/il_spike/fetch_edg.sh 构建）。
+    set(HACC_EDG_CDISP_OBJDIR
+        "${HACC_EDG_DIR}/build/gcc/src/cmake/cdisp/CMakeFiles/cdisp.dir/__/__")
+    file(GLOB HACC_EDG_CDISP_OBJS "${HACC_EDG_CDISP_OBJDIR}/*.o")
+    # 排除 il_display.c.o（含 main，与 coolicc 冲突）。
+    list(FILTER HACC_EDG_CDISP_OBJS EXCLUDE REGEX "il_display\\.c\\.o$")
+    if(NOT HACC_EDG_CDISP_OBJS)
+        message(FATAL_ERROR
+            "hacc: 未找到 EDG cdisp 对象（${HACC_EDG_CDISP_OBJDIR}）。\n"
+            "请先跑 tools/il_spike/fetch_edg.sh 构建 EDG。")
+    endif()
+    list(LENGTH HACC_EDG_CDISP_OBJS _hacc_edg_obj_count)
+    message(STATUS "hacc: coolicc 链接 EDG cdisp 对象 ${_hacc_edg_obj_count} 个")
+
+    target_sources(coolicc PRIVATE src/device/il_read_backend.cpp)
+    target_compile_definitions(coolicc PRIVATE HACC_WITH_EDG=1)
+    # EDG 头文件目录：src（源码头）+ build/gcc/src/includes（生成的 cmake_defines.h 等）。
+    target_include_directories(coolicc SYSTEM PRIVATE
+        "${HACC_EDG_DIR}/src"
+        "${HACC_EDG_DIR}/build/gcc/src/includes")
+    # 与 EDG 构建一致的宏（见 build.ninja 的 DEFINES/FLAGS）。
+    target_compile_definitions(coolicc PRIVATE
+        RECORD_UNRECOGNIZED_ATTRIBUTES=1
+        USE_CMAKE_DEFINES
+        BACK_END_IS_C_GEN_BE=1
+        COMPILE_MULTIPLE_TRANSLATION_UNITS=1
+        DO_IL_LOWERING=1
+        LOWER_FIXED_POINT=1
+        LOWER_IFUNC=1
+        RECORD_BACKING_EXPRS_WITH_IL_LOWERING=1
+        SUN_EXTENSIONS_ALLOWED=1
+        STANDALONE_IL_DISPLAY=1)
+    # EDG 对象是 ASan 构建，链接方必须同样开启 ASan。
+    target_compile_options(coolicc PRIVATE -fsanitize=address)
+    target_link_options(coolicc PRIVATE -fsanitize=address)
+    target_link_libraries(coolicc PRIVATE ${HACC_EDG_CDISP_OBJS})
+else()
+    target_sources(coolicc PRIVATE src/device/il_read_backend_stub.cpp)
+endif()
+
 # HACC_WITH_LLVM：接入 LLVM/NVPTX 后端（C1：系统 LLVM，锁 19.x）。
 # 关闭时 coolicc 仍可构建（--version/-h），--emit=ptx 走占位实现并明确报错。
 if(HACC_WITH_LLVM)

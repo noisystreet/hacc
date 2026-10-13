@@ -221,3 +221,32 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
   "$CPFE" --edg_base_dir "$BASE" --g++ -N -o /tmp/t.cil /tmp/t.cpp   # 产出二进制 IL
   "$CDISP" /tmp/t.cil                                                # 断言崩溃（exit 134）
   ```
+
+- **（已查清）cpfe `--il_display` 与 `-o` 互斥**：`cpfe` 的 `--il_display`（文本 dump）与 `-o <真实文件>`
+  （二进制 IL）**不能在同一次调用中同时使用**，否则 `-o` 写出的二进制 IL 会变成「显示变体」，
+  `il_read` 读回时报 `Catastrophic error: invalid intermediate language file`（exit 4）。
+  另有第二坑：`--il_display` **不带 `-o`** 时，`cpfe` 会把默认名 `<input-stem>.cil` 的显示变体 IL
+  写到**当前目录**，可能覆盖真正的二进制 IL（尤其当二进制输出也在当前目录时）。
+  - 现象：`coolfe++` 同时要二进制 + 文本时，产出的 `.cil` 只有 ~3 KB（显示变体）而非 ~22 KB（正常二进制），
+    且 `coolicc --emit=il-list` 读回失败。**M1.2.0 的 golden 测试只 grep 文本 IL，未校验二进制 IL 可读，故被掩盖。**
+  - 结论：**二进制 IL 与文本 IL 必须分两次 `cpfe` 调用**；文本调用必须带 `-o <临时文件>` 抑制默认写
+    （`cpfe` 拒绝 `/dev/null`，报 `cannot open IL output file "/dev/null": not a regular file`），用完删除。
+  - 修复落点：`src/frontend/edg_invoke.cpp` 的 `build_cpfe_args` / `invoke_cpfe`（两趟调用）。
+
+  **最小复现（可直接复制）**：
+
+  ```sh
+  CPFE=build/il_spike/edg/build/gcc/bin/cpfe
+  BASE=build/il_spike/edg/bases/docker/dev-env/gcc
+  printf 'int __attribute__((unused)) u;\n' > /tmp/t.cpp
+  # 坑 1：--il_display 与 -o 同用 → -o 写出显示变体（~3KB），il_read 读回失败
+  "$CPFE" --edg_base_dir "$BASE" --g++ -N --il_display -o /tmp/t.cil /tmp/t.cpp
+  ls -l /tmp/t.cil        # 明显偏小
+  # 坑 2：--il_display 不带 -o → 默认名 t.cil 写到当前目录
+  cd /tmp && "$CPFE" --edg_base_dir "$BASE" --g++ -N --il_display t.cpp >/dev/null
+  ls -l /tmp/t.cil        # 被显示变体覆盖
+  # 正确：分两次；文本趟用 -o <临时文件> 抑制默认写
+  "$CPFE" --edg_base_dir "$BASE" --g++ -N -o /tmp/t.cil /tmp/t.cpp
+  "$CPFE" --edg_base_dir "$BASE" --g++ -N --il_display -o /tmp/t.tmp.cil /tmp/t.cpp > /tmp/t.il.txt
+  rm -f /tmp/t.tmp.cil
+  ```

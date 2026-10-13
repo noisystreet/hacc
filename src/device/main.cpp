@@ -11,7 +11,9 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
+#include "device/il_read_backend.hpp"
 #include "device/nvptx_backend.hpp"
 #include "support/version.hpp"
 
@@ -19,14 +21,16 @@ namespace {
 
 constexpr const char* kUsage =
     "coolicc —— hacc 设备端编译器（对标 cicc，LLVM/NVPTX）。\n"
-    "用法: coolicc [选项] [input.ll]\n"
-    "  --emit=ptx      发射 PTX（一期默认）\n"
+    "用法: coolicc [选项] [input]\n"
+    "  --emit=ptx      发射 PTX（M1.1；输入为 LLVM IR 文本）\n"
+    "  --emit=il-list  读回 EDG 二进制 IL（.cil），列出 file scope 的 routine（M1.2.1）\n"
     "  -arch=sm_XX     目标架构（默认 sm_80，见 B1）\n"
     "  -o <file>       输出文件（默认 stdout）\n"
     "  --version       打印版本\n"
     "  -h, --help      打印本帮助\n"
     "\n"
-    "M1.1：输入为 LLVM IR 文本（省略 input 则读 stdin）。\n";
+    "M1.1：--emit=ptx 输入为 LLVM IR 文本（省略 input 则读 stdin）。\n"
+    "M1.2.1：--emit=il-list 输入为 EDG 二进制 IL（.cil）。\n";
 
 std::string read_all(std::istream& in) {
     std::ostringstream ss;
@@ -39,6 +43,7 @@ std::string read_all(std::istream& in) {
 int main(int argc, char** argv) {
     std::string input_path;
     std::string output_path;
+    std::string emit = "ptx";  // 默认发射 PTX（M1.1）
     hacc::device::NvptxOptions opts;
 
     for (int i = 1; i < argc; ++i) {
@@ -60,11 +65,13 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strncmp(a, "--emit=", 7) == 0) {
-            // 一期只支持 ptx；cubin 属后续阶段（M6）。
-            if (std::strcmp(a + 7, "ptx") != 0) {
-                std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx）\n", a + 7);
+            // 一期支持 ptx（M1.1）与 il-list（M1.2.1）；cubin 属后续阶段（M6）。
+            const char* mode = a + 7;
+            if (std::strcmp(mode, "ptx") != 0 && std::strcmp(mode, "il-list") != 0) {
+                std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx / il-list）\n", mode);
                 return 2;
             }
+            emit = mode;
             continue;
         }
         if (a[0] == '-') {
@@ -72,6 +79,39 @@ int main(int argc, char** argv) {
             return 2;
         }
         input_path = a;
+    }
+
+    // M1.2.1：--emit=il-list 从 EDG 二进制 IL 读回并列出 routine。
+    if (emit == "il-list") {
+        if (input_path.empty()) {
+            std::fprintf(stderr, "coolicc: --emit=il-list 需要输入 .cil 文件\n");
+            return 2;
+        }
+        std::vector<hacc::device::IlRoutine> routines;
+        std::string err;
+        if (!hacc::device::list_routines(input_path, &routines, &err)) {
+            std::fprintf(stderr, "coolicc: 读回 IL 失败: %s\n", err.c_str());
+            return 1;
+        }
+        std::string out_text;
+        for (const auto& r : routines) {
+            out_text += r.name;
+            if (r.is_kernel) {
+                out_text += "  [kernel]";
+            }
+            out_text += '\n';
+        }
+        if (output_path.empty()) {
+            std::fwrite(out_text.data(), 1, out_text.size(), stdout);
+        } else {
+            std::ofstream out(output_path, std::ios::binary);
+            if (!out) {
+                std::fprintf(stderr, "coolicc: 无法写入 %s\n", output_path.c_str());
+                return 1;
+            }
+            out << out_text;
+        }
+        return 0;
     }
 
     std::string ir;

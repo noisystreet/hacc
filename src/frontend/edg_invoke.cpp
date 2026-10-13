@@ -53,7 +53,20 @@ std::string resolve_edg_base_dir(const std::string& explicit_dir) {
     return std::string(HACC_DEFAULT_EDG_BASE);
 }
 
-std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts) {
+// 构建单次 cpfe 调用的参数。
+//
+// 重要（实测 cpfe 7.0）：
+//   1) --il_display 与 -o <真实文件> 不能同时使用：--il_display 生效时，-o 写出的
+//      二进制 IL 会变成「显示变体」，il_read 读回时报 "invalid intermediate
+//      language file"。
+//   2) --il_display 不带 -o 时，cpfe 会把一个默认名（<input-stem>.cil）的
+//      「显示变体」IL 写到**当前目录**，可能覆盖真正的二进制 IL。
+// 因此：二进制 IL 与文本 IL 分两次调用；文本调用必须带 -o <丢弃文件> 抑制默认写。
+// 注意 cpfe 要求 -o 是**常规文件**（/dev/null 会被拒），故用临时文件。
+//   - 二进制：-o <file>（不带 --il_display）
+//   - 文本：  --il_display -o <throwaway>（stdout 重定向到文本文件）
+std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts, bool for_text,
+                                         const std::string& throwaway_il) {
     std::vector<std::string> args;
     const std::string base = resolve_edg_base_dir(opts.edg_base_dir);
     if (!base.empty()) {
@@ -63,11 +76,13 @@ std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts) {
     // --g++：GNU C++ 扩展（__attribute__ 等）；-N：保留未降级 IL（信息最全）。
     args.push_back("--g++");
     args.push_back("-N");
-    if (!opts.il_text_path.empty()) {
+    if (for_text) {
         // 编译期直接 dump 内存 IL（不经过 cdisp，见方案 §7.1）。
         args.push_back("--il_display");
-    }
-    if (!opts.il_output_path.empty()) {
+        // 抑制 cpfe 把默认名「显示变体」IL 写到当前目录（见上方说明 2）。
+        args.push_back("-o");
+        args.push_back(throwaway_il);
+    } else if (!opts.il_output_path.empty()) {
         args.push_back("-o");
         args.push_back(opts.il_output_path);
     }
@@ -78,36 +93,23 @@ std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts) {
     return args;
 }
 
-EdgInvokeResult invoke_cpfe(const EdgInvokeOptions& opts) {
-    EdgInvokeResult result;
-
-    const std::string cpfe = resolve_cpfe_path(opts.cpfe_path);
-    if (cpfe.empty()) {
-        result.error =
-            "未指定 cpfe 路径（用 --cpfe、环境变量 HACC_CPFE，或构建期 HACC_DEFAULT_CPFE）";
-        return result;
-    }
-    if (opts.input_path.empty()) {
-        result.error = "缺少输入文件";
-        return result;
-    }
-
-    std::vector<std::string> args = build_cpfe_args(opts);
-
-    // 文本 IL 走 stdout 重定向到文件；二进制 IL 由 cpfe -o 直接写。
-    // 用 fork + execvp + 管道收集 stderr。
+// 执行一次 cpfe：stderr 收集到 *stderr_out；若 stdout_path 非空，stdout 重定向到该文件。
+// 返回 true 表示 cpfe 正常退出（exit 0）。
+bool run_cpfe_once(const std::string& cpfe, const std::vector<std::string>& args,
+                   const std::string& stdout_path, std::string* stderr_out, int* exit_code_out,
+                   std::string* error_out) {
     int pipefd[2];
     if (pipe(pipefd) != 0) {
-        result.error = std::string("pipe 失败: ") + std::strerror(errno);
-        return result;
+        *error_out = std::string("pipe 失败: ") + std::strerror(errno);
+        return false;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
-        result.error = std::string("fork 失败: ") + std::strerror(errno);
+        *error_out = std::string("fork 失败: ") + std::strerror(errno);
         close(pipefd[0]);
         close(pipefd[1]);
-        return result;
+        return false;
     }
 
     if (pid == 0) {
@@ -118,8 +120,8 @@ EdgInvokeResult invoke_cpfe(const EdgInvokeOptions& opts) {
         }
         close(pipefd[1]);
 
-        if (!opts.il_text_path.empty()) {
-            FILE* f = std::fopen(opts.il_text_path.c_str(), "wb");
+        if (!stdout_path.empty()) {
+            FILE* f = std::fopen(stdout_path.c_str(), "wb");
             if (f == nullptr) {
                 _exit(127);
             }
@@ -147,25 +149,72 @@ EdgInvokeResult invoke_cpfe(const EdgInvokeOptions& opts) {
     char buf[4096];
     ssize_t n;
     while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        result.stderr_text.append(buf, static_cast<size_t>(n));
+        stderr_out->append(buf, static_cast<size_t>(n));
     }
     close(pipefd[0]);
 
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
-        result.error = std::string("waitpid 失败: ") + std::strerror(errno);
-        return result;
+        *error_out = std::string("waitpid 失败: ") + std::strerror(errno);
+        return false;
     }
 
     if (WIFEXITED(status)) {
-        result.exit_code = WEXITSTATUS(status);
-        result.ok = (result.exit_code == 0);
-    } else if (WIFSIGNALED(status)) {
-        result.exit_code = 128 + WTERMSIG(status);
-        result.error = "cpfe 被信号终止";
-    } else {
-        result.error = "cpfe 异常退出";
+        *exit_code_out = WEXITSTATUS(status);
+        return *exit_code_out == 0;
     }
+    if (WIFSIGNALED(status)) {
+        *exit_code_out = 128 + WTERMSIG(status);
+        *error_out = "cpfe 被信号终止";
+        return false;
+    }
+    *error_out = "cpfe 异常退出";
+    return false;
+}
+
+EdgInvokeResult invoke_cpfe(const EdgInvokeOptions& opts) {
+    EdgInvokeResult result;
+
+    const std::string cpfe = resolve_cpfe_path(opts.cpfe_path);
+    if (cpfe.empty()) {
+        result.error =
+            "未指定 cpfe 路径（用 --cpfe、环境变量 HACC_CPFE，或构建期 HACC_DEFAULT_CPFE）";
+        return result;
+    }
+    if (opts.input_path.empty()) {
+        result.error = "缺少输入文件";
+        return result;
+    }
+
+    // 二进制 IL：-o <file>，不带 --il_display（见 build_cpfe_args 的说明）。
+    if (!opts.il_output_path.empty()) {
+        std::string err;
+        int code = 0;
+        if (!run_cpfe_once(cpfe, build_cpfe_args(opts, /*for_text=*/false, std::string()),
+                           std::string(), &result.stderr_text, &code, &err)) {
+            result.exit_code = code;
+            result.error = err;
+            return result;
+        }
+    }
+
+    // 文本 IL：--il_display，stdout 重定向到文件；用丢弃文件抑制默认 .cil 写入。
+    if (!opts.il_text_path.empty()) {
+        // cpfe 要求 -o 是常规文件（/dev/null 会被拒），故用临时文件；用完删除。
+        const std::string throwaway = opts.il_text_path + ".tmp.cil";
+        std::string err;
+        int code = 0;
+        const bool ok = run_cpfe_once(cpfe, build_cpfe_args(opts, /*for_text=*/true, throwaway),
+                                      opts.il_text_path, &result.stderr_text, &code, &err);
+        std::remove(throwaway.c_str());
+        if (!ok) {
+            result.exit_code = code;
+            result.error = err;
+            return result;
+        }
+    }
+
+    result.ok = true;
     return result;
 }
 

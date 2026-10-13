@@ -22,3 +22,15 @@
   路径解析优先级：显式参数 > `$HACC_CPFE`/`$HACC_EDG_BASE` > 构建期默认。
   新增单元测试 `unit_edg_invoke` 与 golden 测试 `golden_frontend_empty_kernel[_text]`。
   未启用 EDG 时 `coolfe++` 仍可构建（运行期需显式指定 `cpfe`）。
+- **M1.2.1 设备端 IL 读回（`.cil` → routine 列表）**：`coolicc` 新增 `--emit=il-list`，
+  链接 EDG 前端库（`-DHACC_WITH_EDG=ON`）用 `il_read` 读回二进制 IL，列出 file scope 的 routine
+  并标记内核（`cool_global` 属性）。新增 `src/device/il_read_backend.{hpp,cpp}`（EDG 适配层，
+  EDG 类型不外泄）与未启用 EDG 时的 stub；新增 golden 测试 `golden_device_il_list_empty_kernel`。
+
+### Fixed
+
+- **M1.2.0 `coolfe++` 产出的二进制 IL 无效**：`cpfe` 的 `--il_display` 与 `-o <真实文件>` 不能在同一次
+  调用中同时使用（否则 `-o` 写出「显示变体」IL，`il_read` 读回报 `invalid intermediate language file`）；
+  且 `--il_display` 不带 `-o` 时会把默认名 `<input-stem>.cil` 的显示变体写到当前目录，可能覆盖二进制 IL。
+  现改为**分两次 `cpfe` 调用**（二进制趟 + 文本趟，文本趟用 `-o <临时文件>` 抑制默认写）。
+  详见 [方案 §2.4/§7.1](docs/m1.2-il-to-llvm-plan.md) 与 [spike README](tools/il_spike/README.md)。
