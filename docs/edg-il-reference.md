@@ -397,6 +397,51 @@ name:                    file-scope other-text@53100013a600: "cool_global"
 语义等价，翻译器无需特殊处理。
 
 
+## 5.6 M1.2.4 实测发现（内建变量 + `__syncthreads`）
+
+用 `tools/il_spike/inputs/m124_probe.cu`（`tid_kernel(int* out)`，含 `threadIdx.x` /
+`blockIdx.x` 读取与 `__syncthreads()` 调用）实测，补充以下**字段级细节**：
+
+### 5.6.1 结构体成员访问 = `eok_dot_field` + `enk_field`
+
+`threadIdx.x` 在 IL 中**不是**单个节点，而是三层：
+
+```text
+enk_operation (eok_dot_field)          # 整个 threadIdx.x
+  operands: enk_variable(threadIdx)    # 基对象（file-scope variable）
+            → next: enk_field(x)       # 成员（file-scope field）
+```
+
+- `eok_dot_field` 的 `operands` 链：**第一个是基对象表达式**（`enk_variable`），
+  **第二个是 `enk_field`**（`field:` 指向 file-scope field 实体，`name: "x"`）。
+- `enk_field` 节点本身 `type` 为成员类型（如 `unsigned int`），`next` 为 `NULL`。
+- 翻译器需新增 `eok_dot_field` 分派：取基对象地址 + 成员偏移（GEP）→ load。
+
+### 5.6.2 函数调用 = `eok_call` + `enk_routine`
+
+`__syncthreads()` 在 IL 中：
+
+```text
+enk_operation (eok_call)               # 调用表达式
+  operands: enk_routine(__syncthreads) # 被调 routine（file-scope routine）
+```
+
+- `eok_call` 的 `operands` 链：**第一个是 `enk_routine`**（`routine:` 指向 file-scope
+  routine 实体），其后为实参表达式（本例无参）。
+- `enk_routine` 的 `type` 为函数指针类型（`void (*)()`），`orig_lvalue_type` 为函数类型。
+- 调用语句为 `stmk_expr`（`expr:` 指向该 `eok_call` 节点）。
+- 翻译器需新增 `eok_call` 分派：按被调 routine 名识别内建（`__syncthreads` →
+  `llvm.nvvm.barrier0`），其余按普通调用处理（M1.2.4 暂只覆盖内建）。
+
+### 5.6.3 内建变量按「名字」识别（与 A2 决策 (a) 一致）
+
+探针中 `threadIdx` / `blockIdx` 等以**普通 file-scope variable** 模拟（EDG 不认识 CUDA
+内建）。真实 CUDA 中它们由运行时头提供、带 `__device__` 限定，但**翻译器只需按名字识别**
+（`threadIdx` / `blockIdx` / `blockDim` / `gridDim` + `.x/.y/.z`），映射到 NVPTX 特殊寄存器
+（`%tid.x` / `%ctaid.x` / `%ntid.x` / `%nctaid.x` 等），**无需依赖 EDG 特殊标记**——
+与 A2 决策 (a)「按 name 匹配」一致。
+
+
 ## 6. 待补充（后续阶段）
 
 - `a_constant`（il_def.h:4741）与 `a_constant_kind`（`ck_*`）—— 常量折叠。
