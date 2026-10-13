@@ -186,19 +186,10 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
    OK   IL contains 'kind: unrecognized' entries
    ```
 
-**CUDA 属性清单（初稿，待细化）：**
+**CUDA 属性清单：** 见 [cuda-attributes.md](cuda-attributes.md)（`coolfe++` ↔ `coolicc` 的契约，
+含执行空间 / 存储空间 / 地址空间 / 启动提示 / 非属性项，及与 `verify_attrs.sh` 的对应）。
 
-| CUDA 概念 | 拟用属性名 | 备注 |
-| --- | --- | --- |
-| `__global__` | `cool_global` | 内核 / 执行空间标记 |
-| `__device__` | `cool_device` | 设备函数 |
-| `__host__` | `cool_host` | 主机函数 |
-| `__shared__` | `cool_shared` | 共享内存（地址空间） |
-| `__constant__` | `cool_constant` | 常量内存（地址空间） |
-| 地址空间 | `cool_address_space(n)` | 或复用 `address_space` |
-| `__syncthreads()` | （普通调用） | 同步点，IL 中即 routine 调用；如需专门标记另议 |
-
-> `verify_attrs.sh` 的 `EXPECTED` 与探针 `inputs/kernel_probe_attr2.cpp` 覆盖上表前 6 项
+> `verify_attrs.sh` 的 `EXPECTED` 与探针 `inputs/kernel_probe_attr2.cpp` 覆盖清单 §1–§3 的核心项
 > （`cool_address_space` 暂以 `address_space` 探针代替；`__syncthreads` 非属性，未纳入断言）。
 
 ## 待办（下一步）
@@ -206,7 +197,8 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
 - **（已定）(a)/(b) 取舍 = (a)**；方案 §5.2 / [ADR 0001](../../docs/adr/0001-edg-cpp-frontend.md) 已回写。
 - **（已实现）(a)**：`fetch_edg.sh` 注入 `RECORD_UNRECOGNIZED_ATTRIBUTES=1`（`CMAKE_CXX_FLAGS`），
   `verify_attrs.sh` 实测通过。
-- 细化上面的「CUDA 属性清单」，与 `coolfe++` 前置改写、`coolicc` 消费对齐。
+- **（已细化）CUDA 属性清单**：见 [cuda-attributes.md](cuda-attributes.md)（`coolfe++` ↔ `coolicc` 契约）；
+  后续按 S1/S2 补 `cool_restrict`/`cool_launch_bounds`/`cool_forceinline`/`cool_noinline`。
 - 复核二进制 IL 往返：本构建下 `cdisp <file>` 对现有 `*.cil` 报
   `invalid intermediate language file`（疑似格式/参数不符），待查；当前用 `--il_display`
   重定向落盘已能满足检索需求。
