@@ -332,6 +332,71 @@ name:                    file-scope other-text@53100013a600: "cool_global"
 
 > **结论**：本文档的字段级描述与实测 IL **完全一致**；M1.2 翻译器可按 §4 的 9 条指引落地。
 
+## 5.5 M1.2.3 实测发现（标量参数 + 简单语句）
+
+用 `tools/il_spike/inputs/m123_probe.cu`（`add_kernel(int* out, int a, int b)`，含
+`int c = a + b;` 与 `if (c > 0) {...} else {...}`）实测，补充以下**字段级细节**
+（文档 §2 未覆盖，实现时踩过的坑）：
+
+### 5.5.1 union 变体名（易错）
+
+`a_statement` / `an_expr_node` / `a_type` / `a_scope` 的 union **都有名字 `variant`**，
+但内部变体名与「kind 名」不同：
+
+| 类型 | kind | 访问路径 |
+| --- | --- | --- |
+| `a_statement` | `stmk_block` | `stmt->variant.block.statements` |
+| `a_statement` | `stmk_decl` | `stmt->variant.decl.entities`（`an_il_entity_list_entry_ptr`） |
+| `a_statement` | `stmk_init` | `stmt->variant.dynamic_init`（`a_dynamic_init_ptr`） |
+| `a_statement` | `stmk_if` | `stmt->variant.if_stmt.then_statement` / `.else_statement` |
+| `an_expr_node` | `enk_variable` | `expr->variant.variable.ptr`（**不是** `.variable`） |
+| `an_expr_node` | `enk_constant` | `expr->variant.constant.ptr`（**不是** `.constant`） |
+| `an_expr_node` | `enk_operation` | `expr->variant.operation.kind` / `.operands` |
+| `a_type` | `tk_integer` | `t->variant.integer.int_kind` |
+| `a_type` | `tk_float` | `t->variant.float_kind` |
+| `a_type` | `tk_pointer` | `t->variant.pointer.type` |
+| `a_type` | `tk_routine` | `t->variant.routine.return_type` / `.extra_info` |
+| `a_type` | `tk_typeref` | `t->variant.typeref.type` |
+| `a_scope` | `sck_function` | `scope->variant.routine.parameters`（**不是** `.function`） |
+
+> `a_scope.assoc_block` / `a_scope.nonstatic_variables` 是**顶层字段**（不在 union 内）。
+
+### 5.5.2 函数体 scope 必须用 `scope_for_routine`
+
+`il_read` 只加载 **file scope region**；函数体在另一 memory region，**未加载**。
+直接读 `il_header.function_def_table[n].scope` 或 `region_scope_entry[mr]` 会得到
+`NULL`。必须调用 EDG 的 **`scope_for_routine(routine)`**（il.h:3992），它内部按需
+`read_memory_region` 加载函数体 region。
+
+**关键约束**：`read_memory_region` 依赖全局 `f_il_input` 句柄，因此 `il_read` 后
+**不能关闭 IL 文件**，否则报 `Catastrophic error: invalid intermediate language file`。
+文件句柄应在翻译全部结束后再 `fclose`。
+
+### 5.5.3 常量值不是裸整型
+
+- `a_constant.variant.integer_value` 是 **`an_integer_value` 结构体**（内部多字表示，
+  `an_int_value_part part[...]`），**不能** `static_cast` 到整型。用
+  `conv_integer_value_to_host_large_integer(&value, is_signed, &host_val, &err)`
+  （const_ints.h:128）取宿主整数值。
+- `a_constant.variant.float_value` 是 `an_internal_float_value`（字节数组）。用
+  `fetch_host_fp_value(kind, &value)`（float_pt.h:102）取宿主浮点值。
+
+### 5.5.4 `int c = a + b;` 的语句形态
+
+局部变量带初始化会拆成**两条语句**：
+1. `stmk_decl`（声明 `c`，`entities` 链）
+2. `stmk_init`（`dynamic_init` → `a_dynamic_init`，`kind == dik_expression`，
+   表达式在 `variant.expression`）
+
+`stmk_init` 的 `expr` 字段为 `NULL`，初始化表达式在 `dynamic_init` 里。
+
+### 5.5.5 条件标准化
+
+`if (c > 0)` 在 IL 中条件表达式为 `eok_gt`，但 NVPTX 后端可能产出 `setp.lt.s32 %p1, %r1, 1`
+（即 `c < 1` 的取反）——这是 EDG 的**条件标准化**（§2.2 注：条件已标准化为整型/布尔），
+语义等价，翻译器无需特殊处理。
+
+
 ## 6. 待补充（后续阶段）
 
 - `a_constant`（il_def.h:4741）与 `a_constant_kind`（`ck_*`）—— 常量折叠。

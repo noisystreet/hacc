@@ -54,6 +54,22 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             PASS_REGULAR_EXPRESSION "\\.visible \\.entry empty_kernel"
             DEPENDS golden_frontend_empty_kernel)
     endif()
+
+    # M1.2.3 golden：标量参数 + 简单语句（赋值/算术/if）→ PTX。
+    # 校验参数（.param .u64/.u32）、算术（add.s32）与分支（setp/bra）。
+    if(HACC_WITH_LLVM)
+        set(_sk_cil "${CMAKE_CURRENT_BINARY_DIR}/scalar_kernel.cil")
+        add_test(NAME golden_frontend_scalar_kernel
+            COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                    --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                    -o "${_sk_cil}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/golden/frontend/scalar_kernel.cu")
+        add_test(NAME golden_device_il_to_ptx_scalar_kernel
+            COMMAND coolicc --from-il -arch=sm_80 "${_sk_cil}")
+        set_tests_properties(golden_device_il_to_ptx_scalar_kernel PROPERTIES
+            PASS_REGULAR_EXPRESSION "\\.visible \\.entry add_kernel"
+            DEPENDS golden_frontend_scalar_kernel)
+    endif()
 endif()
 
 # M1.1 golden：LLVM IR → PTX（仅当 coolicc 编译了 LLVM 后端时）。
