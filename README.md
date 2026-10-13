@@ -32,7 +32,24 @@ hacc 是 [coolrt](../coolruntime) 的**编译前端**，用于补上 coolrt 架�
 
 ## 状态
 
-**规划阶段**：当前仅包含实施方案与架构决策文档，源码骨架待评审后落地。
+**M1.1 进行中**：骨架（M0）已落地；设备后端已打通 **LLVM IR → PTX**（`coolicc` 接入 LLVM/NVPTX）。
+EDG 前端接入（`coolfe++`）与 EDG IL → LLVM IR（M1.2）尚在进行。
+
+## 构建与使用
+
+```sh
+# 默认构建（不依赖 EDG/LLVM，骨架可编译、可测）
+make check
+
+# 启用 LLVM/NVPTX 设备后端（C1：系统 LLVM，锁 19.x）
+cmake -S . -B build -DHACC_WITH_LLVM=ON -DLLVM_DIR=/usr/lib/llvm-19/lib/cmake/llvm
+cmake --build build -j
+
+# M1.1：LLVM IR → PTX（最小内核）
+build/coolicc --emit=ptx -arch=sm_80 tests/golden/device/empty_kernel.ll
+```
+
+> `HACC_WITH_LLVM=OFF` 时 `coolicc` 仍可构建，但 `--emit=ptx` 走占位实现并明确报错。
 
 ## 设计要点（摘要）
 

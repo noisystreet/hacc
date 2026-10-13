@@ -3,33 +3,105 @@
 // 独立可执行：消费 coolfe++ 产出的 EDG IL，降为 LLVM IR → NVPTX → PTX
 // （见 docs/compiler-implementation-plan.md §6.1、§6.3）。
 //
-// M0 骨架：仅 --version / -h；LLVM/NVPTX 后端尚未接入。
+// M1.1：打通「LLVM IR → PTX」这一跳（NVPTX 后端）。EDG IL 解析（M1.2）尚未接入，
+//       故当前以 --emit=ptx 从文件/stdin 读入 LLVM IR 文本并发射 PTX，用于验证后端链路。
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
 
+#include "device/nvptx_backend.hpp"
 #include "support/version.hpp"
 
 namespace {
 
 constexpr const char* kUsage =
     "coolicc —— hacc 设备端编译器（对标 cicc，LLVM/NVPTX）。\n"
-    "用法: coolicc [选项] <input>\n"
+    "用法: coolicc [选项] [input.ll]\n"
+    "  --emit=ptx      发射 PTX（一期默认）\n"
+    "  -arch=sm_XX     目标架构（默认 sm_80，见 B1）\n"
+    "  -o <file>       输出文件（默认 stdout）\n"
     "  --version       打印版本\n"
-    "  -h, --help      打印本帮助\n";
+    "  -h, --help      打印本帮助\n"
+    "\n"
+    "M1.1：输入为 LLVM IR 文本（省略 input 则读 stdin）。\n";
+
+std::string read_all(std::istream& in) {
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
 
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::string input_path;
+    std::string output_path;
+    hacc::device::NvptxOptions opts;
+
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--version") == 0) {
+        const char* a = argv[i];
+        if (std::strcmp(a, "--version") == 0) {
             std::printf("coolicc %s\n", hacc::version());
             return 0;
         }
-        if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
+        if (std::strcmp(a, "-h") == 0 || std::strcmp(a, "--help") == 0) {
             std::fputs(kUsage, stdout);
             return 0;
         }
+        if (std::strncmp(a, "-arch=", 6) == 0) {
+            opts.arch = a + 6;
+            continue;
+        }
+        if (std::strcmp(a, "-o") == 0 && i + 1 < argc) {
+            output_path = argv[++i];
+            continue;
+        }
+        if (std::strncmp(a, "--emit=", 7) == 0) {
+            // 一期只支持 ptx；cubin 属后续阶段（M6）。
+            if (std::strcmp(a + 7, "ptx") != 0) {
+                std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx）\n", a + 7);
+                return 2;
+            }
+            continue;
+        }
+        if (a[0] == '-') {
+            std::fprintf(stderr, "coolicc: 未知选项 %s\n", a);
+            return 2;
+        }
+        input_path = a;
     }
-    std::fprintf(stderr, "coolicc: 尚未接入（M0 骨架）。用 -h 查看用法。\n");
-    return 2;
+
+    std::string ir;
+    if (input_path.empty()) {
+        ir = read_all(std::cin);
+    } else {
+        std::ifstream in(input_path, std::ios::binary);
+        if (!in) {
+            std::fprintf(stderr, "coolicc: 无法打开输入 %s\n", input_path.c_str());
+            return 1;
+        }
+        ir = read_all(in);
+    }
+
+    std::string ptx;
+    std::string err;
+    if (!hacc::device::emit_ptx(ir, opts, &ptx, &err)) {
+        std::fprintf(stderr, "coolicc: 发射 PTX 失败: %s\n", err.c_str());
+        return 1;
+    }
+
+    if (output_path.empty()) {
+        std::fwrite(ptx.data(), 1, ptx.size(), stdout);
+    } else {
+        std::ofstream out(output_path, std::ios::binary);
+        if (!out) {
+            std::fprintf(stderr, "coolicc: 无法写入 %s\n", output_path.c_str());
+            return 1;
+        }
+        out << ptx;
+    }
+    return 0;
 }

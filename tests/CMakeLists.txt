@@ -13,3 +13,13 @@ add_test(NAME cli_coolicc_version COMMAND coolicc --version)
 set_tests_properties(cli_hacc_version    PROPERTIES PASS_REGULAR_EXPRESSION "hacc")
 set_tests_properties(cli_coolfe_version  PROPERTIES PASS_REGULAR_EXPRESSION "coolfe")
 set_tests_properties(cli_coolicc_version PROPERTIES PASS_REGULAR_EXPRESSION "coolicc")
+
+# M1.1 golden：LLVM IR → PTX（仅当 coolicc 编译了 LLVM 后端时）。
+# 校验最小内核产出 `.visible .entry empty_kernel`。
+if(HACC_WITH_LLVM)
+    add_test(NAME golden_device_empty_kernel
+        COMMAND coolicc --emit=ptx -arch=sm_80
+                "${CMAKE_CURRENT_SOURCE_DIR}/golden/device/empty_kernel.ll")
+    set_tests_properties(golden_device_empty_kernel PROPERTIES
+        PASS_REGULAR_EXPRESSION "\\.visible \\.entry empty_kernel")
+endif()
