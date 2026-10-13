@@ -241,7 +241,98 @@ M1.2 需要的：
 8. **`__syncthreads`**：`eok_call` 的被调 routine 名匹配 → `llvm.nvvm.barrier0`。
 9. **属性**：`source_corresp.attributes` → `an_attribute.name` 匹配（A2 (a)）。
 
-## 5. 待补充（后续阶段）
+## 5. 实测验证（2026-10，cpfe 7.0）
+
+用 `fetch_edg.sh` 构建的 `cpfe`（commit `43e10b90`）对探针导出 IL，**逐项核对**本文档：
+
+```sh
+CPFE=build/il_spike/edg/build/gcc/bin/cpfe
+BASE=build/il_spike/edg/bases/docker/dev-env/gcc
+"$CPFE" --edg_base_dir "$BASE" --g++ -N --il_display tools/il_spike/inputs/kernel_probe.cpp > /tmp/kernel_probe.il
+```
+
+### 5.1 内核 routine（`kernel_probe.cpp` 的 `saxpy`）
+
+```text
+file-scope routine@53100013ab00
+source_corresp:
+  name:                  file-scope id-name@53100013a180: "saxpy"
+  name_linkage:          C
+  attributes:            NULL
+type:                    file-scope type@53100013a1d0: void (int, float, const float *, float *)
+function_def_number:     1
+memory_region:           2
+storage_class:           sc_unspecified
+defined:                 TRUE
+is_top_level_in_mem_region: TRUE
+```
+
+**核对结论**：
+- `source_corresp.name` = `"saxpy"` ✅（§2.8）
+- `name_linkage: C` = `nlk_external`（`extern "C"`，不 mangling）✅（§3.2）
+- `type` = `void (int, float, const float *, float *)` ✅（§2.1）
+- `function_def_number: 1` + `memory_region: 2` → 函数体在 region 2 ✅（§2.1）
+- `defined: TRUE` ✅
+
+### 5.2 函数体（memory region 2）
+
+```text
+Intermediate language for memory region 2 (function "saxpy"):
+
+func-scope variable@5310001549c0
+source_corresp:
+  name:                  func-scope id-name@53100013a1a8: "n"
+  enclosing_routine:     file-scope routine@53100013ab00: saxpy
+  is_local_to_function:  TRUE
+type:                    file-scope type@53100002f840: int
+assoc_param_type:        file-scope param-type@53100013a300
+storage_class:           sc_auto
+is_parameter:            TRUE
+```
+
+**核对结论**：参数 `n` 是 `func-scope variable`，`storage_class: sc_auto`、`is_parameter: TRUE` ✅（§2.7）。
+
+### 5.3 语句与表达式
+
+```text
+func-scope statement@531000156050
+next:                    func-scope statement@5310001566d8
+parent:                  func-scope statement@531000155f58
+kind:                    stmk_expr
+expr:                    func-scope expr-node@531000156670
+
+func-scope expr-node@531000156800
+type:                    file-scope type@531000036bc8: void
+result_is_not_used:      TRUE
+kind:                    enk_operation
+operation.kind:          eok_call
+operands:                func-scope expr-node@531000156798
+```
+
+**核对结论**：
+- 语句 `kind: stmk_expr` + `expr:` 指针 ✅（§2.2）
+- 表达式 `kind: enk_operation` + `operation.kind: eok_call` ✅（§2.4）
+- `__cool_syncthreads()` 调用表现为 `eok_call`，被调 routine 名 `__cool_syncthreads` ✅（§4.8）
+
+### 5.4 属性（`kernel_probe_attr2.cpp`）
+
+```text
+file-scope attribute@53100013a630
+kind:                    unrecognized
+family:                  gnu
+name:                    file-scope other-text@53100013a600: "cool_global"
+...
+  attributes:            file-scope attribute@53100013a630
+```
+
+**核对结论**：
+- `cool_global` 属性实体：`kind: unrecognized`、`family: gnu`、`name: "cool_global"` ✅（§2.9）
+- 经 routine 的 `source_corresp.attributes:` 挂载 ✅（§2.8）
+- `verify_attrs.sh` 全 7 项通过（`cool_shared`/`cool_global`/`cool_device`/`cool_host`/`cool_constant`/`address_space`/`kind: unrecognized`）✅
+
+> **结论**：本文档的字段级描述与实测 IL **完全一致**；M1.2 翻译器可按 §4 的 9 条指引落地。
+
+## 6. 待补充（后续阶段）
 
 - `a_constant`（il_def.h:4741）与 `a_constant_kind`（`ck_*`）—— 常量折叠。
 - `a_param_type`（il_def.h:6385）—— 参数细节。
