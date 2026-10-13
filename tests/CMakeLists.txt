@@ -23,6 +23,11 @@ set_tests_properties(cli_coolicc_version PROPERTIES PASS_REGULAR_EXPRESSION "coo
 # M1.2.0 golden：.cu → EDG IL（二进制 + 人类可读文本）。
 # 仅当 HACC_WITH_EDG 且 cpfe 存在时启用（否则跳过，保持无 EDG 环境可构建）。
 if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
+    # 若找到 COOLRuntime 头，则给 .cu 传 -I（供 #include <cool/...>）；否则不传。
+    set(_coolrt_inc "")
+    if(HACC_COOLRUNTIME_INCLUDE)
+        set(_coolrt_inc "-I${HACC_COOLRUNTIME_INCLUDE}")
+    endif()
     set(_ek_cil "${CMAKE_CURRENT_BINARY_DIR}/empty_kernel.cil")
     set(_ek_txt "${CMAKE_CURRENT_BINARY_DIR}/empty_kernel.il.txt")
     add_test(NAME golden_frontend_empty_kernel
@@ -69,6 +74,24 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         set_tests_properties(golden_device_il_to_ptx_scalar_kernel PROPERTIES
             PASS_REGULAR_EXPRESSION "\\.visible \\.entry add_kernel"
             DEPENDS golden_frontend_scalar_kernel)
+    endif()
+
+    # M1.2.4 golden：内建变量（threadIdx/blockIdx）+ __syncthreads() → PTX。
+    # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h> 提供 __global__ 与内建）；
+    # 未找到头时跳过。校验 %tid.x / %ctaid.x 与 barrier0。
+    if(HACC_WITH_LLVM AND HACC_COOLRUNTIME_INCLUDE)
+        set(_tk_cil "${CMAKE_CURRENT_BINARY_DIR}/tid_kernel.cil")
+        add_test(NAME golden_frontend_tid_kernel
+            COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                    --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                    -o "${_tk_cil}"
+                    -I "${HACC_COOLRUNTIME_INCLUDE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/golden/frontend/tid_kernel.cu")
+        add_test(NAME golden_device_il_to_ptx_tid_kernel
+            COMMAND coolicc --from-il -arch=sm_80 "${_tk_cil}")
+        set_tests_properties(golden_device_il_to_ptx_tid_kernel PROPERTIES
+            PASS_REGULAR_EXPRESSION "\\.visible \\.entry tid_kernel"
+            DEPENDS golden_frontend_tid_kernel)
     endif()
 endif()
 

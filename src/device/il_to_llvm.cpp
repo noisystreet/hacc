@@ -500,8 +500,123 @@ llvm::Value* translate_unary(an_expr_operator_kind op, an_expr_node_ptr expr, Ke
     }
 }
 
+// ---- M1.2.4：内建变量与内建函数 ----
+//
+// 内建变量（threadIdx/blockIdx/blockDim/gridDim）在 IL 中是 file-scope variable，
+// 成员访问 threadIdx.x 表现为 eok_dot_field（基对象 enk_variable + enk_field）。
+// 翻译器按**名字**识别（与 A2 决策 (a) 一致，见 edg-il-reference §5.6），
+// 映射到 NVVM 特殊寄存器读取 intrinsic（llvm.nvvm.read.ptx.sreg.*）。
+//
+// 内建函数 __syncthreads 在 IL 中是 eok_call（operand 为 enk_routine），
+// 按名字映射到 llvm.nvvm.barrier0。
+
+// 内建变量名 → NVVM 特殊寄存器名（不含维度后缀）。
+// 返回 nullptr 表示不是内建变量。
+const char* builtin_sreg_base(const char* name) {
+    if (name == nullptr) {
+        return nullptr;
+    }
+    if (std::strcmp(name, "threadIdx") == 0) {
+        return "tid";
+    }
+    if (std::strcmp(name, "blockIdx") == 0) {
+        return "ctaid";
+    }
+    if (std::strcmp(name, "blockDim") == 0) {
+        return "ntid";
+    }
+    if (std::strcmp(name, "gridDim") == 0) {
+        return "nctaid";
+    }
+    return nullptr;
+}
+
+// 成员名（x/y/z）→ 维度后缀；非 x/y/z 返回 nullptr。
+const char* field_dimension_suffix(const char* name) {
+    if (name == nullptr) {
+        return nullptr;
+    }
+    if (std::strcmp(name, "x") == 0) {
+        return "x";
+    }
+    if (std::strcmp(name, "y") == 0) {
+        return "y";
+    }
+    if (std::strcmp(name, "z") == 0) {
+        return "z";
+    }
+    return nullptr;
+}
+
+// 发射对 NVVM 特殊寄存器的读取：llvm.nvvm.read.ptx.sreg.<base>.<dim>。
+// 该 intrinsic 返回 i32（与 CUDA 内建变量的 unsigned int 成员一致）。
+llvm::Value* emit_sreg_read(const char* base, const char* dim, KernelContext& kc) {
+    const std::string fn_name =
+        std::string("llvm.nvvm.read.ptx.sreg.") + base + "." + dim;
+    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent()->getParent()->getFunction(
+        fn_name);
+    if (fn == nullptr) {
+        llvm::FunctionType* fn_ty =
+            llvm::FunctionType::get(llvm::Type::getInt32Ty(kc.ctx), /*isVarArg=*/false);
+        fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, fn_name,
+                                    kc.builder.GetInsertBlock()->getParent()->getParent());
+    }
+    return kc.builder.CreateCall(fn);
+}
+
+// 翻译内建变量的成员访问（threadIdx.x 等）。
+// 返回 nullptr 表示「不是内建变量成员访问」，交由调用方走普通路径。
+llvm::Value* try_translate_builtin_field(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr base = expr->variant.operation.operands;
+    if (base == nullptr || base->kind != enk_variable) {
+        return nullptr;
+    }
+    a_variable_ptr var = base->variant.variable.ptr;
+    const char* base_name = (var != nullptr) ? var->source_corresp.name : nullptr;
+    const char* sreg = builtin_sreg_base(base_name);
+    if (sreg == nullptr) {
+        return nullptr;
+    }
+    an_expr_node_ptr field = base->next;
+    if (field == nullptr || field->kind != enk_field) {
+        fail("内建变量的成员访问缺少字段（M1.2.4 仅支持 threadIdx.x 等）");
+    }
+    const char* dim = field_dimension_suffix(field->variant.field.ptr->source_corresp.name);
+    if (dim == nullptr) {
+        fail("内建变量仅支持 .x/.y/.z 成员（M1.2.4）");
+    }
+    return emit_sreg_read(sreg, dim, kc);
+}
+
+// 翻译内建函数调用（__syncthreads 等）。
+// 返回 nullptr 表示「不是内建函数调用」，交由调用方走普通路径。
+llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr callee = expr->variant.operation.operands;
+    if (callee == nullptr || callee->kind != enk_routine) {
+        return nullptr;
+    }
+    a_routine_ptr r = callee->variant.routine.ptr;
+    const char* name = (r != nullptr) ? r->source_corresp.name : nullptr;
+    if (name == nullptr || std::strcmp(name, "__syncthreads") != 0) {
+        return nullptr;
+    }
+    // __syncthreads() 无参；映射到 llvm.nvvm.barrier0（void()）。
+    if (callee->next != nullptr) {
+        fail("__syncthreads 不接受参数（M1.2.4）");
+    }
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    llvm::Function* fn = module->getFunction("llvm.nvvm.barrier0");
+    if (fn == nullptr) {
+        llvm::FunctionType* fn_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(kc.ctx),
+                                                            /*isVarArg=*/false);
+        fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage,
+                                    "llvm.nvvm.barrier0", module);
+    }
+    return kc.builder.CreateCall(fn);
+}
+
 // 运算符类别（用于把多 case 的 dispatch 收敛为少量分支）。
-enum class OpClass { Assign, Arith, Compare, Cast, Unary, Unsupported };
+enum class OpClass { Assign, Arith, Compare, Cast, Unary, DotField, Call, Unsupported };
 
 // 是否为二元算术运算符（+ - * / %）。
 bool is_arith_operator(an_expr_operator_kind op) {
@@ -549,6 +664,12 @@ OpClass classify_operator(an_expr_operator_kind op) {
     if (op == eok_indirect || op == eok_address_of || op == eok_negate || op == eok_not) {
         return OpClass::Unary;
     }
+    if (op == eok_dot_field) {
+        return OpClass::DotField;
+    }
+    if (op == eok_call) {
+        return OpClass::Call;
+    }
     return OpClass::Unsupported;
 }
 
@@ -566,6 +687,22 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             return translate_cast(expr, kc);
         case OpClass::Unary:
             return translate_unary(op, expr, kc);
+        case OpClass::DotField: {
+            // threadIdx.x 等内建变量成员访问；非内建则报错（M1.2.4 不覆盖普通结构体成员）。
+            llvm::Value* v = try_translate_builtin_field(expr, kc);
+            if (v == nullptr) {
+                fail("不支持的成员访问（M1.2.4 仅覆盖内建变量 threadIdx/blockIdx/blockDim/gridDim）");
+            }
+            return v;
+        }
+        case OpClass::Call: {
+            // __syncthreads 等内建函数调用；非内建则报错（M1.2.4 不覆盖普通函数调用）。
+            llvm::Value* v = try_translate_builtin_call(expr, kc);
+            if (v == nullptr) {
+                fail("不支持的函数调用（M1.2.4 仅覆盖内建函数 __syncthreads）");
+            }
+            return v;
+        }
         default:
             fail("不支持的运算符（M1.2.3 仅覆盖算术/比较/赋值/取址/解引用/转换）");
     }

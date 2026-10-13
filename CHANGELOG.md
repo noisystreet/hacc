@@ -39,6 +39,19 @@
   报错（fail loud），不静默产出错误 IR。新增 golden 测试 `golden_frontend_scalar_kernel` 与
   `golden_device_il_to_ptx_scalar_kernel`（`add_kernel(int*, int, int)`，校验参数/算术/分支）。
   实测细节见 [edg-il-reference §5.5](docs/edg-il-reference.md)。
+- **M1.2.4 EDG IL → LLVM IR（内建变量 + `__syncthreads`）**：`coolicc --from-il` 的翻译器新增
+  两类构造——内建变量成员访问（`threadIdx.x` 等，IL 中为 `eok_dot_field` + `enk_field`）映射到
+  NVVM 特殊寄存器读取（`llvm.nvvm.read.ptx.sreg.{tid,ctaid,ntid,nctaid}.{x,y,z}`）；内建函数调用
+  （`__syncthreads`，IL 中为 `eok_call` + `enk_routine`）映射到 `llvm.nvvm.barrier0`。内建按**名字**
+  识别（与 A2 决策 (a) 一致）。新增 golden 测试 `golden_frontend_tid_kernel` 与
+  `golden_device_il_to_ptx_tid_kernel`（`tid_kernel(int*)`，校验 `%tid.x` / `%ctaid.x` / `bar.sync`）。
+  实测细节见 [edg-il-reference §5.6](docs/edg-il-reference.md)。
+- **`coolfe++` 支持 `#include <cool/...>`（对接 COOLRuntime 运行时头）**：`coolfe++` 无条件定义
+  `-D__COOLCC__`（对标 nvcc 的 `__CUDACC__`），使 COOLRuntime 的 `device_builtins.h` 暴露设备端
+  内建（`threadIdx` / `__syncthreads` 等）与 `__global__` 等限定符宏；并自动探测 gcc 系统头目录
+  以 `--sys_include` 传给 `cpfe`（`cpfe --g++` 不自动带系统 include 路径）。`CMakeLists.txt` 新增
+  `HACC_COOLRUNTIME_DIR`（默认 `../coolruntime`，可覆盖）自动定位运行时头；未找到时相关 golden
+  测试跳过。
 
 ### Changed
 

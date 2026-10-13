@@ -91,7 +91,13 @@
       扩展到标量参数与简单语句（赋值/算术/比较/`if`/`return`/声明/初始化），类型覆盖
       `tk_integer`（i8..i64）/ `tk_float`（float/double）/ `tk_pointer`（ptr）；未覆盖构造 fail loud。
       测试：`golden_frontend_scalar_kernel`、`golden_device_il_to_ptx_scalar_kernel`。见 CHANGELOG。
-- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0/M1.2.1/M1.2.2/M1.2.3 已完成**——见
+- [x] **M1.2.4 EDG IL → LLVM IR（内建变量 + `__syncthreads`）**：**已实现**——`coolicc --from-il` 的
+      翻译器新增内建变量成员访问（`threadIdx.x` 等 → `llvm.nvvm.read.ptx.sreg.*`）与内建函数调用
+      （`__syncthreads` → `llvm.nvvm.barrier0`），按名字识别。`coolfe++` 定义 `-D__COOLCC__` 并自动
+      探测 gcc 系统头（`--sys_include`），支持 `.cu` `#include <cool/cool_runtime.h>`（COOLRuntime
+      运行时头，`HACC_COOLRUNTIME_DIR` 定位）。测试：`golden_frontend_tid_kernel`、
+      `golden_device_il_to_ptx_tid_kernel`（校验 `%tid.x` / `%ctaid.x` / `bar.sync`）。见 CHANGELOG。
+- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0/M1.2.1/M1.2.2/M1.2.3/M1.2.4 已完成**——见
       [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。核心结论：EDG IL 是**内存树**（非文本契约），
       采用**链接 EDG 前端库、内存遍历 IL**（官方「逐函数翻译后丢弃」路径）；阶段 A 的「IL 文件」是
       **二进制 IL**（`il_read` 读回），非文本解析。

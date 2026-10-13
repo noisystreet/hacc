@@ -21,6 +21,49 @@ std::string getenv_str(const char* name) {
     return (v != nullptr && v[0] != '\0') ? std::string(v) : std::string();
 }
 
+// 探测 C++ 系统头目录（供 cpfe 的 --sys_include）。
+//
+// 背景：cpfe 的 --g++ 模式**不自动**带系统 include 路径，故 .cu 一旦 #include
+// 标准头（如 <stddef.h>，经运行时头间接引入）就会报「cannot open source file」。
+// 这里用 `gcc -E -Wp,-v -` 打印的搜索列表补齐（与主机编译器一致）。
+//
+// 返回目录列表；gcc 不可用或解析失败时返回空（此时 .cu 不应 include 标准头）。
+// 结果缓存，避免每次调用都起子进程。
+const std::vector<std::string>& system_include_dirs() {
+    static const std::vector<std::string> dirs = [] {
+        std::vector<std::string> result;
+        FILE* p = popen("gcc -E -Wp,-v - 2>&1", "r");
+        if (p == nullptr) {
+            return result;
+        }
+        char line[4096];
+        bool in_list = false;
+        while (std::fgets(line, sizeof(line), p) != nullptr) {
+            std::string s(line);
+            if (s.find("#include <...> search starts here:") != std::string::npos) {
+                in_list = true;
+                continue;
+            }
+            if (s.find("End of search list.") != std::string::npos) {
+                break;
+            }
+            if (!in_list) {
+                continue;
+            }
+            // 去掉首尾空白（含换行）。
+            const size_t b = s.find_first_not_of(" \t\r\n");
+            const size_t e = s.find_last_not_of(" \t\r\n");
+            if (b != std::string::npos && e != std::string::npos) {
+                result.push_back(s.substr(b, e - b + 1));
+            }
+        }
+        pclose(p);
+        return result;
+    }();
+    return dirs;
+}
+
+
 // 构建期默认值（由 CMake 注入；未注入则为空）。
 #ifndef HACC_DEFAULT_CPFE
 #define HACC_DEFAULT_CPFE ""
@@ -76,6 +119,19 @@ std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts, bool for_
     // --g++：GNU C++ 扩展（__attribute__ 等）；-N：保留未降级 IL（信息最全）。
     args.push_back("--g++");
     args.push_back("-N");
+    // 设备编译标识宏（对标 nvcc 的 __CUDACC__）：让运行时头 device_builtins.h 暴露
+    // 设备端内建（threadIdx / __syncthreads 等）。coolfe++ 是设备前端，故无条件定义。
+    args.push_back("-D__COOLCC__");
+    // 透传的 -I / -D 等必须放在输入文件**之前**：cpfe 只识别输入文件前的选项
+    // （实测：-I 放在输入文件之后会被忽略，导致 #include <cool/...> 找不到）。
+    for (const auto& a : opts.extra_args) {
+        args.push_back(a);
+    }
+    // 系统头目录：cpfe 的 --g++ 不自动带，需显式 --sys_include（否则 <stddef.h> 等找不到）。
+    for (const auto& dir : system_include_dirs()) {
+        args.push_back("--sys_include");
+        args.push_back(dir);
+    }
     if (for_text) {
         // 编译期直接 dump 内存 IL（不经过 cdisp，见方案 §7.1）。
         args.push_back("--il_display");
@@ -87,9 +143,6 @@ std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts, bool for_
         args.push_back(opts.il_output_path);
     }
     args.push_back(opts.input_path);
-    for (const auto& a : opts.extra_args) {
-        args.push_back(a);
-    }
     return args;
 }
 

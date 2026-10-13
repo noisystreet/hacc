@@ -15,6 +15,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(HACC_WITH_EDG "Fetch/build the EDG C++ front end (used by coolfe++)" OFF)
 option(HACC_WITH_LLVM "Link the LLVM/NVPTX backend (used by coolicc)" OFF)
 
+# COOLRuntime 头目录（设备端内建 device_builtins.h 等，供 .cu 源码 #include <cool/...>）。
+# 默认取同级目录 ../coolruntime；可用 -DHACC_COOLRUNTIME_DIR=<path> 覆盖。
+# 仅用于测试（golden .cu 的 -I）；未找到时相关测试跳过，不影响构建。
+set(HACC_COOLRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../coolruntime"
+    CACHE PATH "COOLRuntime 仓库根目录（含 include/cool/）")
+if(EXISTS "${HACC_COOLRUNTIME_DIR}/include/cool/cool_runtime.h")
+    set(HACC_COOLRUNTIME_INCLUDE "${HACC_COOLRUNTIME_DIR}/include")
+    message(STATUS "hacc: COOLRuntime 头目录 = ${HACC_COOLRUNTIME_INCLUDE}")
+else()
+    set(HACC_COOLRUNTIME_INCLUDE "")
+    message(STATUS "hacc: 未找到 COOLRuntime 头（${HACC_COOLRUNTIME_DIR}/include/cool/cool_runtime.h）；"
+                   "依赖它的 golden 测试将跳过。可用 -DHACC_COOLRUNTIME_DIR=<path> 指定。")
+endif()
+
 # 公共支持层：诊断 / 选项 / 版本 / 进程封装（src/support）。
 add_library(hacc_support STATIC
     src/support/version.cpp

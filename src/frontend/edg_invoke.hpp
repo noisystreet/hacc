@@ -54,12 +54,19 @@ std::string resolve_edg_base_dir(const std::string& explicit_dir);
 // 拼装单次 cpfe 命令行（不含程序名）。便于单测与日志。
 //
 // for_text=false：二进制 IL 模式，产出顺序
-//   --edg_base_dir <base> --g++ -N [-o <il>] <input> [extra...]
+//   --edg_base_dir <base> --g++ -N -D__COOLCC__ [extra...] [--sys_include <dir>...]
+//   [-o <il>] <input>
 // for_text=true：文本 IL 模式（--il_display，stdout 输出），产出顺序
-//   --edg_base_dir <base> --g++ -N --il_display -o <throwaway_il> <input> [extra...]
+//   --edg_base_dir <base> --g++ -N -D__COOLCC__ [extra...] [--sys_include <dir>...]
+//   --il_display -o <throwaway_il> <input>
 //
-// 注意：--il_display 与 -o <真实文件> 不可同时出现；文本模式必须用 throwaway_il
-// 抑制 cpfe 把默认名「显示变体」IL 写到当前目录（见 .cpp 中的实测说明）。
+// 注意：
+//   - --il_display 与 -o <真实文件> 不可同时出现；文本模式必须用 throwaway_il
+//     抑制 cpfe 把默认名「显示变体」IL 写到当前目录（见 .cpp 中的实测说明）。
+//   - extra_args（-I/-D）与 --sys_include 必须放在 <input> **之前**：cpfe 只识别
+//     输入文件前的选项（实测：-I 放输入后会被忽略）。
+//   - --sys_include 由 system_include_dirs() 自动探测（gcc 系统头），补齐 cpfe
+//     --g++ 模式缺失的系统 include 路径。
 std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts, bool for_text,
                                          const std::string& throwaway_il);
 
