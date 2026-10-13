@@ -20,6 +20,8 @@ compile_commands.json
 *.ptx
 *.cubin
 *.fatbin
+*.cil
+*.il.txt
 
 # Local configuration
 .env

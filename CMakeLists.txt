@@ -28,8 +28,22 @@ add_executable(hacc src/driver/main.cpp)
 target_link_libraries(hacc PRIVATE hacc_support)
 
 # coolfe++：CUDA 前端（对标 cudafe++，基于 EDG C++，独立可执行）。
-add_executable(coolfe++ src/frontend/main.cpp)
+add_executable(coolfe++ src/frontend/main.cpp src/frontend/edg_invoke.cpp)
 target_link_libraries(coolfe++ PRIVATE hacc_support)
+
+# HACC_WITH_EDG：把 EDG 前端（cpfe）的默认路径注入 coolfe++（M1.2.0）。
+# 关闭时 coolfe++ 仍可构建；运行期需 --cpfe / $HACC_CPFE 指定 cpfe。
+# 路径可用 HACC_EDG_DIR 覆盖（默认 build/il_spike/edg，见 tools/il_spike/fetch_edg.sh）。
+if(HACC_WITH_EDG)
+    set(HACC_EDG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/il_spike/edg"
+        CACHE PATH "EDG 源码/构建根目录（含 build/gcc/bin/cpfe 与 bases/）")
+    set(HACC_DEFAULT_CPFE "${HACC_EDG_DIR}/build/gcc/bin/cpfe")
+    set(HACC_DEFAULT_EDG_BASE "${HACC_EDG_DIR}/bases/docker/dev-env/gcc")
+    target_compile_definitions(coolfe++ PRIVATE
+        HACC_DEFAULT_CPFE="${HACC_DEFAULT_CPFE}"
+        HACC_DEFAULT_EDG_BASE="${HACC_DEFAULT_EDG_BASE}")
+    message(STATUS "hacc: coolfe++ 默认 cpfe = ${HACC_DEFAULT_CPFE}")
+endif()
 
 # coolicc：设备端编译器（对标 cicc，LLVM/NVPTX，独立可执行）。
 add_executable(coolicc src/device/main.cpp)
