@@ -79,7 +79,8 @@
       二进制 IL（`-o`）+ 人类可读文本 IL（`--il_display`）；`-DHACC_WITH_EDG=ON` 注入默认路径。
       测试：`unit_edg_invoke`、`golden_frontend_empty_kernel[_text]`。见 CHANGELOG。
 - [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0 已完成**——见
-      [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。核心结论：EDG IL 是**内存树**（非文本契约），
+      [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)（**新会话接续先读
+      [m1.2-handoff.md](m1.2-handoff.md)**）。核心结论：EDG IL 是**内存树**（非文本契约），
       采用**链接 EDG 前端库、内存遍历 IL**（官方「逐函数翻译后丢弃」路径）；阶段 A 的「IL 文件」是
       **二进制 IL**（`il_read` 读回），非文本解析。
       **已拍板**：① `coolicc` 直接链接 EDG 库；② IL 文件 = 二进制 IL；③ 翻译核心 = 独立库
