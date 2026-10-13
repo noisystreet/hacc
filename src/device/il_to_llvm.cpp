@@ -1,4 +1,4 @@
-// il_to_llvm.cpp —— EDG IL → LLVM IR 翻译适配层（M1.2.2）。
+// il_to_llvm.cpp —— EDG IL → LLVM IR 翻译适配层（M1.2.2 / M1.2.3）。
 //
 // 与 il_read_backend.cpp 同属「EDG 适配层」：EDG 的 IL 表项类型
 // （a_routine / a_scope / an_attribute 等）只在本文件内出现，对外仅暴露
@@ -9,19 +9,30 @@
 //   standalone_utility_early_init() → il_read(FILE*) → standalone_utility_late_init()
 // 之后 il_header.primary_scope 即 file scope，其 routines 为 routine 链表。
 //
-// 一期（M1.2.2）范围：只处理带 cool_global 属性的**无参内核**，为每个内核建一个
-// 空 Function（调用约定 ptx_kernel，属性 nvptx-kernel），函数体为单个
-// BasicBlock + ret void。参数与语句翻译属后续里程碑（M1.2.3+）。
+// 范围：
+//   M1.2.2：带 cool_global 属性的**无参内核** → 空 Function。
+//   M1.2.3：标量参数 + 简单语句（赋值/算术/if）。
+//     - 参数：tk_routine 的 param_type_list → LLVM 参数（标量 int/float/pointer）。
+//     - 语句：stmk_expr / stmk_if / stmk_block / stmk_return / stmk_decl / stmk_init。
+//     - 表达式：enk_variable / enk_constant / enk_operation（算术/比较/赋值/取址/解引用）。
+//     - 类型：tk_integer（i8..i64）/ tk_float（float/double）/ tk_pointer（ptr）。
+//   未覆盖的构造一律报错（fail loud），不静默产出错误 IR。
 #include "device/il_to_llvm.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -42,6 +53,21 @@ namespace {
 // 内核属性名（契约见 tools/il_spike/cuda-attributes.md；A2 决策 (a) 按 name 匹配）。
 constexpr const char* kKernelAttributeName = "cool_global";
 
+// 翻译失败时抛出，由顶层 emit_ptx_from_il 捕获并转成 err_out。
+// 用异常而非错误码，避免在深层递归里层层传递错误状态（clean-code：失败显式）。
+class TranslateError : public std::exception {
+   public:
+    explicit TranslateError(std::string msg) : msg_(std::move(msg)) {}
+    const char* what() const noexcept override { return msg_.c_str(); }
+
+   private:
+    std::string msg_;
+};
+
+[[noreturn]] void fail(const std::string& msg) {
+    throw TranslateError(msg);
+}
+
 // routine 的 source_corresp.attributes 链中是否含指定名字的属性。
 bool has_attribute(an_attribute_ptr attrs, const char* wanted) {
     for (an_attribute_ptr a = attrs; a != nullptr; a = a->next) {
@@ -54,7 +80,11 @@ bool has_attribute(an_attribute_ptr attrs, const char* wanted) {
 
 // 读回 .cil 的 file scope。成功返回 file scope 指针；失败返回 nullptr 并写 *err_out。
 // 与 il_read_backend.cpp 的读回序列一致（early_init → il_read → late_init）。
-a_scope_ptr read_file_scope(const std::string& cil_path, std::string* err_out) {
+//
+// 注意：**不关闭文件**。EDG 的 read_memory_region（scope_for_routine 内部调用）
+// 依赖全局 f_il_input 句柄按需加载函数体 region；关闭文件会导致
+// "invalid intermediate language file"。文件句柄由调用方在翻译结束后关闭。
+a_scope_ptr read_file_scope(const std::string& cil_path, FILE** file_out, std::string* err_out) {
     FILE* f = std::fopen(cil_path.c_str(), "rb");
     if (f == nullptr) {
         if (err_out != nullptr) {
@@ -69,44 +99,612 @@ a_scope_ptr read_file_scope(const std::string& cil_path, std::string* err_out) {
 
     il_read(f);
     standalone_utility_late_init();
-    std::fclose(f);
 
     a_scope_ptr file_scope = il_header.primary_scope;
-    if (file_scope == nullptr && err_out != nullptr) {
-        *err_out = "IL 中未找到 file scope（文件可能损坏或非 EDG IL）";
+    if (file_scope == nullptr) {
+        std::fclose(f);
+        if (err_out != nullptr) {
+            *err_out = "IL 中未找到 file scope（文件可能损坏或非 EDG IL）";
+        }
+        return nullptr;
+    }
+    if (file_out != nullptr) {
+        *file_out = f;
     }
     return file_scope;
 }
 
-// 遍历 file scope 的 routine，为每个内核建空 Function。返回内核数。
-unsigned build_kernels(a_scope_ptr file_scope, llvm::Module& module) {
-    llvm::LLVMContext& ctx = module.getContext();
-    // 内核函数类型：一期只处理无参内核 → void ()。
-    llvm::FunctionType* fn_type = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), false);
-
-    unsigned kernel_count = 0;
-    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
-        if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
-            continue;  // 非内核（设备函数等）一期跳过。
-        }
-        const char* name = r->source_corresp.name;
-        if (name == nullptr) {
-            continue;  // 无源实体名，无法建具名函数。
-        }
-
-        // 调用约定 ptx_kernel（LLVM 的 NVPTX 约定），属性 nvptx-kernel。
-        llvm::Function* fn =
-            llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, name, &module);
-        fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
-        fn->addFnAttr("nvptx-kernel");
-
-        // 空函数体：单个 BasicBlock + ret void。
-        llvm::BasicBlock* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
-        llvm::ReturnInst::Create(ctx, entry);
-
-        ++kernel_count;
+// 整型 kind → LLVM 整型类型。
+llvm::Type* map_integer_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    switch (t->variant.integer.int_kind) {
+        case ik_char:
+        case ik_signed_char:
+        case ik_unsigned_char:
+            return llvm::Type::getInt8Ty(ctx);
+        case ik_short:
+        case ik_unsigned_short:
+            return llvm::Type::getInt16Ty(ctx);
+        case ik_int:
+        case ik_unsigned_int:
+            return llvm::Type::getInt32Ty(ctx);
+        case ik_long:
+        case ik_unsigned_long:
+        case ik_long_long:
+        case ik_unsigned_long_long:
+            return llvm::Type::getInt64Ty(ctx);
+        default:
+            fail("不支持的整型 kind（M1.2.3 仅覆盖 8/16/32/64 位）");
     }
-    return kernel_count;
+}
+
+// 浮点 kind → LLVM 浮点类型。
+llvm::Type* map_float_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    switch (t->variant.float_kind) {
+        case fk_float:
+            return llvm::Type::getFloatTy(ctx);
+        case fk_double:
+            return llvm::Type::getDoubleTy(ctx);
+        default:
+            fail("不支持的浮点 kind（M1.2.3 仅覆盖 float/double）");
+    }
+}
+
+// 把 EDG 类型翻译为 LLVM 类型。M1.2.3 只覆盖标量（整型/浮点）与指针。
+llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    if (t == nullptr) {
+        fail("类型为空指针");
+    }
+    switch (t->kind) {
+        case tk_void:
+            return llvm::Type::getVoidTy(ctx);
+        case tk_integer:
+            // int_kind 决定位宽；explicitly_signed 与 int_kind 共同决定符号。
+            return map_integer_type(t, ctx);
+        case tk_float:
+            return map_float_type(t, ctx);
+        case tk_pointer:
+            // 统一用不透明指针（LLVM 15+ 默认），指向类型不参与 IR 文本。
+            return llvm::PointerType::get(ctx, 0);
+        case tk_typeref:
+            // typedef / 限定符：解引用到目标类型。
+            return map_type(t->variant.typeref.type, ctx);
+        default:
+            fail("不支持的类型 kind（M1.2.3 仅覆盖标量与指针）");
+    }
+}
+
+// 整型是否无符号（用于比较/除法的符号性）。
+bool is_unsigned_integer(a_type_ptr t) {
+    if (t == nullptr || t->kind != tk_integer) {
+        return false;
+    }
+    switch (t->variant.integer.int_kind) {
+        case ik_unsigned_char:
+        case ik_unsigned_short:
+        case ik_unsigned_int:
+        case ik_unsigned_long:
+        case ik_unsigned_long_long:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 单个内核的翻译上下文：变量 → LLVM 存储地址的映射，以及当前 IRBuilder。
+struct KernelContext {
+    llvm::LLVMContext& ctx;
+    llvm::IRBuilder<> builder;
+    // 变量 → 其「存储地址」（alloca）。变量引用先取地址再 load。
+    std::unordered_map<a_variable_ptr, llvm::AllocaInst*> locals;
+
+    explicit KernelContext(llvm::LLVMContext& c) : ctx(c), builder(c) {}
+};
+
+// 前向声明（语句与表达式互相递归）。
+void translate_statement(a_statement_ptr stmt, KernelContext& kc);
+llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc);
+
+// 取变量的「地址」（alloca）。参数在函数入口已 alloca。
+llvm::Value* variable_address(a_variable_ptr var, KernelContext& kc) {
+    auto it = kc.locals.find(var);
+    if (it != kc.locals.end()) {
+        return it->second;
+    }
+    fail("引用了未声明的变量（M1.2.3 仅支持参数与函数内局部变量）");
+}
+
+// 把表达式翻译为「地址」（lvalue）。仅 enk_variable / eok_indirect 支持。
+llvm::Value* translate_expr_address(an_expr_node_ptr expr, KernelContext& kc) {
+    if (expr == nullptr) {
+        fail("取地址时表达式为空");
+    }
+    if (expr->kind == enk_variable) {
+        return variable_address(expr->variant.variable.ptr, kc);
+    }
+    if (expr->kind == enk_operation && expr->variant.operation.kind == eok_indirect) {
+        // *p 的地址就是 p 的值。
+        return translate_expr(expr->variant.operation.operands, kc);
+    }
+    fail("不支持的左值表达式（M1.2.3 仅支持变量与 *p）");
+}
+
+// 常量 → LLVM 常量。
+llvm::Constant* translate_constant(a_constant_ptr c, llvm::LLVMContext& ctx) {
+    if (c == nullptr) {
+        fail("常量为空指针");
+    }
+    switch (c->kind) {
+        case ck_integer: {
+            llvm::Type* ty = map_type(c->type, ctx);
+            // integer_value 是 an_integer_value 结构体（内部多字表示）；
+            // 用 EDG 的 conv_integer_value_to_host_large_integer 取宿主整数值。
+            a_host_large_integer host_val = 0;
+            a_boolean err = FALSE;
+            conv_integer_value_to_host_large_integer(&c->variant.integer_value,
+                                                     /*is_signed=*/FALSE, &host_val, &err);
+            if (err) {
+                fail("整型常量超出宿主表示范围");
+            }
+            uint64_t raw = static_cast<uint64_t>(host_val);
+            return llvm::ConstantInt::get(ty, raw, /*isSigned=*/false);
+        }
+        case ck_float: {
+            llvm::Type* ty = map_type(c->type, ctx);
+            // an_internal_float_value 是内部字节表示；用 EDG 的 fetch_host_fp_value
+            // 取宿主浮点值，再转 double（M1.2.3 只处理 float/double 字面量）。
+            a_float_kind fk = (c->type->kind == tk_float) ? c->type->variant.float_kind : fk_double;
+            a_host_fp_value hv = fetch_host_fp_value(fk, &c->variant.float_value);
+            double d = static_cast<double>(hv);
+            return llvm::ConstantFP::get(ty, d);
+        }
+        default:
+            fail("不支持的常量 kind（M1.2.3 仅覆盖整型与浮点字面量）");
+    }
+}
+
+// 取二元运算符的两个操作数（a, b）；缺失则报错。
+an_expr_node_ptr binary_operands(an_expr_node_ptr operands, const char* what) {
+    an_expr_node_ptr a = operands;
+    an_expr_node_ptr b = (a != nullptr) ? a->next : nullptr;
+    if (a == nullptr || b == nullptr) {
+        fail(std::string(what) + "缺少操作数");
+    }
+    return a;
+}
+
+// 赋值：operands: [lhs, rhs]；lhs 是左值。
+llvm::Value* translate_assign(an_expr_node_ptr operands, KernelContext& kc) {
+    an_expr_node_ptr lhs = operands;
+    an_expr_node_ptr rhs = (lhs != nullptr) ? lhs->next : nullptr;
+    if (lhs == nullptr || rhs == nullptr) {
+        fail("赋值运算符缺少操作数");
+    }
+    llvm::Value* addr = translate_expr_address(lhs, kc);
+    llvm::Value* val = translate_expr(rhs, kc);
+    kc.builder.CreateStore(val, addr);
+    return val;
+}
+
+// 二元算术（+ - * / %）：按操作数类型选浮点/整型指令。
+llvm::Value* translate_arith(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr a = binary_operands(expr->variant.operation.operands, "二元算术运算符");
+    an_expr_node_ptr b = a->next;
+    llvm::Value* va = translate_expr(a, kc);
+    llvm::Value* vb = translate_expr(b, kc);
+    const bool is_fp = expr->type != nullptr && expr->type->kind == tk_float;
+    if (is_fp) {
+        switch (op) {
+            case eok_add:
+                return kc.builder.CreateFAdd(va, vb);
+            case eok_subtract:
+                return kc.builder.CreateFSub(va, vb);
+            case eok_multiply:
+                return kc.builder.CreateFMul(va, vb);
+            case eok_divide:
+                return kc.builder.CreateFDiv(va, vb);
+            default:
+                fail("浮点不支持取余（M1.2.3）");
+        }
+    }
+    switch (op) {
+        case eok_add:
+            return kc.builder.CreateAdd(va, vb);
+        case eok_subtract:
+            return kc.builder.CreateSub(va, vb);
+        case eok_multiply:
+            return kc.builder.CreateMul(va, vb);
+        case eok_divide:
+            return is_unsigned_integer(expr->type) ? kc.builder.CreateUDiv(va, vb)
+                                                   : kc.builder.CreateSDiv(va, vb);
+        default:
+            return is_unsigned_integer(expr->type) ? kc.builder.CreateURem(va, vb)
+                                                   : kc.builder.CreateSRem(va, vb);
+    }
+}
+
+// 浮点比较指令。
+llvm::Value* emit_fp_compare(an_expr_operator_kind op, llvm::Value* va, llvm::Value* vb,
+                             KernelContext& kc) {
+    switch (op) {
+        case eok_lt:
+            return kc.builder.CreateFCmpOLT(va, vb);
+        case eok_le:
+            return kc.builder.CreateFCmpOLE(va, vb);
+        case eok_gt:
+            return kc.builder.CreateFCmpOGT(va, vb);
+        case eok_ge:
+            return kc.builder.CreateFCmpOGE(va, vb);
+        case eok_eq:
+            return kc.builder.CreateFCmpOEQ(va, vb);
+        default:
+            return kc.builder.CreateFCmpONE(va, vb);
+    }
+}
+
+// 按操作数类型（浮点/有符号/无符号）发射比较指令。
+llvm::Value* emit_compare(an_expr_operator_kind op, bool is_fp, bool is_unsigned, llvm::Value* va,
+                          llvm::Value* vb, KernelContext& kc) {
+    if (is_fp) {
+        return emit_fp_compare(op, va, vb, kc);
+    }
+    switch (op) {
+        case eok_lt:
+            return is_unsigned ? kc.builder.CreateICmpULT(va, vb)
+                               : kc.builder.CreateICmpSLT(va, vb);
+        case eok_le:
+            return is_unsigned ? kc.builder.CreateICmpULE(va, vb)
+                               : kc.builder.CreateICmpSLE(va, vb);
+        case eok_gt:
+            return is_unsigned ? kc.builder.CreateICmpUGT(va, vb)
+                               : kc.builder.CreateICmpSGT(va, vb);
+        case eok_ge:
+            return is_unsigned ? kc.builder.CreateICmpUGE(va, vb)
+                               : kc.builder.CreateICmpSGE(va, vb);
+        case eok_eq:
+            return kc.builder.CreateICmpEQ(va, vb);
+        default:
+            return kc.builder.CreateICmpNE(va, vb);
+    }
+}
+
+// 比较（< <= > >= == !=）：按操作数类型选浮点/有符号/无符号指令。
+llvm::Value* translate_compare(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr a = binary_operands(expr->variant.operation.operands, "比较运算符");
+    an_expr_node_ptr b = a->next;
+    llvm::Value* va = translate_expr(a, kc);
+    llvm::Value* vb = translate_expr(b, kc);
+    const bool is_fp = a->type != nullptr && a->type->kind == tk_float;
+    const bool is_unsigned = is_unsigned_integer(a->type);
+    return emit_compare(op, is_fp, is_unsigned, va, vb, kc);
+}
+
+// 标量间转换：整型↔整型、整型↔浮点、浮点↔浮点。
+llvm::Value* translate_cast(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr operand = expr->variant.operation.operands;
+    llvm::Value* v = translate_expr(operand, kc);
+    llvm::Type* dst = map_type(expr->type, kc.ctx);
+    llvm::Type* src = v->getType();
+    if (src == dst) {
+        return v;
+    }
+    const bool src_fp = src->isFloatingPointTy();
+    const bool dst_fp = dst->isFloatingPointTy();
+    if (src_fp && dst_fp) {
+        return kc.builder.CreateFPCast(v, dst);
+    }
+    if (!src_fp && !dst_fp) {
+        return kc.builder.CreateIntCast(v, dst, /*isSigned=*/!is_unsigned_integer(operand->type));
+    }
+    if (!src_fp && dst_fp) {
+        return is_unsigned_integer(operand->type) ? kc.builder.CreateUIToFP(v, dst)
+                                                  : kc.builder.CreateSIToFP(v, dst);
+    }
+    return is_unsigned_integer(expr->type) ? kc.builder.CreateFPToUI(v, dst)
+                                           : kc.builder.CreateFPToSI(v, dst);
+}
+
+// 一元运算：取负 / 取反 / 取址 / 解引用。
+llvm::Value* translate_unary(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr operand = expr->variant.operation.operands;
+    switch (op) {
+        case eok_indirect: {
+            // *p：取 p 的值作为地址，再 load。
+            llvm::Value* addr = translate_expr(operand, kc);
+            return kc.builder.CreateLoad(map_type(expr->type, kc.ctx), addr);
+        }
+        case eok_address_of:
+            // &x：取 x 的地址。
+            return translate_expr_address(operand, kc);
+        case eok_negate: {
+            llvm::Value* v = translate_expr(operand, kc);
+            const bool is_fp = expr->type != nullptr && expr->type->kind == tk_float;
+            return is_fp ? kc.builder.CreateFNeg(v) : kc.builder.CreateNeg(v);
+        }
+        default: {
+            llvm::Value* v = translate_expr(operand, kc);
+            return kc.builder.CreateNot(v);
+        }
+    }
+}
+
+// 运算符类别（用于把多 case 的 dispatch 收敛为少量分支）。
+enum class OpClass { Assign, Arith, Compare, Cast, Unary, Unsupported };
+
+// 是否为二元算术运算符（+ - * / %）。
+bool is_arith_operator(an_expr_operator_kind op) {
+    switch (op) {
+        case eok_add:
+        case eok_subtract:
+        case eok_multiply:
+        case eok_divide:
+        case eok_remainder:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 是否为比较运算符（< <= > >= == !=）。
+bool is_compare_operator(an_expr_operator_kind op) {
+    switch (op) {
+        case eok_lt:
+        case eok_le:
+        case eok_gt:
+        case eok_ge:
+        case eok_eq:
+        case eok_ne:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 把 EDG 运算符 kind 归类。
+OpClass classify_operator(an_expr_operator_kind op) {
+    if (op == eok_assign) {
+        return OpClass::Assign;
+    }
+    if (is_arith_operator(op)) {
+        return OpClass::Arith;
+    }
+    if (is_compare_operator(op)) {
+        return OpClass::Compare;
+    }
+    if (op == eok_cast) {
+        return OpClass::Cast;
+    }
+    if (op == eok_indirect || op == eok_address_of || op == eok_negate || op == eok_not) {
+        return OpClass::Unary;
+    }
+    return OpClass::Unsupported;
+}
+
+// 运算符翻译主入口：按运算符类别分派到具体翻译函数。
+llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
+    const an_expr_operator_kind op = expr->variant.operation.kind;
+    switch (classify_operator(op)) {
+        case OpClass::Assign:
+            return translate_assign(expr->variant.operation.operands, kc);
+        case OpClass::Arith:
+            return translate_arith(op, expr, kc);
+        case OpClass::Compare:
+            return translate_compare(op, expr, kc);
+        case OpClass::Cast:
+            return translate_cast(expr, kc);
+        case OpClass::Unary:
+            return translate_unary(op, expr, kc);
+        default:
+            fail("不支持的运算符（M1.2.3 仅覆盖算术/比较/赋值/取址/解引用/转换）");
+    }
+}
+
+// 表达式翻译主入口：返回 rvalue（变量引用会 load）。
+llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc) {
+    if (expr == nullptr) {
+        fail("表达式为空指针");
+    }
+    switch (expr->kind) {
+        case enk_variable: {
+            llvm::Value* addr = variable_address(expr->variant.variable.ptr, kc);
+            return kc.builder.CreateLoad(map_type(expr->type, kc.ctx), addr);
+        }
+        case enk_constant:
+            return translate_constant(expr->variant.constant.ptr, kc.ctx);
+        case enk_operation:
+            return translate_operation(expr, kc);
+        default:
+            fail("不支持的表达式 kind（M1.2.3 仅覆盖变量/常量/运算）");
+    }
+}
+
+// 声明语句：为每个实体建 alloca（局部变量）。
+// entities 是 tagged pointer 链表；只处理 iek_variable。
+void translate_decl(a_statement_ptr stmt, KernelContext& kc) {
+    for (an_il_entity_list_entry_ptr e = stmt->variant.decl.entities; e != nullptr; e = e->next) {
+        if (e->entity.kind != iek_variable) {
+            continue;
+        }
+        a_variable_ptr v = reinterpret_cast<a_variable_ptr>(e->entity.ptr);
+        if (kc.locals.count(v) != 0) {
+            continue;
+        }
+        llvm::Type* ty = map_type(v->type, kc.ctx);
+        llvm::AllocaInst* slot = kc.builder.CreateAlloca(ty, nullptr, v->source_corresp.name);
+        kc.locals[v] = slot;
+    }
+}
+
+// 动态初始化：int c = a + b; 走这里（dik_expression）。
+void translate_init(a_statement_ptr stmt, KernelContext& kc) {
+    a_dynamic_init_ptr di = stmt->variant.dynamic_init;
+    if (di == nullptr) {
+        fail("stmk_init 缺少 dynamic_init");
+    }
+    if (di->kind != dik_expression) {
+        fail("不支持的初始化 kind（M1.2.3 仅覆盖 dik_expression）");
+    }
+    a_variable_ptr var = di->variable;
+    if (var == nullptr) {
+        fail("stmk_init 的 dynamic_init 未指向变量");
+    }
+    auto it = kc.locals.find(var);
+    if (it == kc.locals.end()) {
+        // 声明语句可能缺失（如参数初始化），补建 alloca。
+        llvm::Type* ty = map_type(var->type, kc.ctx);
+        llvm::AllocaInst* slot = kc.builder.CreateAlloca(ty, nullptr, var->source_corresp.name);
+        it = kc.locals.emplace(var, slot).first;
+    }
+    llvm::Value* val = translate_expr(di->variant.expression, kc);
+    kc.builder.CreateStore(val, it->second);
+}
+
+// if 语句：条件转 i1，建 then/else/end 三块并递归翻译分支。
+void translate_if(a_statement_ptr stmt, KernelContext& kc) {
+    llvm::Value* cond = translate_expr(stmt->expr, kc);
+    // 条件已标准化为整型/布尔；转成 i1 供 br 使用。
+    if (!cond->getType()->isIntegerTy(1)) {
+        cond = kc.builder.CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0));
+    }
+    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock* then_bb = llvm::BasicBlock::Create(kc.ctx, "if.then", fn);
+    llvm::BasicBlock* else_bb = llvm::BasicBlock::Create(kc.ctx, "if.else", fn);
+    llvm::BasicBlock* end_bb = llvm::BasicBlock::Create(kc.ctx, "if.end", fn);
+
+    kc.builder.CreateCondBr(cond, then_bb, else_bb);
+
+    kc.builder.SetInsertPoint(then_bb);
+    translate_statement(stmt->variant.if_stmt.then_statement, kc);
+    kc.builder.CreateBr(end_bb);
+
+    kc.builder.SetInsertPoint(else_bb);
+    translate_statement(stmt->variant.if_stmt.else_statement, kc);
+    kc.builder.CreateBr(end_bb);
+
+    kc.builder.SetInsertPoint(end_bb);
+}
+
+// 语句翻译。
+void translate_statement(a_statement_ptr stmt, KernelContext& kc) {
+    if (stmt == nullptr) {
+        return;
+    }
+    switch (stmt->kind) {
+        case stmk_block:
+            // 语句块：顺序翻译 statements 链。
+            for (a_statement_ptr s = stmt->variant.block.statements; s != nullptr; s = s->next) {
+                translate_statement(s, kc);
+            }
+            return;
+        case stmk_expr:
+            translate_expr(stmt->expr, kc);
+            return;
+        case stmk_decl:
+            translate_decl(stmt, kc);
+            return;
+        case stmk_init:
+            translate_init(stmt, kc);
+            return;
+        case stmk_if:
+            translate_if(stmt, kc);
+            return;
+        case stmk_return:
+            // 内核返回 void；M1.2.3 只处理无返回值内核。
+            kc.builder.CreateRetVoid();
+            return;
+        case stmk_empty:
+            return;
+        default:
+            fail("不支持的语句 kind（M1.2.3 仅覆盖 block/expr/decl/init/if/return/empty）");
+    }
+}
+
+// 取函数体 scope：用 EDG 的 scope_for_routine（il.h:3992）。
+// 它内部会按需 read_memory_region 加载函数体所在 region，再返回顶层 scope。
+// 直接读 il_header.function_def_table 会拿到 nil（函数体 region 未加载）。
+a_scope_ptr find_function_scope(a_routine_ptr r) {
+    if (r->function_def_number == 0) {
+        return nullptr;
+    }
+    return scope_for_routine(r);
+}
+
+// 取函数体 scope 的第 idx 个参数变量（按声明顺序）。
+a_variable_ptr nth_parameter(a_scope_ptr body_scope, unsigned idx) {
+    unsigned i = 0;
+    for (a_variable_ptr v = body_scope->variant.routine.parameters; v != nullptr; v = v->next) {
+        if (i == idx) {
+            return v;
+        }
+        ++i;
+    }
+    return nullptr;
+}
+
+// 为内核建 Function：参数 + 函数体。
+llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
+    llvm::LLVMContext& ctx = module.getContext();
+    const char* name = r->source_corresp.name;
+    if (name == nullptr) {
+        fail("内核无源实体名，无法建具名函数");
+    }
+
+    // 函数类型：从 routine 类型取返回类型与参数列表。
+    a_type_ptr fn_type = r->type;
+    if (fn_type == nullptr || fn_type->kind != tk_routine) {
+        fail("内核的 routine 类型无效");
+    }
+    llvm::Type* ret_ty = map_type(fn_type->variant.routine.return_type, ctx);
+
+    std::vector<llvm::Type*> param_tys;
+    a_routine_type_supplement_ptr supp = fn_type->variant.routine.extra_info;
+    if (supp != nullptr) {
+        for (a_param_type_ptr p = supp->param_type_list; p != nullptr; p = p->next) {
+            param_tys.push_back(map_type(p->type, ctx));
+        }
+    }
+
+    llvm::FunctionType* llvm_fn_ty = llvm::FunctionType::get(ret_ty, param_tys, false);
+    llvm::Function* fn =
+        llvm::Function::Create(llvm_fn_ty, llvm::GlobalValue::ExternalLinkage, name, &module);
+    fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
+    fn->addFnAttr("nvptx-kernel");
+
+    // 函数体：entry block + 参数 alloca + 语句翻译。
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    KernelContext kc(ctx);
+    kc.builder.SetInsertPoint(entry);
+
+    // 函数体 scope（经 function_def_number 定位）。
+    a_scope_ptr body_scope = nullptr;
+    if (r->function_def_number != 0) {
+        body_scope = find_function_scope(r);
+    }
+
+    // 参数：为每个参数建 alloca 并 store 入参（便于取址与赋值）。
+    unsigned idx = 0;
+    for (llvm::Argument& arg : fn->args()) {
+        llvm::AllocaInst* slot = kc.builder.CreateAlloca(arg.getType(), nullptr, arg.getName());
+        kc.builder.CreateStore(&arg, slot);
+        // 把 EDG 参数变量与 alloca 关联（按声明顺序）。
+        if (body_scope != nullptr) {
+            a_variable_ptr pv = nth_parameter(body_scope, idx);
+            if (pv != nullptr) {
+                kc.locals[pv] = slot;
+            }
+        }
+        ++idx;
+    }
+
+    // 翻译函数体顶层 block。
+    if (body_scope != nullptr && body_scope->assoc_block != nullptr) {
+        translate_statement(body_scope->assoc_block, kc);
+    }
+
+    // 若最后一条语句未终止（如无显式 return），补 ret void。
+    if (kc.builder.GetInsertBlock()->getTerminator() == nullptr) {
+        kc.builder.CreateRetVoid();
+    }
+    return fn;
 }
 
 }  // namespace
@@ -121,7 +719,8 @@ bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std
     }
     ptx_out->clear();
 
-    a_scope_ptr file_scope = read_file_scope(cil_path, err_out);
+    FILE* il_file = nullptr;
+    a_scope_ptr file_scope = read_file_scope(cil_path, &il_file, err_out);
     if (file_scope == nullptr) {
         return false;
     }
@@ -131,7 +730,25 @@ bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std
     llvm::Module module("hacc", ctx);
     module.setTargetTriple("nvptx64-nvidia-cuda");
 
-    if (build_kernels(file_scope, module) == 0) {
+    unsigned kernel_count = 0;
+    try {
+        for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
+            if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
+                continue;  // 非内核（设备函数等）一期跳过。
+            }
+            build_kernel(r, module);
+            ++kernel_count;
+        }
+    } catch (const TranslateError& e) {
+        std::fclose(il_file);
+        if (err_out != nullptr) {
+            *err_out = std::string("IL → LLVM 翻译失败: ") + e.what();
+        }
+        return false;
+    }
+    std::fclose(il_file);
+
+    if (kernel_count == 0) {
         if (err_out != nullptr) {
             *err_out = "IL 中未找到内核（带 cool_global 属性的 routine）";
         }
