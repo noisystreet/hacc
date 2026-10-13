@@ -17,6 +17,17 @@
 - [x] **A1 评审 ADR 0001–0004**：已定稿——ADR 0001–0004 与 0005 均为 `Accepted（已拍板）`。
 - [x] **A2 前端集成接口与切 B 阈值**：**已定——一期只做阶段 A（IL 文件接口）**，阶段 B（回调）延后；
       IL spike 判据见方案 §5.2（`__global__`/`<<<>>>`/`threadIdx`/`__syncthreads` 及地址空间等关键属性缺失即判「表达力不足」）。
+      **（M0 IL spike）** EDG 已按 ADR 0005 拉取并构建（`cpfe` 7.0）、IL 导出链路已打通
+      （`cpfe --edg_base_dir … --g++ -N --il_display`，见 [`tools/il_spike/`](../tools/il_spike/README.md)）；
+      **已核验（IL 落盘后全量检索）**：IL 有一等的属性表示（`attribute@…` 实体 + 实体
+      `source_corresp.attributes:` 引用，含 `kind`/`family`/`name`/`arguments`）；
+      **默认只保留 EDG 已知属性名**（如 `aligned`），未知属性被 `warning: unknown attribute`
+      丢弃。**但已实测：EDG 构建期开关 `RECORD_UNRECOGNIZED_ATTRIBUTES=TRUE`
+      （`host_envir.h`，零源码改动）即可让未知属性（含名字/参数）随 IL 传递并挂到实体上**——
+      即 CUDA 存储/执行限定符以 `__attribute__((…))` 承载，在**阶段 A 内可行**；
+      若要正式「注册属性族」，另有 `attribute.c` 的 6 步 recipe（需 EDG 源码补丁）。
+      **A2 的「阶段 A 通过 / 切阶段 B」与 (a)/(b) 取舍待维护者据方案 §5.2 拍板**（详见
+      [`tools/il_spike/README.md`](../tools/il_spike/README.md)「属性核验结论」）。
 - [x] **A3 `coolfe++` / `coolicc` 的形态**：**已定——独立可执行文件**，由 `hacc` driver 子进程编排
       （降低耦合、便于独立验证）。方案 §4/§5/§6.1 已回写。
 - [x] **A4 前端↔设备端的中间产物切分与命名**：**已定——参考 nvcc、一期只保留基本集**
