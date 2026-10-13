@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "device/il_read_backend.hpp"
+#include "device/il_to_llvm.hpp"
 #include "device/nvptx_backend.hpp"
 #include "support/version.hpp"
 
@@ -24,13 +25,15 @@ constexpr const char* kUsage =
     "用法: coolicc [选项] [input]\n"
     "  --emit=ptx      发射 PTX（M1.1；输入为 LLVM IR 文本）\n"
     "  --emit=il-list  读回 EDG 二进制 IL（.cil），列出 file scope 的 routine（M1.2.1）\n"
+    "  --from-il       输入为 EDG 二进制 IL（.cil），先翻译为 LLVM IR 再发射（M1.2.2）\n"
     "  -arch=sm_XX     目标架构（默认 sm_80，见 B1）\n"
     "  -o <file>       输出文件（默认 stdout）\n"
     "  --version       打印版本\n"
     "  -h, --help      打印本帮助\n"
     "\n"
     "M1.1：--emit=ptx 输入为 LLVM IR 文本（省略 input 则读 stdin）。\n"
-    "M1.2.1：--emit=il-list 输入为 EDG 二进制 IL（.cil）。\n";
+    "M1.2.1：--emit=il-list 输入为 EDG 二进制 IL（.cil）。\n"
+    "M1.2.2：--emit=ptx --from-il 输入为 EDG 二进制 IL（.cil），翻译为 LLVM IR 后发射。\n";
 
 std::string read_all(std::istream& in) {
     std::ostringstream ss;
@@ -44,6 +47,7 @@ int main(int argc, char** argv) {
     std::string input_path;
     std::string output_path;
     std::string emit = "ptx";  // 默认发射 PTX（M1.1）
+    bool from_il = false;      // M1.2.2：输入为 EDG 二进制 IL（.cil）
     hacc::device::NvptxOptions opts;
 
     for (int i = 1; i < argc; ++i) {
@@ -62,6 +66,10 @@ int main(int argc, char** argv) {
         }
         if (std::strcmp(a, "-o") == 0 && i + 1 < argc) {
             output_path = argv[++i];
+            continue;
+        }
+        if (std::strcmp(a, "--from-il") == 0) {
+            from_il = true;
             continue;
         }
         if (std::strncmp(a, "--emit=", 7) == 0) {
@@ -110,6 +118,31 @@ int main(int argc, char** argv) {
                 return 1;
             }
             out << out_text;
+        }
+        return 0;
+    }
+
+    // M1.2.2：--from-il 输入为 EDG 二进制 IL（.cil），先翻译为 LLVM IR 再发射。
+    if (from_il) {
+        if (input_path.empty()) {
+            std::fprintf(stderr, "coolicc: --from-il 需要输入 .cil 文件\n");
+            return 2;
+        }
+        std::string ptx;
+        std::string err;
+        if (!hacc::device::emit_ptx_from_il(input_path, opts, &ptx, &err)) {
+            std::fprintf(stderr, "coolicc: IL → PTX 失败: %s\n", err.c_str());
+            return 1;
+        }
+        if (output_path.empty()) {
+            std::fwrite(ptx.data(), 1, ptx.size(), stdout);
+        } else {
+            std::ofstream out(output_path, std::ios::binary);
+            if (!out) {
+                std::fprintf(stderr, "coolicc: 无法写入 %s\n", output_path.c_str());
+                return 1;
+            }
+            out << ptx;
         }
         return 0;
     }

@@ -123,8 +123,19 @@ if(HACC_WITH_LLVM)
     else()
         target_link_libraries(coolicc PRIVATE ${LLVM_LIBRARIES})
     endif()
+
+    # M1.2.2：IL → LLVM IR 翻译（需 EDG + LLVM 同时开启）。
+    # il_to_llvm.cpp 同时 include EDG 头与 LLVM 头，故仅在两者都开时编译；
+    # 否则走 stub（il_to_llvm_stub.cpp），--from-il 明确报错。
+    if(HACC_WITH_EDG)
+        target_sources(coolicc PRIVATE src/device/il_to_llvm.cpp)
+    else()
+        target_sources(coolicc PRIVATE src/device/il_to_llvm_stub.cpp)
+    endif()
 else()
     target_sources(coolicc PRIVATE src/device/nvptx_backend_stub.cpp)
+    # 无 LLVM 时 IL → IR 翻译也不可用，走 stub。
+    target_sources(coolicc PRIVATE src/device/il_to_llvm_stub.cpp)
 endif()
 
 include(CTest)

@@ -44,6 +44,16 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
     set_tests_properties(golden_device_il_list_empty_kernel PROPERTIES
         PASS_REGULAR_EXPRESSION "empty_kernel"
         DEPENDS golden_frontend_empty_kernel)
+
+    # M1.2.2 golden：.cil → LLVM IR → PTX（需 EDG + LLVM 同时开启）。
+    # 校验最小内核产出 `.visible .entry empty_kernel`。
+    if(HACC_WITH_LLVM)
+        add_test(NAME golden_device_il_to_ptx_empty_kernel
+            COMMAND coolicc --from-il -arch=sm_80 "${_ek_cil}")
+        set_tests_properties(golden_device_il_to_ptx_empty_kernel PROPERTIES
+            PASS_REGULAR_EXPRESSION "\\.visible \\.entry empty_kernel"
+            DEPENDS golden_frontend_empty_kernel)
+    endif()
 endif()
 
 # M1.1 golden：LLVM IR → PTX（仅当 coolicc 编译了 LLVM 后端时）。
