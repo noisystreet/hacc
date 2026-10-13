@@ -125,14 +125,67 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
 - 目标是**把 CUDA 属性作为长期稳定契约**（多后端、跨 TU、要 EDG 帮查错）→ (b) 更值。
 - 两者**不互斥**：常见做法是先用 (a) 打通，等属性集合稳定后再补 (b) 的注册表。
 
-**折中建议**：先 (a) 落地（成本最低、可回退），同时把「CUDA 属性清单」固定成一份文档/枚举；
-等清单稳定，再按 `attribute.c` 的 6 步 recipe 升级到 (b)。通用性最终由 (b) 兜底，短期不被补丁维护拖住。
+## (a)/(b) 取舍：通用性对比
+
+**结论：论「通用性」，(b) 正式注册属性族更强；(a) 只是更省事。**
+
+| 维度 | (a) `RECORD_UNRECOGNIZED_ATTRIBUTES` | (b) 注册属性族 |
+| --- | --- | --- |
+| 属性名 | 任意名字都能进 IL，但 `kind` 恒为 `unrecognized` | 每个属性有**稳定 `kind`**（如 `ak_shared`） |
+| 语义 | EDG 不校验、不生效，纯「原样搬运」 | EDG 原生识别/校验/生效（适用约束、apply 函数） |
+| 下游消费 | 消费方只能靠 `name` 字符串匹配 | 可按 `kind` 枚举匹配，**不依赖拼写** |
+| 跨 TU 一致性 | 无规则 | 可经 `attr_corresp_table[]` 定义匹配规则 |
+| 可扩展性 | 加新属性零成本，但都堆在 `unrecognized` 里 | 加新属性要改表，但语义清晰、可演进 |
+| 维护成本 | 零补丁 | 需在 ADR 0005 固定 commit 上维护补丁 |
+
+- (a) 的「通用」是「什么都能塞进去」，但塞进去的东西**没有类型**：下游（`coolicc`）只能按字符串认属性，
+  拼写一变就断，也无法让 EDG 做适用性检查。
+- (b) 是「有类型的通用」：属性成为 IL 的一等公民，语义稳定、可校验、可跨 TU 比对。
+
+**但「更通用」不等于「现在就该选」：**
+
+- 目标是**尽快跑通阶段 A、验证端到端** → (a) 更合适：零补丁、立刻可用，且**不锁死未来**
+  （将来转 (b) 时，IL 里已有的属性名可平滑迁移）。
+- 目标是**把 CUDA 属性作为长期稳定契约**（多后端、跨 TU、要 EDG 帮查错）→ (b) 更值。
+- 两者**不互斥**：常见做法是先用 (a) 打通，等属性集合稳定后再补 (b) 的注册表。
+
+## 决策：选 (a)（已定）
+
+**一期采用路线 (a)：EDG 构建期开启 `RECORD_UNRECOGNIZED_ATTRIBUTES`，零 EDG 源码补丁。**
+
+- 理由：一期目标是**跑通阶段 A（IL 文件）端到端**，成本最低、可回退；且不锁死未来
+  （属性名可平滑迁移到 (b)）。
+- 配套：把「CUDA 属性清单」固定成一份文档/枚举（见下），供 `coolfe++` 前置改写与 `coolicc` 消费对齐。
+- 升级路径：属性清单稳定后，再按 `attribute.c` 的 6 步 recipe 升级到 (b)（届时另开 ADR/方案修订）。
+
+**落地要点（待实现）：**
+
+1. 在 hacc 的 EDG 构建里注入 `RECORD_UNRECOGNIZED_ATTRIBUTES=TRUE`。
+   注意 EDG 把 `.c` 源当 **C++** 编译（`set_source_files_properties(... LANGUAGE CXX)`），
+   故须用 **`CMAKE_CXX_FLAGS`**（`CMAKE_C_FLAGS` 不生效）。
+2. 该变量是**全局量**：阶段 B（链接 EDG 前端库）可在运行期置真；阶段 A（调 `edgcpfe`）需构建期定义。
+3. 属性以 `__attribute__((…))` 承载（或由 `coolfe++` 前置改写生成），IL 中表现为
+   `file-scope attribute@…`（`kind: unrecognized`、带 `name`/`arguments`），并挂到实体
+   `source_corresp.attributes:`。
+
+**CUDA 属性清单（初稿，待细化）：**
+
+| CUDA 概念 | 拟用属性名 | 备注 |
+| --- | --- | --- |
+| `__global__` | `cool_global` | 内核 / 执行空间标记 |
+| `__device__` | `cool_device` | 设备函数 |
+| `__host__` | `cool_host` | 主机函数 |
+| `__shared__` | `cool_shared` | 共享内存（地址空间） |
+| `__constant__` | `cool_constant` | 常量内存（地址空间） |
+| 地址空间 | `cool_address_space(n)` | 或复用 `address_space` |
+| `__syncthreads()` | （普通调用） | 同步点，IL 中即 routine 调用；如需专门标记另议 |
 
 ## 待办（下一步）
 
-- 定 (a)/(b) 取舍（见上节），并据此回写方案 §5.2 / [ADR 0001](../../docs/adr/0001-edg-cpp-frontend.md)。
-- 若选 (a)：确认 `RECORD_UNRECOGNIZED_ATTRIBUTES` 在 hacc 的 EDG 构建里如何注入
-  （CMake 变量，或在 FetchContent 后作为补丁）。
+- **（已定）(a)/(b) 取舍 = (a)**；据此回写方案 §5.2 / [ADR 0001](../../docs/adr/0001-edg-cpp-frontend.md)
+  （架构文档，需人工批准后修改）。
+- 实现 (a)：在 hacc 的 EDG 构建里注入 `RECORD_UNRECOGNIZED_ATTRIBUTES=TRUE`（用 `CMAKE_CXX_FLAGS`）。
+- 细化上面的「CUDA 属性清单」，与 `coolfe++` 前置改写、`coolicc` 消费对齐。
 - 复核二进制 IL 往返：本构建下 `cdisp <file>` 对现有 `*.cil` 报
   `invalid intermediate language file`（疑似格式/参数不符），待查；当前用 `--il_display`
   重定向落盘已能满足检索需求。

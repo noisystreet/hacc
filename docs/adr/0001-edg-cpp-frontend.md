@@ -34,6 +34,10 @@ hacc 的目标是解析**真实 CUDA C++ 子集**（`__global__` / `<<<>>>` / `d
   - **阶段 B（生产）**：链接 EDG 前端库并实现其**后端回调接口**，单进程内直接构建 LLVM IR。
 - **顺序已拍板：先阶段 A（IL）后阶段 B（回调）**。先以 IL 跑通端到端（M0 spike 需先验证 EDG IL 是否保留
   CUDA 相关属性：地址空间、`__shared__`/`__constant__`、同步点）；若 IL 表达力不足，则**提前切换**到阶段 B。
+- **M0 IL spike 结论（已核验，2026-10）**：EDG IL 有一等的属性表示，但默认丢弃未知属性；
+  **已定采用「构建期开启 `RECORD_UNRECOGNIZED_ATTRIBUTES`」路线（零 EDG 源码补丁）**，
+  使 CUDA 属性以 `__attribute__((…))` 承载并随 IL 传递，**阶段 A 内成立，不触发切阶段 B**。
+  细节见 [`../tools/il_spike/README.md`](../tools/il_spike/README.md) 与方案 §5.2。
 - 通过**适配层**隔离 EDG 具体 API，避免其版本变化扩散到设备端代码生成。
 
 ## Consequences

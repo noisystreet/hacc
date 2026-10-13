@@ -167,6 +167,15 @@ M0 先做 **IL spike**，判据（基本版）：最小 `.cu`（含 `__global__`
 ② `__shared__` / `__constant__` ③ 同步点（`__syncthreads`） ④ 内核 / 执行空间标记；
 **任一缺失即判「IL 表达力不足」，触发切阶段 B**（不在本期承诺）。
 
+**M0 IL spike 结论（已核验，2026-10）**：EDG IL 具备一等的属性表示（`attribute@…` 实体 +
+实体 `source_corresp.attributes:` 引用），但**默认只保留 EDG 已知属性名**，未知属性被丢弃。
+**已定：一期采用「构建期开启 `RECORD_UNRECOGNIZED_ATTRIBUTES`」路线（零 EDG 源码补丁）**——
+开启后未知属性（含名字/参数）随 IL 传递并挂到实体上，CUDA 存储/执行限定符以
+`__attribute__((…))` 承载即可在**阶段 A 内成立**，故**不触发切阶段 B**。
+（注意：EDG 把 `.c` 源当 C++ 编译，须用 `CMAKE_CXX_FLAGS` 注入；该变量为全局量，阶段 B 可运行期置真。）
+细节与「CUDA 属性清单」见 [`tools/il_spike/README.md`](../tools/il_spike/README.md)；
+`<<<>>>` 启动语法属源码改写（coolfe++ 扩展层），非属性问题。
+
 > 具体回调/IL 的**符号名与头文件（`fe_*.h` 等）须在 EDG 接入阶段对照 EDG 源码确认**；
 > 本方案不预先假定其 API 名称，仅固定「AST/IL → 中间表示」这一衔接点。EDG 的获取方式见 [ADR 0005](adr/0005-licensing-and-edg-distribution.md)。
 
