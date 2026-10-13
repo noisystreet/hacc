@@ -70,6 +70,17 @@
 - [ ] **B7 `--emit` / `-keep` 的产物集与命名**（对应可观测性目标 G5）。
 - [ ] **B8 主机编译器 / 链接器选择**：默认 `clang++` 还是 `g++`、可否配置（方案 §8 图写作 “clang++/g++”）。
 
+## B'. 里程碑实施（M1）
+
+- [x] **M1.1 设备后端（LLVM IR → PTX）**：**已实现**——`coolicc` 接入 LLVM/NVPTX（`-DHACC_WITH_LLVM=ON`，
+  系统 LLVM 锁 19.x，见 C1），支持 `--emit=ptx` / `-arch=sm_XX` / `-o`；golden 测试
+  `golden_device_empty_kernel`。见 CHANGELOG。
+- [ ] **M1.2 EDG IL → LLVM IR**：**调研完成，方案待评审**——见
+      [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。核心结论：EDG IL 是**内存树**（非文本契约），
+      推荐**链接 EDG 前端库、内存遍历 IL**（官方「逐函数翻译后丢弃」路径）；阶段 A 的「IL 文件」是
+      **二进制 IL**（`il_read` 读回），非文本解析。**待拍板**：`coolicc` 是否直接链接 EDG 库、IL 文件格式、
+      翻译核心归属（见方案 §7）。
+
 ## C. 工程 / 流程
 
 - [x] **C1 LLVM 版本获取与锁定**：**已定——用系统 LLVM，锁定 19.x**。

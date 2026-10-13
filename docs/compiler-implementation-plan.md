@@ -198,6 +198,9 @@ EDG 原生不认识 `__global__` / `<<<>>>`。hacc 在其之上做**扩展层**�
 device 侧 AST/IL 降到 **LLVM IR**，经 LLVM 优化后由 **NVPTX 后端**发射 **PTX**。
 **形态已定：`coolicc` 同样做成独立可执行文件**，由 `hacc` driver 编排调用；中间产物形态仍待后续确定。
 
+> **M1.2 细化方案**（EDG IL → LLVM IR 的选型、翻译核心、分步实施）见
+> [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。**M1.1（LLVM IR → PTX）已实现**（`coolicc` 接入 LLVM/NVPTX）。
+
 - **目标三元组** `nvptx64-nvidia-cuda`，DataLayout 与 CUDA 地址空间映射：
   `global=1, shared=3, constant=4, local=5, param=0`（与 LLVM NVPTX 约定一致）。
 - 内置变量经 **NVVM intrinsic** 落地：
