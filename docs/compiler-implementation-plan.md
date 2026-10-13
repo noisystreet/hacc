@@ -303,8 +303,9 @@ hacc 生成的主机 TU 仅依赖 coolrt **现有**公开 ABI，无需运行时�
    对外提供（含 `cuda*` 别名）。故 `<<<>>>` 改写丢弃返回码后仍可经 `cudaGetLastError()` 取回，hacc 侧无需补齐。
 2. **PTX JIT 可用性**：`coolModuleLoadData` 依赖驱动的 PTX JIT；目标环境若不可用，需回退到 cubin——
    该回退依赖后的 `--emit=cubin`（直接调用 `ptxas`），**不在本期范围内**。
-3. **`-arch` 与真实设备**：`coolModuleLoadData` 载入的 PTX/cubin 的 `sm_XY` 需与设备匹配，
-   由 `coolGetDeviceProperties` 的 `major/minor` 决定默认目标。
+3. **`-arch` 与真实设备**：`coolModuleLoadData` 载入的 PTX/cubin 的 `sm_XY` 需与设备匹配。
+   **已定（B1）**：三级优先——显式 `-arch` → `coolGetDeviceProperties` 的 `major/minor` → 查不到设备时
+   回退默认 **`sm_80`**（并提示，非错误）；编译期查设备为「尽力而为」，失败不报错（见 [TODO](TODO.md) B1）。
 
 ## 8. 目录结构
 
@@ -377,7 +378,7 @@ CUDA 库、多 GPU/Peer/Graph 编程。
 | **NVPTX 地址空间/参数 ABI 细节** | 中 | 以最小内核起步，`ptxas` 校验 + golden 回归逐格推进 |
 | **`-arch` 与设备/驱动 PTX JIT 不匹配** | 中 | 由 `coolGetDeviceProperties` 决定默认 arch；**后续阶段**提供 `--emit=cubin`（直接调用 `ptxas`）回退 |
 | **与 cudart 语义细微差异**（last error、参数物化） | 中 | §7 检查项逐条闭合；e2e 覆盖错误路径 |
-| **LLVM/EDG 版本漂移** | 低 | 固定 LLVM 与 EDG 版本；CI 锁定 |
+| **LLVM/EDG 版本漂移** | 低 | 固定 LLVM 与 EDG 版本；CI 锁定。**LLVM 用系统包并锁 19.x**（`find_package(LLVM 19 REQUIRED CONFIG)`，实测 19.1.7，含 NVPTX；见 [TODO](TODO.md) C1）；EDG 按固定 commit 拉取（[ADR 0005](adr/0005-licensing-and-edg-distribution.md)） |
 
 ## 13. 开放问题（均已拍板）
 

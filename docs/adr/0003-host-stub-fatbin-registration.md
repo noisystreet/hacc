@@ -83,6 +83,8 @@ Negative / trade-offs:
 
 - **每次链接需带上 hacc 随附的运行时头**（`hacc_runtime.h`）与 `libcoolruntime`。
 - **命名约束**：子集内内核名需在同一 TU 内唯一，以确定性方案生成 PTX 入口名与注册名。
+  **已定（B2）**：`extern "C"` 内核直用原名；C++ 链接内核用 `_hacc_k_<Itanium-mangled>`（复用 Itanium ABI，
+  不自造）。PTX `.entry` 名 = 主机注册名 = 主机桩引用名，三者同一来源（由 `coolfe++` 在 IL 中标注）。
 - **last error 已对齐（零改动）**：coolrt A 层已在 `coolLaunchKernel` 失败时写入线程局部 last error，
   故 `<<<>>>` 改写丢弃返回码后，`coolGetLastError()` / `coolPeekAtLastError()` 仍能反映启动失败；hacc 侧无需补齐。
 - **参数物化实现需谨慎**：涉及完整表达式求值与临时量生命周期，需单元/端到端覆盖。

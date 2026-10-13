@@ -26,8 +26,12 @@
       （`host_envir.h`，零源码改动）即可让未知属性（含名字/参数）随 IL 传递并挂到实体上**——
       即 CUDA 存储/执行限定符以 `__attribute__((…))` 承载，在**阶段 A 内可行**；
       若要正式「注册属性族」，另有 `attribute.c` 的 6 步 recipe（需 EDG 源码补丁）。
-      **A2 的「阶段 A 通过 / 切阶段 B」与 (a)/(b) 取舍待维护者据方案 §5.2 拍板**（详见
-      [`tools/il_spike/README.md`](../tools/il_spike/README.md)「属性核验结论」）。
+      **已拍板：阶段 A 通过（不切阶段 B），(a)/(b) 取舍 = (a)**——EDG 构建期开启
+      `RECORD_UNRECOGNIZED_ATTRIBUTES`（零源码补丁）。方案 §5.2 / [ADR 0001](adr/0001-edg-cpp-frontend.md) 已回写；
+      **已实现**：`tools/il_spike/fetch_edg.sh` 注入该开关，`verify_attrs.sh` 实测通过；
+      **CUDA 属性清单**已细化为契约文档 [`tools/il_spike/cuda-attributes.md`](../tools/il_spike/cuda-attributes.md)。
+      （`cdisp` 二进制 IL 往返已查清：含任意 `__attribute__` 时 `cdisp` 断言崩溃，属 EDG 上游 bug，
+      与本次开关无关；详见 spike README。）
 - [x] **A3 `coolfe++` / `coolicc` 的形态**：**已定——独立可执行文件**，由 `hacc` driver 子进程编排
       （降低耦合、便于独立验证）。方案 §4/§5/§6.1 已回写。
 - [x] **A4 前端↔设备端的中间产物切分与命名**：**已定——参考 nvcc、一期只保留基本集**
@@ -37,10 +41,23 @@
 
 ## B. 一期接口 / 语义细节
 
-- [ ] **B1 默认 `-arch` 的确定方式**：不给 `-arch` 时默认 sm_XX 从何而来？方案 §7 称由
-      `coolGetDeviceProperties` 决定，但**编译期能否查设备**（hacc 可能运行于无 GPU 机器）未定。
-- [ ] **B2 内核名 / mangling 规则**：方案 §6.2「`extern "C"` 直接用，否则固定 mangling」——
-      用 Itanium ABI 还是自定义？且 PTX `.entry` 名须与主机注册名一致。
+- [x] **B1 默认 `-arch` 的确定方式**：**已定——三级优先：显式 `-arch` → 查设备 → 回退默认 `sm_80`**。
+      1. 用户显式 `-arch=sm_XY` → 直接用（最高优先级）。
+      2. 未给 `-arch` 且 `coolGetDeviceProperties` 成功 → 用设备 `major.minor` 映射为 `sm_XY`。
+      3. 未给 `-arch` 且查不到设备（无 GPU / 驱动不可用）→ **回退默认 `sm_80`**（Ampere），
+         并向 stderr 打印提示（非错误）：`hacc: 未指定 -arch 且未检测到设备，回退默认 sm_80（可用 -arch=sm_XY 覆盖）`。
+      - **编译期查设备是「尽力而为」**：查失败**不报错**，仅降级到默认 + 提示，保证无卡机器/CI 也能编译
+        （对齐方案 §11「无 GPU 时用例可跳过而非失败」）。
+      - `sm_XY` → NVPTX `-mcpu=sm_XY` + 对应 PTX ISA 版本（方案 §6.1）。方案 §7 检查项 3 已同步。
+- [x] **B2 内核名 / mangling 规则**：**已定——`extern "C"` 直用原名；C++ 链接用 Itanium ABI mangling + `_hacc_k_` 前缀**。
+      - `extern "C" __global__ void foo(...)` → 符号名 **`foo`**（原名，不加前缀；符合 `extern "C"` 语义）。
+      - `__global__ void foo(...)`（C++ 链接）→ **`_hacc_k_<Itanium-mangled>`**，如 `_hacc_k__Z3foov`。
+      - **不自造 mangling**：复用 Itanium ABI（经 LLVM 的 mangle/demangle，C1 已链 LLVM 19）；
+        `_hacc_k_` 前缀隔离命名空间，避免与主机普通符号撞名。
+      - **三处同名、同一来源**：PTX `.entry` 名 = 主机注册名（`coolModuleGetFunction`）= 主机桩引用名，
+        由 `coolfe++` 在 IL 中标注（`cool_symbol_name` 或等价字段），`coolicc` 与主机生成器都读它。
+      - **约束**：同一 TU 内内核名唯一（[ADR 0003](adr/0003-host-stub-fatbin-registration.md)）；跨 TU 一期不支持（见 C3）。
+      - **确定性**：同一源码 → 同一名字，保证 golden 回归可复现。ADR 0003「命名约束」段已同步。
 - [ ] **B3 参数按值物化生成细则**：临时量命名、求值顺序、聚合 / 向量类型（`float4` 等）的传参处理
       （[ADR 0003](adr/0003-host-stub-fatbin-registration.md) 仅给原则）。
 - [ ] **B4【跨项目】默认流语义 × coolruntime `COOL_STRICT_DEFAULT_STREAM`**：该开关在
@@ -55,8 +72,17 @@
 
 ## C. 工程 / 流程
 
-- [ ] **C1 LLVM 版本获取与锁定**：EDG 走 `FetchContent` + 固定 commit（[ADR 0005](adr/0005-licensing-and-edg-distribution.md)）已定；
-      **LLVM** 用系统包还是 `FetchContent`、如何锁版本未定。
+- [x] **C1 LLVM 版本获取与锁定**：**已定——用系统 LLVM，锁定 19.x**。
+      EDG 走 `FetchContent` + 固定 commit（[ADR 0005](adr/0005-licensing-and-edg-distribution.md)）；
+      **LLVM 用系统包**（`find_package(LLVM 19 REQUIRED CONFIG)`，经 `LLVMConfig.cmake`），
+      **不**走 `FetchContent`（LLVM 构建过慢、体积过大）。
+      - **锁定版本：LLVM 19.1.7**（本机实测：`llvm-config-19 --version` = `19.1.7`，
+        `clang --version` = `Debian clang version 19.1.7`；`--targets-built` 含 **NVPTX**；
+        `LLVMConfig.cmake` 位于 `/usr/lib/llvm-19/lib/cmake/llvm/`）。
+      - **CMake 约定**：`find_package(LLVM 19 REQUIRED CONFIG)`；用 `LLVM_DIR` 或
+        `llvm-config-19` 定位；要求 `LLVM_TARGETS_TO_BUILD` 含 `NVPTX`（否则报错退出）。
+      - **CI / 环境**：镜像预装 `llvm-19-dev`（含 NVPTX）；版本不符时给出清晰报错。
+      - 与方案 §12「LLVM/EDG 版本漂移」缓解一致（固定版本 + CI 锁定）。
 - [x] **C2 命名 / 路径一致性**：**已定——统一为 `include/coolcc/`**；文档与骨架已同步（运行时头 `include/coolcc/hacc_runtime.h`）。
 - [ ] **C3 一期是否支持多 `.cu`（多 TU WPC）**：「一步到可执行」默认行为下，多个 `.cu` 各自 host 桩 + 注册
       是否属一期？[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) 仅排除 RDC / 跨 TU 设备函数链接，**未点名 WPC 多 TU**。
