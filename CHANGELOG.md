@@ -30,7 +30,15 @@
   翻译为 LLVM IR 并发射 PTX。新增 `src/device/il_to_llvm.{hpp,cpp}`（EDG 适配层，同时 include
   EDG 与 LLVM 头，对外只暴露 hacc 类型）与未启用 EDG/LLVM 时的 stub；一期只处理带 `cool_global`
   属性的**无参内核**，建空 `Function`（调用约定 `ptx_kernel`，属性 `nvptx-kernel`）。
-  新增 golden 测试 `golden_device_il_to_ptx_empty_kernel`（`.cu` → `.cil` → PTX）。
+    新增 golden 测试 `golden_device_il_to_ptx_empty_kernel`（`.cu` → `.cil` → PTX）。
+- **M1.2.3 EDG IL → LLVM IR（标量参数 + 简单语句）**：`coolicc --from-il` 的翻译器扩展到
+  标量参数与简单语句——参数（`tk_routine` 的 `param_type_list` → LLVM 参数）、语句
+  （`stmk_expr` / `stmk_if` / `stmk_block` / `stmk_return` / `stmk_decl` / `stmk_init`）、
+  表达式（`enk_variable` / `enk_constant` / `enk_operation`：算术/比较/赋值/取址/解引用/转换）、
+  类型（`tk_integer` i8..i64 / `tk_float` float/double / `tk_pointer` ptr）。未覆盖的构造一律
+  报错（fail loud），不静默产出错误 IR。新增 golden 测试 `golden_frontend_scalar_kernel` 与
+  `golden_device_il_to_ptx_scalar_kernel`（`add_kernel(int*, int, int)`，校验参数/算术/分支）。
+  实测细节见 [edg-il-reference §5.5](docs/edg-il-reference.md)。
 
 ### Changed
 
@@ -38,6 +46,11 @@
   （`EDG_CPFE_USE_ASAN`），迫使链接方 `coolicc` 也带 `-fsanitize=address`（发布隐患）。
   现 `tools/il_spike/fetch_edg.sh` 传 `-DEDG_CPFE_USE_ASAN=OFF` 重建 EDG，
   `CMakeLists.txt` 去掉 `coolicc` 的 `-fsanitize=address`；`coolicc` 不再依赖 `libasan.so`。
+- **lizard 门禁阈值收紧到 CCN 10**：`Makefile` 的 `CCN_THRESHOLD` 由 15 收紧到 10，
+  并把 8 个 CCN>10 的函数拆分为职责单一的小函数（行为等价）：`il_to_llvm` 的
+  `map_integer_type` / `translate_arith` / `emit_compare` / `build_kernel`，`nvptx_backend`
+  的 `emit_ptx`，`edg_invoke` 的 `run_cpfe_once`，`device/main` 与 `frontend/main` 的
+  `parse_args`。
 
 ### Fixed
 

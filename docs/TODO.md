@@ -87,14 +87,18 @@
       同时 include EDG 与 LLVM 头，对外只暴露 hacc 类型）与未启用 EDG/LLVM 时的 stub；一期只处理带
       `cool_global` 属性的**无参内核**，建空 `Function`（调用约定 `ptx_kernel`，属性 `nvptx-kernel`）。
       测试：`golden_device_il_to_ptx_empty_kernel`（`.cu` → `.cil` → PTX）。见 CHANGELOG。
-- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0/M1.2.1/M1.2.2 已完成**——见
+- [x] **M1.2.3 EDG IL → LLVM IR（标量参数 + 简单语句）**：**已实现**——`coolicc --from-il` 的翻译器
+      扩展到标量参数与简单语句（赋值/算术/比较/`if`/`return`/声明/初始化），类型覆盖
+      `tk_integer`（i8..i64）/ `tk_float`（float/double）/ `tk_pointer`（ptr）；未覆盖构造 fail loud。
+      测试：`golden_frontend_scalar_kernel`、`golden_device_il_to_ptx_scalar_kernel`。见 CHANGELOG。
+- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0/M1.2.1/M1.2.2/M1.2.3 已完成**——见
       [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。核心结论：EDG IL 是**内存树**（非文本契约），
       采用**链接 EDG 前端库、内存遍历 IL**（官方「逐函数翻译后丢弃」路径）；阶段 A 的「IL 文件」是
       **二进制 IL**（`il_read` 读回），非文本解析。
       **已拍板**：① `coolicc` 直接链接 EDG 库；② IL 文件 = 二进制 IL；③ 翻译核心 = 独立库
       （`src/device/il_to_llvm/`）；④ **IL 须能 dump 成人类可读**（`cdisp` 对含属性 IL 崩溃，
       改用 `coolfe++` 落文本 + 自建 `hacc-il-dump`，见方案 §7.1）。
-      **下一步**：M1.2.3（标量参数 + 简单语句（赋值/算术/`if`），golden PTX 比对）。
+      **下一步**：M1.2.4（内建变量 `threadIdx` 等 + `__syncthreads()`，golden PTX 比对）。
 
 ## C. 工程 / 流程
 
