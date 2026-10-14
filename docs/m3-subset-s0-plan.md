@@ -1,6 +1,6 @@
 # M3 方案：子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）
 
-> 状态：**方案细化中（待评审）**（2026-10）。
+> 状态：**进行中（M3.0 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）已实现并真跑通过。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围）、§10（里程碑 M3）。
 > 前置：M2 已完成（主机路径端到端跑通，见 [m2-host-path-plan.md](m2-host-path-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围）、
@@ -78,20 +78,37 @@
 
 **风险**：`__shared__` 数组的**动态索引**（`sdata[tid]`）需 GEP + 地址空间正确传播。
 
-### 3.2 M3.0 向量类型（承接 B3-b）
+### 3.2 M3.0 向量类型（承接 B3-b）——**已完成**
 
-**三处协同**（与 B3-b 一致）：
+**Spike 结论（聚合参数 ABI）**：用 LLVM C++ API 建 `void k(float4 v, float* out)` 内核发射 PTX，
+确认 NVPTX 后端对 struct 参数按 **byval** 发射：
 
-1. **coolrt**：新增 `float2/3/4`、`int2/4`、`double2` 等（`device_builtins.h` 或新头）。
-   - 对齐 CUDA：`struct float4 { float x, y, z, w; }`（POD，无构造）。
-2. **`hacc_runtime.h`**：引入向量类型定义（主机侧生成代码需可见）。
-3. **`il_to_llvm`**：
-   - `tk_struct`（向量类型）→ LLVM `<N x T>` 或 struct（**需定**：CUDA 用 struct，PTX 参数 ABI 用 byval）；
-   - **聚合参数 PTX ABI**：`byval` 或拆解为标量（**需 spike 验证**）。
+```
+.visible .entry k(
+	.param .align 4 .b8 k_param_0[16],   ← struct float4 按 byval（16 字节）
+	.param .u64 k_param_1
+)
+```
 
-**验证**：golden PTX（向量类型参数）；e2e（向量加法）。
+**含义**：`il_to_llvm` 把向量类型映射为 LLVM `<N x T>`（**选型见 §8**：PTX 用 `ld.param.v4.f32`
+向量化加载，对齐 16），NVPTX 后端自动按 byval 发射——**无需手动拆解**。主机侧 `haccLaunch` 的
+`&args` 传 struct 地址，与 byval 语义一致。
 
-**风险**：聚合参数的 PTX ABI 是**最大不确定性**——需 spike 确认 NVVM 对 struct 参数的降级方式。
+**三处协同（已落地）**：
+
+1. **coolrt**（`device_builtins.h`）：补全 `float2/3/4`、`int2/4`、`uint2/4`、`double2/4`，
+   **带正确对齐**（`float2` align 8、`float4` align 16、`float3` 无 padding align 4，与 CUDA 一致）。
+   提交 `f3cfbdd`。
+2. **`il_to_llvm`**：
+   - `map_type` 新增 `tk_struct`/`tk_class`/`tk_union` 分支（`map_struct_type`：遍历 `field_list`
+     逐成员递归，仅支持无位域 POD 聚合）；**向量类型（成员全同标量、2/3/4 个）→ LLVM `<N x T>`**
+     （对齐 §8 选型），其余 POD 聚合 → `StructType`；
+   - 新增**普通结构体成员访问**（`try_translate_struct_field`：向量类型 load 后 `extractelement`，
+     struct 走 `CreateStructGEP` + load，按名字在 `field_list` 定位成员索引）。
+3. **测试**：golden `golden_frontend_vector_type` + `golden_device_il_to_ptx_vector_type[_vec]`
+   （校验 `ld.param.v4.f32` + `.param .align 16 .b8 add4_param_0[16]`）；e2e
+   `e2e_hacc_vector_type_run[_build]`（`float4` 内核参数 + 成员访问，校验 `out == 110`）。
+   **本机 RTX 4060 真跑通过**（`vectorType OK: 110.000000`）。
 
 ### 3.3 M3.2 `__constant__`
 
@@ -126,7 +143,7 @@
 | **M3.1** | `__shared__`（静态共享内存 → addrspace(3)） | 无（纯设备侧） | golden PTX + e2e 归约 | 中 |
 | **M3.3** | `dim3` 设备侧类型映射 | 无 | golden PTX | 低 |
 | **M3.4** | 诊断格式（源位置） | 无 | 单测（错误消息） | 低 |
-| **M3.0** | 向量类型 + 聚合参数 ABI | **coolrt 新增类型** | golden + e2e | 高 |
+| **M3.0** | 向量类型 + 聚合参数 ABI | **coolrt 新增类型** | golden + e2e | 高 | ✅ **已完成** |
 | **M3.2** | `__constant__`（+ 主机侧拷贝） | **coolrt 新增 API** | golden + e2e | 中 |
 | **M3.5** | samples + 边界用例 | 上述 | samples 全绿 | 低 |
 

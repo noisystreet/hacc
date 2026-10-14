@@ -93,6 +93,19 @@
   （校验 `mul.wide.s32` + `add.s64`）；e2e 真跑 `e2e_hacc_vector_add_run[_build]`（编译 + 运行 +
   校验 `c[i] == 3*i`，`SKIP_RETURN_CODE 77`）。**本机 RTX 4060 上真跑通过**（输出
   `vectorAdd OK: 256 elements verified`）。
+- **M3.0 向量类型（聚合参数 + 成员访问）**：device 后端新增**聚合类型**支持——`map_type` 新增
+  `tk_struct`/`tk_class`/`tk_union` 分支（`map_struct_type`：遍历 `field_list` 逐成员递归，仅支持
+  无位域 POD 聚合）；**向量类型（成员全同标量、2/3/4 个）映射为 LLVM `<N x T>`**（对齐 §8 选型：
+  PTX 用 `ld.param.v4.f32` 向量化加载，对齐 16），其余 POD 聚合映射为 `StructType`。新增**普通
+  结构体成员访问**（`try_translate_struct_field`：向量类型 load 后 `extractelement`，struct 走
+  `CreateStructGEP` + load，按名字在 `field_list` 定位成员索引）。**聚合参数 ABI 经 spike 确认为
+  byval**（`.param .align N .b8 [size]`，NVPTX 后端自动发射，无需手动拆解）。
+  coolrt 侧 `device_builtins.h` 补全内建向量类型（`float2/3/4`、`int2/4`、`uint2/4`、`double2/4`），
+  **带正确对齐**（`float2` align 8、`float4` align 16、`float3` 无 padding align 4，与 CUDA 一致）。
+  新增测试：golden `golden_frontend_vector_type` + `golden_device_il_to_ptx_vector_type[_vec]`
+  （校验 `ld.param.v4.f32` + `.param .align 16 .b8 add4_param_0[16]`）；e2e
+  `e2e_hacc_vector_type_run[_build]`（`float4` 内核参数 + 成员访问，校验 `out == 110`）。
+  **本机 RTX 4060 上真跑通过**（输出 `vectorType OK: 110.000000`）。
 
 ### Changed
 

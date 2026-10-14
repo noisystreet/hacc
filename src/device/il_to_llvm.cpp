@@ -206,6 +206,43 @@ llvm::Type* map_float_type(a_type_ptr t, llvm::LLVMContext& ctx) {
     }
 }
 
+// 把 EDG 类型翻译为 LLVM 类型（前向声明：map_struct_type 需调用它）。
+// M1.2.3 覆盖标量（整型/浮点）与指针；M3.0 新增聚合（tk_struct，如向量类型 float4）。
+llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx);
+
+// 聚合类型（tk_struct/tk_class/tk_union）→ LLVM 类型。
+//
+// M3.0：向量类型（成员全同标量、2/3/4 个）→ LLVM `<N x T>`（对齐 §8 选型：
+// PTX 用 ld.param.vN.f32 向量化加载，对齐明确）。其余 POD 聚合 → LLVM StructType。
+// 一期只支持「无位域、无基类」的 POD 聚合。
+llvm::Type* map_struct_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    // 先收集成员类型（同时校验无位域）。
+    std::vector<llvm::Type*> member_tys;
+    for (a_field_ptr f = t->variant.class_struct_union.field_list; f != nullptr; f = f->next) {
+        if (f->bit_size != 0) {
+            fail("不支持位域成员（M3.0 仅覆盖 POD 聚合）");
+        }
+        member_tys.push_back(map_type(f->type, ctx));
+    }
+    if (member_tys.empty()) {
+        fail("不支持空聚合类型");
+    }
+    // 向量类型识别：成员数 2/3/4 且全同类型 → <N x T>。
+    if (member_tys.size() >= 2 && member_tys.size() <= 4) {
+        bool all_same = true;
+        for (llvm::Type* mt : member_tys) {
+            if (mt != member_tys[0]) {
+                all_same = false;
+                break;
+            }
+        }
+        if (all_same) {
+            return llvm::FixedVectorType::get(member_tys[0], member_tys.size());
+        }
+    }
+    return llvm::StructType::get(ctx, member_tys);
+}
+
 // 把 EDG 类型翻译为 LLVM 类型。M1.2.3 只覆盖标量（整型/浮点）与指针。
 llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx) {
     if (t == nullptr) {
@@ -225,6 +262,11 @@ llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx) {
         case tk_typeref:
             // typedef / 限定符：解引用到目标类型。
             return map_type(t->variant.typeref.type, ctx);
+        case tk_struct:
+        case tk_class:
+        case tk_union:
+            // 聚合类型（M3.0）：向量类型（float4 等）即 tk_struct。
+            return map_struct_type(t, ctx);
         default:
             fail("不支持的类型 kind（M1.2.3 仅覆盖标量与指针）");
     }
@@ -622,6 +664,61 @@ llvm::Value* try_translate_builtin_field(an_expr_node_ptr expr, KernelContext& k
     return emit_sreg_read(sreg, dim, kc);
 }
 
+// 翻译普通结构体成员访问（如向量类型 a.x）。
+// 返回 nullptr 表示「不是普通结构体成员访问」，交由调用方走其它路径。
+//
+// 实现：基对象（enk_variable，struct 类型）取地址 → GEP 到成员索引 → load。
+// 成员索引按名字在 struct 的 field_list 中查找（与 map_struct_type 的成员顺序一致）。
+llvm::Value* try_translate_struct_field(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr base = expr->variant.operation.operands;
+    if (base == nullptr || base->kind != enk_variable) {
+        return nullptr;
+    }
+    a_type_ptr base_ty = base->type;
+    if (base_ty == nullptr) {
+        return nullptr;
+    }
+    // 解引用 typedef/限定符，定位到聚合类型。
+    while (base_ty->kind == tk_typeref) {
+        base_ty = base_ty->variant.typeref.type;
+    }
+    if (base_ty->kind != tk_struct && base_ty->kind != tk_class && base_ty->kind != tk_union) {
+        return nullptr;  // 非聚合：交回调用方（可能是内建变量等）。
+    }
+    an_expr_node_ptr field = base->next;
+    if (field == nullptr || field->kind != enk_field) {
+        fail("结构体成员访问缺少字段");
+    }
+    const char* field_name = field->variant.field.ptr->source_corresp.name;
+    if (field_name == nullptr) {
+        fail("结构体成员无名字");
+    }
+    // 在 field_list 中按名字定位成员索引。
+    unsigned idx = 0;
+    bool found = false;
+    for (a_field_ptr f = base_ty->variant.class_struct_union.field_list; f != nullptr;
+         f = f->next, ++idx) {
+        const char* fname = f->source_corresp.name;
+        if (fname != nullptr && std::strcmp(fname, field_name) == 0) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        fail("结构体成员名未在类型中找到");
+    }
+    llvm::Value* base_addr = variable_address(base->variant.variable.ptr, kc);
+    llvm::Type* agg_ty = map_type(base_ty, kc.ctx);
+    // 向量类型（<N x T>）：load 整个向量后 extractelement。
+    if (agg_ty->isVectorTy()) {
+        llvm::Value* vec = kc.builder.CreateLoad(agg_ty, base_addr);
+        return kc.builder.CreateExtractElement(vec, idx);
+    }
+    // 普通聚合（struct）：GEP 到成员地址后 load。
+    llvm::Value* member_addr = kc.builder.CreateStructGEP(agg_ty, base_addr, idx, field_name);
+    return kc.builder.CreateLoad(map_type(field->type, kc.ctx), member_addr);
+}
+
 // 翻译内建函数调用（__syncthreads 等）。
 // 返回 nullptr 表示「不是内建函数调用」，交由调用方走普通路径。
 llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc) {
@@ -725,10 +822,13 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
         case OpClass::Unary:
             return translate_unary(op, expr, kc);
         case OpClass::DotField: {
-            // threadIdx.x 等内建变量成员访问；非内建则报错（M1.2.4 不覆盖普通结构体成员）。
+            // 先试内建变量成员（threadIdx.x 等），再试普通结构体成员（向量类型 a.x）。
             llvm::Value* v = try_translate_builtin_field(expr, kc);
             if (v == nullptr) {
-                fail("不支持的成员访问（M1.2.4 仅覆盖内建变量 threadIdx/blockIdx/blockDim/gridDim）");
+                v = try_translate_struct_field(expr, kc);
+            }
+            if (v == nullptr) {
+                fail("不支持的成员访问（仅覆盖内建变量与结构体成员）");
             }
             return v;
         }

@@ -203,6 +203,42 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "vectorAdd OK")
 
+        # M3.0 golden：向量类型（float4）作为内核参数 → PTX 按 <N x T> 向量化
+        # （.param .align 16 .b8 [16] + ld.param.v4.f32）。需 COOLRuntime 头。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_vt_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_type.cil")
+            set(_vt_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_type.ptx")
+            add_test(NAME golden_frontend_vector_type
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_vt_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/vector_type.cu")
+            add_test(NAME golden_device_il_to_ptx_vector_type
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_vt_ptx}" "${_vt_cil}")
+            set_tests_properties(golden_device_il_to_ptx_vector_type PROPERTIES
+                DEPENDS golden_frontend_vector_type)
+            # 校验：内核入口 + 向量化参数加载（ld.param.v4.f32）+ 对齐 16。
+            add_test(NAME golden_device_il_to_ptx_vector_type_vec
+                COMMAND grep -qE "\\.visible \\.entry add4|ld\\.param\\.v4\\.f32|\\.param \\.align 16 \\.b8 add4_param_0\[16\]"
+                        "${_vt_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_vector_type_vec PROPERTIES
+                DEPENDS golden_device_il_to_ptx_vector_type)
+        endif()
+
+        # M3.0 e2e：向量类型（float4）编译 + 运行 + 结果校验（out == 110）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_vt_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_type_run")
+        add_test(NAME e2e_hacc_vector_type_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/vector_type.cu"
+                    -o "${_e2e_vt_run_exe}")
+        add_test(NAME e2e_hacc_vector_type_run
+            COMMAND "${_e2e_vt_run_exe}")
+        set_tests_properties(e2e_hacc_vector_type_run PROPERTIES
+            DEPENDS e2e_hacc_vector_type_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "vectorType OK")
+
         # 内建变量 + __syncthreads 的端到端（需 COOLRuntime 头）。
         if(HACC_COOLRUNTIME_INCLUDE)
             set(_e2e_tk_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_tid_kernel.ptx")

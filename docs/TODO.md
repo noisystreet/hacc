@@ -64,10 +64,11 @@
       显式需改写器介入且无收益）。② **求值顺序**——遵循 C++ 函数调用规则（C++17 起未指定），但 `argv`
       仅取已构造形参地址，无副作用/顺序依赖，故不影响语义。③ **生命周期**——按值形参覆盖整个
       `haccLaunch` 调用（含 `coolLaunchKernel`）。
-      **B3-b（聚合/向量，延后 M3）**：主机侧 `haccLaunch` 对 POD 聚合（如 `int3`）已可编译（实测）；
-      但设备侧 `il_to_llvm` 一期只处理标量，聚合参数 fail loud。聚合/向量传参需三处协同——
-      ① coolrt 提供向量类型（`float4` 等，当前仅有 `uint3`/`int3`）；② `hacc_runtime.h` 引入类型定义；
-      ③ `il_to_llvm` 支持聚合参数的 PTX ABI（byval 或拆解）。**与 S0 向量类型支持同步落地（M3）**。
+     **B3-b（聚合/向量）——✅ 已完成（M3.0）**：主机侧 `haccLaunch` 对 POD 聚合（如 `int3`）已可编译；
+     设备侧 `il_to_llvm` 已支持聚合参数（M3.0）。三处协同已落地——① coolrt 提供向量类型
+     （`float2/3/4` 等，提交 `f3cfbdd`）；② 向量类型映射为 LLVM `<N x T>`（PTX `ld.param.v4.f32`）；
+     ③ 聚合参数 PTX ABI 经 spike 确认为 **byval**（NVPTX 自动发射，无需拆解）。e2e 真跑通过
+     （`vectorType OK: 110.000000`）。
 - [ ] **B4【跨项目】默认流语义 × coolruntime `COOL_STRICT_DEFAULT_STREAM`**：该开关在
       coolruntime `ARCHITECTURE.md` 仍为未决项（Owner: maintainers，Due: P2）；
       它决定 hacc 生成 `<<<>>>`（`stream=NULL`）的行为是否符合预期。需与 coolrt 对齐。
@@ -129,14 +130,14 @@
       M2.4 指针算术（`eok_padd`/`eok_psubtract` → GEP）+ 真 vectorAdd e2e。
       **验证**：本机 RTX 4060 上 `hacc vector_add.cu -o exe` 后运行输出 `vectorAdd OK: 256 elements verified`；
       全量 33/33 测试通过。见 CHANGELOG。
-- [ ] **M3 子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）**：**方案已细化（待评审）**——见
+- [ ] **M3 子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）**：**进行中（M3.0 已完成）**——见
       [m3-subset-s0-plan.md](m3-subset-s0-plan.md)。目标：补齐 S0 子集中 M1/M2 未覆盖的部分。
-      分步：M3.1 `__shared__`（addrspace(3)，纯设备侧）→ M3.3 `dim3` 设备侧 → M3.4 诊断格式（源位置）→
-      M3.0 向量类型 + 聚合参数 ABI（**需 coolrt 新增类型**，承接 B3-b）→ M3.2 `__constant__`
+      分步：**M3.0 向量类型 + 聚合参数 ABI（✅ 已完成，承接 B3-b）** → M3.1 `__shared__`（addrspace(3)，
+      纯设备侧）→ M3.3 `dim3` 设备侧 → M3.4 诊断格式（源位置）→ M3.2 `__constant__`
       （**需 coolrt 新增 `coolMemcpyToSymbol` 类 API**，否则降级为仅设备侧）→ M3.5 samples + 边界用例。
-      **推荐顺序**：先做无 coolrt 依赖的 M3.1/M3.3/M3.4，再与 coolrt 对齐后做 M3.0/M3.2。
-      **待确认**：① coolrt 是否新增向量类型；② coolrt 是否新增 `coolMemcpyToSymbol`；
-      ③ 聚合参数 PTX ABI（byval vs 拆解，需 spike）；④ `dim3` 与 `uint3` 关系；⑤ 诊断格式（C6）。
+      **待确认**：① ~~coolrt 是否新增向量类型~~（已定：新增，提交 `f3cfbdd`）；② coolrt 是否新增
+      `coolMemcpyToSymbol`；③ ~~聚合参数 PTX ABI~~（已定：byval，spike 确认）；④ `dim3` 与 `uint3` 关系；
+      ⑤ 诊断格式（C6）。
 
 ## C. 工程 / 流程
 
