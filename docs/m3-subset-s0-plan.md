@@ -137,7 +137,7 @@
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| 聚合参数 PTX ABI 不确定 | 高（M3.0 核心） | **先 spike**：用 NVVM 试 struct 参数，确认 byval/拆解 |
+| ~~聚合参数 PTX ABI 不确定~~ | ~~高（M3.0 核心）~~ | **已消除（§8 spike）**：byval / `<N x T>` 均跑通，选 `<N x T>` |
 | coolrt 无向量类型 / `__constant__` API | 中（M3.0/M3.2 阻塞） | 跨项目对齐；M3.2 可降级为「仅设备侧」 |
 | `__shared__` 动态索引的地址空间传播 | 中 | GEP + addrspace 正确性单测 |
 | `dim3` 与 `uint3` 关系不清 | 低 | 明确：设备侧 `dim3` 用于参数，内建变量用 `uint3` |
@@ -147,7 +147,8 @@
 
 1. **coolrt 是否新增向量类型**？（M3.0 前置）——需与 coolrt 维护者对齐。
 2. **coolrt 是否新增 `coolMemcpyToSymbol`**？（M3.2 前置）——若无，M3.2 降级。
-3. **聚合参数 PTX ABI**：byval vs 拆解？——需 spike。
+3. ~~**聚合参数 PTX ABI**：byval vs 拆解？——需 spike。~~ **已解决（§8 spike）**：byval struct 与
+   `<4 x float>` 均端到端跑通；**选 `<N x T>` 向量类型**（`ld.param.vN.f32` 向量化，对齐明确）。
 4. **`dim3` 设备侧**：是否需与 `uint3` 合并？——需定。
 5. **诊断格式**：具体输出格式（C6）——需定。
 
@@ -156,3 +157,51 @@
 - **设备侧**：M2 的标量链路**原样复用**；M3 扩展类型系统（向量/聚合）与存储限定符（shared/constant）。
 - **主机侧**：M3.0 的聚合传参**复用** `haccLaunch`（B3-b 已确认主机侧可编译）；M3.2 需主机侧符号拷贝 API。
 - **B3-b**：M3.0 落地时**同步闭环** B3-b（聚合/向量传参）。
+
+## 8. M3.0 spike 实测结论（2026-10，已核验）
+
+用 `coolicc --emit=ptx` + 手写 IR + 真实工具链（`g++` + coolrt + RTX 4060）验证了 M3.0 的
+**核心不确定性——聚合参数 PTX ABI**。**结论：byval struct 与 `<4 x float>` 两种方案均端到端跑通**。
+
+### 8.1 三种参数形态的 PTX 降级（`coolicc --emit=ptx -arch=sm_80`）
+
+| 变体 | IR 参数 | PTX 参数形态 | 加载指令 |
+| --- | --- | --- | --- |
+| **byval struct** | `ptr byval(%struct.float4) align 4` | `.param .align 4 .b8 k_param_0[16]` | 逐字段 `ld.param.f32` |
+| **拆解标量** | `float, float, float, float` | `.param .f32 ×4` | 4 个独立 `ld.param.f32` |
+| **`<4 x float>`** | `<4 x float>` | `.param .align 16 .b8 k_param_0[16]` | **`ld.param.v4.f32`（向量化）** |
+
+**关键观察**：
+- **byval struct 与 `<4 x float>` 的 PTX 参数形态一致**（都是 `.b8[N]` 内联），差异仅在**对齐**
+  （byval 用 `align 4`，向量用 `align 16`）。
+- **`<4 x float>` 更优**：`ld.param.v4.f32` 一次加载 4 个 float（向量化），byval struct 是逐字段 GEP + load。
+- **拆解标量**：参数个数膨胀（4 个 float → 4 个 `.param`），主机侧需拆解，**不推荐**。
+
+### 8.2 端到端验证（成功）
+
+| 方案 | 内核 | 主机侧传参 | 结果 |
+| --- | --- | --- | --- |
+| **byval struct** | `k_f4(ptr byval(%struct.float4), ptr)` | `void* argv[] = {&v, &d_out}` | `h = 3.5` ✅ |
+| **`<4 x float>`** | `k_vec(<4 x float>, ptr)` | `void* argv[] = {&v, &d_out}` | `h = 7.25` ✅ |
+
+- **主机侧 `void* argv[] = {&struct}`（传 `&struct`）** 与 **PTX `.param .b8[N]`（内联）** **完全匹配**——
+  驱动按 `sizeof(struct)` 拷贝 N 字节，与 PTX 参数内联语义一致。
+- **主机侧无需拆解**：直接传 `&struct` 即可（`haccLaunch` 的 `(void*)&args...` 天然支持）。
+
+### 8.3 结论与选型
+
+1. **聚合参数 ABI 可行**：主机侧 `&struct` ↔ PTX `.param .b8[N]` 匹配，**无需拆解**。
+2. **推荐 `<N x T>` 向量类型**（而非 byval struct）：
+   - PTX 用 `ld.param.vN.f32` 向量化加载，**更高效**；
+   - 对齐明确（`align 16` for float4），与 CUDA 的 `float4` 对齐一致；
+   - 与 LLVM 原生向量类型对应，`il_to_llvm` 映射直接（`tk_struct` → `<N x T>`）。
+3. **对齐要求**：主机侧 struct 的对齐**必须与 PTX 一致**（`float4` → `align 16`）。
+   coolrt 的向量类型定义需带 `__align__(16)`（或 `alignas(16)`）。
+4. **`il_to_llvm` 映射**：`tk_struct`（向量类型）→ LLVM `<N x T>`；参数按值传（`<N x T>` 直接作参数类型）。
+
+### 8.4 对 M3.0 的影响
+
+- **M3.0 的 ABI 不确定性已消除**：byval / 向量两方案均验证可行，**选 `<N x T>`**。
+- **coolrt 侧**：新增向量类型时**须带正确对齐**（`float4` → 16 字节对齐）。
+- **主机侧**：`haccLaunch` **无需改动**（`&args` 已支持聚合）。
+- **设备侧**：`il_to_llvm` 新增 `tk_struct` → `<N x T>` 映射 + 参数按值传。
