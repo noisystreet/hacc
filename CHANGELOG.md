@@ -106,6 +106,15 @@
   （校验 `ld.param.v4.f32` + `.param .align 16 .b8 add4_param_0[16]`）；e2e
   `e2e_hacc_vector_type_run[_build]`（`float4` 内核参数 + 成员访问，校验 `out == 110`）。
   **本机 RTX 4060 上真跑通过**（输出 `vectorType OK: 110.000000`）。
+- **M3.1 `__shared__` 静态共享内存（→ `addrspace(3)` 全局）**：device 后端新增**共享内存**支持——
+  `translate_decl` 识别 `cool_shared` 属性，内核内 `__shared__` 变量发射为 `internal addrspace(3) global`
+  （名字加 `__shared_` 前缀，避免不同内核同名冲突）；**文件作用域 `__shared__` 报错**（CUDA 不允许）。
+  新增 `map_array_type`（`tk_array` → `ArrayType`，仅常量上界）、`eok_array_to_pointer`（数组→指针退化，
+  GEP `[0,0]`）、`eok_subscript`（下标 → GEP）；`translate_init` 支持 `dik_constant`/`dik_zero`；
+  `KernelContext.locals` 放宽为 `Value*`。新增 e2e `e2e_hacc_shared_reduce_run[_build]`
+  （`__shared__ int sdata[256]` + 跨线程读，校验 `sharedReduce OK: 256 elements verified`）。
+  **本机 RTX 4060 上真跑通过**。
+
 
 ### Changed
 
