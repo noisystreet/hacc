@@ -19,6 +19,11 @@ add_executable(test_launch_rewrite unit/test_launch_rewrite.cpp)
 target_link_libraries(test_launch_rewrite PRIVATE hacc_support)
 add_test(NAME unit_launch_rewrite COMMAND test_launch_rewrite)
 
+# M2.2b：主机桩生成器（内嵌映像 + 注册描述）。纯文本变换，无需 EDG/LLVM/GPU。
+add_executable(test_stub_gen unit/test_stub_gen.cpp)
+target_link_libraries(test_stub_gen PRIVATE hacc_support)
+add_test(NAME unit_stub_gen COMMAND test_stub_gen)
+
 # M2.0 golden：对真实 .cu 跑改写器，与期望 host 源逐字节比对。
 add_executable(test_launch_rewrite_golden unit/test_launch_rewrite_golden.cpp)
 target_link_libraries(test_launch_rewrite_golden PRIVATE hacc_support)
