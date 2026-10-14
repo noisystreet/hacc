@@ -174,6 +174,17 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             add_test(NAME e2e_hacc_tid_kernel_ptx
                 COMMAND grep -qE "\\.visible \\.entry tid_kernel|%tid\\.x|%ctaid\\.x|bar\\.sync"
                         "${_e2e_tk_ptx}")
+
+            # M2.3 e2e：hacc --emit=exe 产可执行文件（含拼桩 + 主机编译链接 coolrt）。
+            # 仅验证编译链接成功（不运行，避免依赖 GPU）；产物存在即通过。
+            set(_e2e_va_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_add_exe")
+            add_test(NAME e2e_hacc_vector_add_exe
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu"
+                        -o "${_e2e_va_exe}")
+            add_test(NAME e2e_hacc_vector_add_exe_exists
+                COMMAND test -x "${_e2e_va_exe}")
+            set_tests_properties(e2e_hacc_vector_add_exe_exists PROPERTIES
+                DEPENDS e2e_hacc_vector_add_exe)
             set_tests_properties(e2e_hacc_tid_kernel_ptx PROPERTIES
                 DEPENDS e2e_hacc_tid_kernel)
         endif()

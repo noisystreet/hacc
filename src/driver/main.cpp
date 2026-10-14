@@ -16,11 +16,12 @@ constexpr const char* kUsage =
     "用法: hacc [选项] <input.cu>\n"
     "\n"
     "选项:\n"
-    "  -o <file>       输出文件（--emit=ptx 时为 PTX）\n"
-    "  -I <dir>        头文件搜索目录（透传给 coolfe++）\n"
-    "  --emit=ptx      设备产物（一期默认，止于 PTX）\n"
+    "  -o <file>       输出文件（--emit=exe 时为可执行文件，--emit=ptx 时为 PTX）\n"
+    "  -I <dir>        头文件搜索目录（透传给 coolfe++ 与 g++）\n"
+    "  --emit=exe      可执行文件（默认，对齐 nvcc「一步到可执行」）\n"
+    "  --emit=ptx      设备产物（止于 PTX）\n"
     "  -arch=sm_XX     目标架构（默认 sm_80）\n"
-    "  -keep           保留中间产物（.cil）\n"
+    "  -keep           保留中间产物（.cil / .hacc.cpp / .ptx）\n"
     "  --version       打印版本\n"
     "  -h, --help      打印本帮助\n";
 
@@ -72,7 +73,12 @@ int parse_args(int argc, char** argv, Options* out) {
             continue;
         }
         if (std::strcmp(a, "--emit=ptx") == 0) {
-            continue;  // 一期唯一产物，显式接受。
+            out->pipeline.emit = hacc::driver::EmitMode::Ptx;
+            continue;
+        }
+        if (std::strcmp(a, "--emit=exe") == 0) {
+            out->pipeline.emit = hacc::driver::EmitMode::Exe;
+            continue;
         }
         if (a[0] == '-') {
             std::fprintf(stderr, "hacc: 未知选项 %s\n", a);

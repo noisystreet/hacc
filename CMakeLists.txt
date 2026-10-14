@@ -42,6 +42,10 @@ target_compile_definitions(hacc_support PRIVATE HACC_VERSION_STRING="${PROJECT_V
 
 # hacc：命令行驱动（对标 nvcc）—— 选项解析 / 阶段编排 / 子进程调度。
 add_executable(hacc src/driver/main.cpp src/driver/pipeline.cpp)
+# 注入 COOLRuntime 根目录默认值（主机编译用；运行期可用 $HACC_COOLRT_DIR 覆盖）。
+if(HACC_COOLRUNTIME_DIR)
+    target_compile_definitions(hacc PRIVATE HACC_DEFAULT_COOLRT_DIR="${HACC_COOLRUNTIME_DIR}")
+endif()
 target_link_libraries(hacc PRIVATE hacc_support)
 
 # coolfe++：CUDA 前端（对标 cudafe++，基于 EDG C++，独立可执行）。
