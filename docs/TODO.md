@@ -58,8 +58,16 @@
         由 `coolfe++` 在 IL 中标注（`cool_symbol_name` 或等价字段），`coolicc` 与主机生成器都读它。
       - **约束**：同一 TU 内内核名唯一（[ADR 0003](adr/0003-host-stub-fatbin-registration.md)）；跨 TU 一期不支持（见 C3）。
       - **确定性**：同一源码 → 同一名字，保证 golden 回归可复现。ADR 0003「命名约束」段已同步。
-- [ ] **B3 参数按值物化生成细则**：临时量命名、求值顺序、聚合 / 向量类型（`float4` 等）的传参处理
-      （[ADR 0003](adr/0003-host-stub-fatbin-registration.md) 仅给原则）。
+- [x] **B3 参数按值物化生成细则**：**已拍板（分两步）**——见 [ADR 0003](adr/0003-host-stub-fatbin-registration.md)「语义对齐要点」段。
+      **B3-a（标量，已定）**：① **临时量命名**——`haccLaunch` 模板参数 `Args... args` 按值传入，
+      本身即具名临时，`void* argv[] = {(void*)&args...}` 仅取地址；**不生成显式命名临时**（隐式已满足，
+      显式需改写器介入且无收益）。② **求值顺序**——遵循 C++ 函数调用规则（C++17 起未指定），但 `argv`
+      仅取已构造形参地址，无副作用/顺序依赖，故不影响语义。③ **生命周期**——按值形参覆盖整个
+      `haccLaunch` 调用（含 `coolLaunchKernel`）。
+      **B3-b（聚合/向量，延后 M3）**：主机侧 `haccLaunch` 对 POD 聚合（如 `int3`）已可编译（实测）；
+      但设备侧 `il_to_llvm` 一期只处理标量，聚合参数 fail loud。聚合/向量传参需三处协同——
+      ① coolrt 提供向量类型（`float4` 等，当前仅有 `uint3`/`int3`）；② `hacc_runtime.h` 引入类型定义；
+      ③ `il_to_llvm` 支持聚合参数的 PTX ABI（byval 或拆解）。**与 S0 向量类型支持同步落地（M3）**。
 - [ ] **B4【跨项目】默认流语义 × coolruntime `COOL_STRICT_DEFAULT_STREAM`**：该开关在
       coolruntime `ARCHITECTURE.md` 仍为未决项（Owner: maintainers，Due: P2）；
       它决定 hacc 生成 `<<<>>>`（`stream=NULL`）的行为是否符合预期。需与 coolrt 对齐。
