@@ -129,6 +129,14 @@
       M2.4 指针算术（`eok_padd`/`eok_psubtract` → GEP）+ 真 vectorAdd e2e。
       **验证**：本机 RTX 4060 上 `hacc vector_add.cu -o exe` 后运行输出 `vectorAdd OK: 256 elements verified`；
       全量 33/33 测试通过。见 CHANGELOG。
+- [ ] **M3 子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）**：**方案已细化（待评审）**——见
+      [m3-subset-s0-plan.md](m3-subset-s0-plan.md)。目标：补齐 S0 子集中 M1/M2 未覆盖的部分。
+      分步：M3.1 `__shared__`（addrspace(3)，纯设备侧）→ M3.3 `dim3` 设备侧 → M3.4 诊断格式（源位置）→
+      M3.0 向量类型 + 聚合参数 ABI（**需 coolrt 新增类型**，承接 B3-b）→ M3.2 `__constant__`
+      （**需 coolrt 新增 `coolMemcpyToSymbol` 类 API**，否则降级为仅设备侧）→ M3.5 samples + 边界用例。
+      **推荐顺序**：先做无 coolrt 依赖的 M3.1/M3.3/M3.4，再与 coolrt 对齐后做 M3.0/M3.2。
+      **待确认**：① coolrt 是否新增向量类型；② coolrt 是否新增 `coolMemcpyToSymbol`；
+      ③ 聚合参数 PTX ABI（byval vs 拆解，需 spike）；④ `dim3` 与 `uint3` 关系；⑤ 诊断格式（C6）。
 
 ## C. 工程 / 流程
 
