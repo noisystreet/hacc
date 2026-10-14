@@ -24,15 +24,16 @@ std::string getenv_str(const char* name) {
 // 探测 C++ 系统头目录（供 cpfe 的 --sys_include）。
 //
 // 背景：cpfe 的 --g++ 模式**不自动**带系统 include 路径，故 .cu 一旦 #include
-// 标准头（如 <stddef.h>，经运行时头间接引入）就会报「cannot open source file」。
-// 这里用 `gcc -E -Wp,-v -` 打印的搜索列表补齐（与主机编译器一致）。
+// 标准头（如 <stddef.h> / <cstdio>）就会报「cannot open source file」。
+// 这里用 `g++ -x c++ -E -Wp,-v -` 打印的搜索列表补齐（与主机 C++ 编译器一致，
+// 含 C++ 头目录如 /usr/include/c++/N；用 gcc 则只有 C 头，<cstdio> 会找不到）。
 //
-// 返回目录列表；gcc 不可用或解析失败时返回空（此时 .cu 不应 include 标准头）。
+// 返回目录列表；g++ 不可用或解析失败时返回空（此时 .cu 不应 include 标准头）。
 // 结果缓存，避免每次调用都起子进程。
 const std::vector<std::string>& system_include_dirs() {
     static const std::vector<std::string> dirs = [] {
         std::vector<std::string> result;
-        FILE* p = popen("gcc -E -Wp,-v - 2>&1", "r");
+        FILE* p = popen("g++ -x c++ -E -Wp,-v - 2>&1", "r");
         if (p == nullptr) {
             return result;
         }

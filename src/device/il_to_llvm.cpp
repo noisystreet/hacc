@@ -376,12 +376,46 @@ llvm::Value* emit_int_arith(an_expr_operator_kind op, bool is_unsigned, llvm::Va
     }
 }
 
+// 指针算术（p + i / p - i）：用 GEP 按 pointee 类型步进。
+// 指针操作数取 ptr 值，整数操作数转 i64 作索引；减法取负索引。
+// 仅支持「指针 ± 整数」（不支持指针 - 指针，M2.4 范围）。
+llvm::Value* emit_pointer_arith(an_expr_operator_kind op, an_expr_node_ptr a, an_expr_node_ptr b,
+                                llvm::Value* va, llvm::Value* vb, KernelContext& kc) {
+    const bool a_is_ptr = a->type != nullptr && skip_typerefs(a->type)->kind == tk_pointer;
+    const bool b_is_ptr = b->type != nullptr && skip_typerefs(b->type)->kind == tk_pointer;
+    if (a_is_ptr == b_is_ptr) {
+        fail("指针算术要求一侧为指针、另一侧为整数（不支持指针 - 指针）");
+    }
+    an_expr_node_ptr ptr_expr = a_is_ptr ? a : b;
+    llvm::Value* ptr_val = a_is_ptr ? va : vb;
+    llvm::Value* idx_val = a_is_ptr ? vb : va;
+    // 指针在减法右侧时（i - p）语义非法，明确报错。
+    if (op == eok_psubtract && !a_is_ptr) {
+        fail("不支持「整数 - 指针」");
+    }
+    // 索引统一为 i64（GEP 索引类型）。
+    if (idx_val->getType() != kc.builder.getInt64Ty()) {
+        idx_val = kc.builder.CreateIntCast(idx_val, kc.builder.getInt64Ty(), /*isSigned=*/true);
+    }
+    if (op == eok_psubtract) {
+        idx_val = kc.builder.CreateNeg(idx_val);
+    }
+    // pointee 类型：从指针操作数的类型取（不透明指针下 GEP 仍需元素类型）。
+    a_type_ptr pointee = skip_typerefs(ptr_expr->type)->variant.pointer.type;
+    llvm::Type* elem_ty = map_type(pointee, kc.ctx);
+    return kc.builder.CreateGEP(elem_ty, ptr_val, idx_val);
+}
+
 // 二元算术（+ - * / %）：按操作数类型选浮点/整型指令。
 llvm::Value* translate_arith(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
     an_expr_node_ptr a = binary_operands(expr->variant.operation.operands, "二元算术运算符");
     an_expr_node_ptr b = a->next;
     llvm::Value* va = translate_expr(a, kc);
     llvm::Value* vb = translate_expr(b, kc);
+    // 指针算术：结果为指针类型（p + i / p - i）。
+    if (expr->type != nullptr && skip_typerefs(expr->type)->kind == tk_pointer) {
+        return emit_pointer_arith(op, a, b, va, vb, kc);
+    }
     const bool is_fp = expr->type != nullptr && expr->type->kind == tk_float;
     if (is_fp) {
         return emit_fp_arith(op, va, vb, kc);
@@ -618,7 +652,7 @@ llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc
 // 运算符类别（用于把多 case 的 dispatch 收敛为少量分支）。
 enum class OpClass { Assign, Arith, Compare, Cast, Unary, DotField, Call, Unsupported };
 
-// 是否为二元算术运算符（+ - * / %）。
+// 是否为二元算术运算符（+ - * / %，含指针算术 padd/psubtract）。
 bool is_arith_operator(an_expr_operator_kind op) {
     switch (op) {
         case eok_add:
@@ -626,6 +660,9 @@ bool is_arith_operator(an_expr_operator_kind op) {
         case eok_multiply:
         case eok_divide:
         case eok_remainder:
+        // 指针算术：EDG 用专门运算符（padd/psubtract），非 eok_add/subtract。
+        case eok_padd:
+        case eok_psubtract:
             return true;
         default:
             return false;

@@ -151,6 +151,30 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS golden_device_il_to_ptx_tid_kernel)
     endif()
 
+    # M2.4 golden：指针算术（p + i → GEP）。对真 vectorAdd 的 device 源产 PTX，
+    # 校验内核入口与按元素步进的地址计算（mul.wide + add.s64，即 GEP 的 PTX 形态）。
+    # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+    if(HACC_WITH_LLVM AND HACC_COOLRUNTIME_INCLUDE)
+        set(_va_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_add.cil")
+        set(_va_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_add.ptx")
+        add_test(NAME golden_frontend_vector_add_ptr_arith
+            COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                    --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                    -o "${_va_cil}"
+                    -I "${HACC_COOLRUNTIME_INCLUDE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/vector_add.cu")
+        add_test(NAME golden_device_il_to_ptx_vector_add_ptr_arith
+            COMMAND coolicc --from-il -arch=sm_80 -o "${_va_ptx}" "${_va_cil}")
+        set_tests_properties(golden_device_il_to_ptx_vector_add_ptr_arith PROPERTIES
+            DEPENDS golden_frontend_vector_add_ptr_arith)
+        # 校验：内核入口 + 指针步进（mul.wide.s32 索引缩放 + add.s64 地址相加）。
+        add_test(NAME golden_device_il_to_ptx_vector_add_ptr_arith_gep
+            COMMAND grep -qE "\\.visible \\.entry vector_add|mul\\.wide\\.s32|add\\.s64"
+                    "${_va_ptx}")
+        set_tests_properties(golden_device_il_to_ptx_vector_add_ptr_arith_gep PROPERTIES
+            DEPENDS golden_device_il_to_ptx_vector_add_ptr_arith)
+    endif()
+
     # M1.2.5 e2e：hacc driver 编排 `.cu` → PTX（coolfe++ → coolicc）。
     # hacc 按 argv[0] 同目录定位子工具（构建产物在一起）。
     if(HACC_WITH_LLVM)
@@ -161,8 +185,23 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         # 校验端到端产物：内核入口 + 算术。
         add_test(NAME e2e_hacc_scalar_kernel_ptx
             COMMAND grep -qE "\\.visible \\.entry add_kernel|add\\.s32" "${_e2e_sk_ptx}")
+
         set_tests_properties(e2e_hacc_scalar_kernel_ptx PROPERTIES
             DEPENDS e2e_hacc_scalar_kernel)
+
+        # M2.4 e2e：真 vectorAdd 编译 + 运行 + 结果校验（c[i] == 3*i）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理（对齐 coolrt 的
+        # test_kernel 做法）。
+        set(_e2e_va_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_add_run")
+        add_test(NAME e2e_hacc_vector_add_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/vector_add.cu"
+                    -o "${_e2e_va_run_exe}")
+        add_test(NAME e2e_hacc_vector_add_run
+            COMMAND "${_e2e_va_run_exe}")
+        set_tests_properties(e2e_hacc_vector_add_run PROPERTIES
+            DEPENDS e2e_hacc_vector_add_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "vectorAdd OK")
 
         # 内建变量 + __syncthreads 的端到端（需 COOLRuntime 头）。
         if(HACC_COOLRUNTIME_INCLUDE)
