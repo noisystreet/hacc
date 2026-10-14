@@ -114,6 +114,15 @@
   `KernelContext.locals` 放宽为 `Value*`。新增 e2e `e2e_hacc_shared_reduce_run[_build]`
   （`__shared__ int sdata[256]` + 跨线程读，校验 `sharedReduce OK: 256 elements verified`）。
   **本机 RTX 4060 上真跑通过**。
+- **M3.3 `dim3` 设备侧类型映射（3 分量聚合 → struct）**：修正 `map_struct_type` 的向量识别——
+  由「成员数 2/3/4 且全同类型 → `<N x T>`」收紧为「**成员数 2 或 4** 且全同类型 → `<N x T>`」，
+  **3 分量类型（`dim3` / `uint3` / `float3`）改映射为 struct `{T,T,T}`**。原因：PTX 只有 `v2`/`v4`
+  加载指令、**无 `v3`**，且 LLVM `<3 x T>` 的 store size 会被 padding 到 16 字节，破坏 3 分量类型的
+  **12 字节 ABI**（`dim3` 作为内核参数时，主机侧 `sizeof(dim3)==12` 与设备侧 16 字节不匹配，导致
+  越界读 + 布局错位）。修正后 `dim3` 参数按 `.param .align 4 .b8 [12]` 传递，成员访问走 struct GEP +
+  `ld.param.u32`。新增 golden `golden_frontend_dim3_param` + `golden_device_il_to_ptx_dim3_param[_struct]`
+  （校验 `.param .align 4 .b8 dim3_kernel_param_0[12]` + `ld.param.u32`）。**顺带修正 `float3` 的同类
+  ABI 隐患**（原 `<3 x float>` 亦为 16 字节）。
 
 
 ### Changed

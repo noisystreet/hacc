@@ -1,7 +1,7 @@
 # M3 方案：子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）
 
-> 状态：**进行中（M3.0 / M3.1 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）与
-> M3.1 `__shared__`（静态共享内存 → addrspace(3)）已实现并真跑通过。
+> 状态：**进行中（M3.0 / M3.1 / M3.3 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）、
+> M3.1 `__shared__`（静态共享内存 → addrspace(3)）与 M3.3 `dim3` 设备侧（3 分量聚合 → struct）已实现并验证。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围）、§10（里程碑 M3）。
 > 前置：M2 已完成（主机路径端到端跑通，见 [m2-host-path-plan.md](m2-host-path-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围）、
@@ -135,11 +135,24 @@
 
 **验证**：golden PTX（`.const` 段）；e2e（若 coolrt 支持拷贝）。
 
-### 3.4 M3.3 `dim3` 设备侧
+### 3.4 M3.3 `dim3` 设备侧——**已完成**
 
 - `dim3` 是 `cool_types.h` 的 struct（3×uint）；设备侧类型映射为 LLVM struct `{i32, i32, i32}`。
-- 内建变量（`threadIdx` 等）当前用 `uint3`（`device_builtins.h`）——**需统一** `dim3` 与 `uint3` 的关系
-  （CUDA 中 `threadIdx` 是 `uint3`，`dim3` 是主机侧类型；设备侧 `dim3` 用于内核参数）。
+- 内建变量（`threadIdx` 等）用 `uint3`（`device_builtins.h`）——**已统一** `dim3` 与 `uint3` 的关系：
+  二者布局相同（3×uint），**3 分量聚合统一映射为 struct `{T,T,T}`**（12 字节，对齐 4），
+  与主机侧布局一致；**仅 2/4 分量**才映射为向量 `<N x T>`。
+
+**落地（2026-10，已核验）**：
+
+- **spike 实测**：`__global__ void k(dim3 d, int* out)` 经 `hacc --emit=ptx` 产出——
+  修正前 `dim3` 被误判为向量 `<3 x i32>`，PTX 参数为 `.param .align 16 .b8 k_param_0[16]`（**16 字节**，
+  与主机侧 `sizeof(dim3)==12` 不匹配 → 越界读 + 布局错位）；修正后为
+  `.param .align 4 .b8 k_param_0[12]`（**12 字节**，对齐 4），成员访问走 `ld.param.u32`。
+- **修复**：`map_struct_type` 的向量识别由「成员数 2/3/4 且全同类型」收紧为「**成员数 2 或 4** 且全同类型」。
+  依据：PTX 只有 `v2`/`v4` 加载指令、**无 `v3`**；LLVM `<3 x T>` 的 store size 会被 padding 到 16 字节。
+- **顺带修正 `float3`**：原 `<3 x float>` 亦为 16 字节（同类 ABI 隐患），现映射为 struct `{float,float,float}`（12 字节）。
+- **测试**：golden `golden_frontend_dim3_param` + `golden_device_il_to_ptx_dim3_param[_struct]`
+  （校验 `.param .align 4 .b8 dim3_kernel_param_0[12]` + `ld.param.u32`）。
 
 ### 3.5 M3.4 诊断质量（对应 TODO C6）
 
@@ -156,7 +169,7 @@
 | 步骤 | 内容 | 依赖 | 验证 | 难度 |
 | --- | --- | --- | --- | --- |
 | **M3.1** | `__shared__`（静态共享内存 → addrspace(3)） | 无（纯设备侧） | golden PTX + e2e 归约 | 中 | ✅ **已完成** |
-| **M3.3** | `dim3` 设备侧类型映射 | 无 | golden PTX | 低 |
+| **M3.3** | `dim3` 设备侧类型映射 | 无 | golden PTX | 低 | ✅ **已完成** |
 | **M3.4** | 诊断格式（源位置） | 无 | 单测（错误消息） | 低 |
 | **M3.0** | 向量类型 + 聚合参数 ABI | **coolrt 新增类型** | golden + e2e | 高 | ✅ **已完成** |
 | **M3.2** | `__constant__`（+ 主机侧拷贝） | **coolrt 新增 API** | golden + e2e | 中 |

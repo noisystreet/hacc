@@ -228,9 +228,15 @@ llvm::Type* map_array_type(a_type_ptr t, llvm::LLVMContext& ctx) {
 
 // 聚合类型（tk_struct/tk_class/tk_union）→ LLVM 类型。
 //
-// M3.0：向量类型（成员全同标量、2/3/4 个）→ LLVM `<N x T>`（对齐 §8 选型：
+// M3.0：向量类型（成员全同标量、2/4 个）→ LLVM `<N x T>`（对齐 §8 选型：
 // PTX 用 ld.param.vN.f32 向量化加载，对齐明确）。其余 POD 聚合 → LLVM StructType。
 // 一期只支持「无位域、无基类」的 POD 聚合。
+//
+// M3.3：向量识别限定为 **2 或 4 分量**（不含 3）。原因：
+//   - PTX 只有 v2/v4 加载指令，**没有 v3**；LLVM `<3 x T>` 的 store size 会被
+//     padding 到 16 字节，破坏 3 分量类型（float3 / dim3 / uint3）的 12 字节 ABI。
+//   - 3 分量类型（float3、dim3、uint3）统一映射为 struct {T,T,T}（12 字节，对齐 4），
+//     与主机侧布局一致，避免内核参数按 16 字节传参导致的越界/错位。
 llvm::Type* map_struct_type(a_type_ptr t, llvm::LLVMContext& ctx) {
     // 先收集成员类型（同时校验无位域）。
     std::vector<llvm::Type*> member_tys;
@@ -243,8 +249,8 @@ llvm::Type* map_struct_type(a_type_ptr t, llvm::LLVMContext& ctx) {
     if (member_tys.empty()) {
         fail("不支持空聚合类型");
     }
-    // 向量类型识别：成员数 2/3/4 且全同类型 → <N x T>。
-    if (member_tys.size() >= 2 && member_tys.size() <= 4) {
+    // 向量类型识别：成员数 2 或 4 且全同类型 → <N x T>（3 分量走 struct，见上）。
+    if (member_tys.size() == 2 || member_tys.size() == 4) {
         bool all_same = true;
         for (llvm::Type* mt : member_tys) {
             if (mt != member_tys[0]) {

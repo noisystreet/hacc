@@ -239,6 +239,31 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "vectorType OK")
 
+        # M3.3 golden：dim3 作为内核参数（3 分量聚合 → struct {i32,i32,i32}）。
+        # 校验：PTX 参数按 12 字节（.param .align 4 .b8 dim3_kernel_param_0[12]）传递，
+        # 且成员访问走 ld.param.u32（非向量化 v2/v4）——证明 3 分量未被误判为向量。
+        # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_d3_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_dim3_param.cil")
+            set(_d3_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_dim3_param.ptx")
+            add_test(NAME golden_frontend_dim3_param
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_d3_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/dim3_param.cu")
+            add_test(NAME golden_device_il_to_ptx_dim3_param
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_d3_ptx}" "${_d3_cil}")
+            set_tests_properties(golden_device_il_to_ptx_dim3_param PROPERTIES
+                DEPENDS golden_frontend_dim3_param)
+            # 校验：内核入口 + dim3 参数 12 字节（align 4）+ 逐字段 ld.param.u32。
+            add_test(NAME golden_device_il_to_ptx_dim3_param_struct
+                COMMAND grep -qE "\\.visible \\.entry dim3_kernel|\\.param \\.align 4 \\.b8 dim3_kernel_param_0\\[12\\]|ld\\.param\\.u32"
+                        "${_d3_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_dim3_param_struct PROPERTIES
+                DEPENDS golden_device_il_to_ptx_dim3_param)
+        endif()
+
         # M3.1 golden：__shared__ 静态共享内存 → PTX .shared 段 + st.shared/ld.shared。
         # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
         if(HACC_COOLRUNTIME_INCLUDE)

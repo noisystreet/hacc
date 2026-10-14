@@ -130,13 +130,15 @@
       M2.4 指针算术（`eok_padd`/`eok_psubtract` → GEP）+ 真 vectorAdd e2e。
       **验证**：本机 RTX 4060 上 `hacc vector_add.cu -o exe` 后运行输出 `vectorAdd OK: 256 elements verified`；
       全量 33/33 测试通过。见 CHANGELOG。
-- [ ] **M3 子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）**：**进行中（M3.0 / M3.1 已完成）**——见
+- [ ] **M3 子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）**：**进行中（M3.0 / M3.1 / M3.3 已完成）**——见
       [m3-subset-s0-plan.md](m3-subset-s0-plan.md)。目标：补齐 S0 子集中 M1/M2 未覆盖的部分。
       分步：**M3.0 向量类型 + 聚合参数 ABI（✅ 已完成，承接 B3-b）** → **M3.1 `__shared__`（addrspace(3)，
-      纯设备侧）（✅ 已完成）** → M3.3 `dim3` 设备侧 → M3.4 诊断格式（源位置）→ M3.2 `__constant__`
+      纯设备侧）（✅ 已完成）** → **M3.3 `dim3` 设备侧（✅ 已完成：3 分量聚合 → struct，修正 12 字节 ABI）** →
+      M3.4 诊断格式（源位置）→ M3.2 `__constant__`
       （**需 coolrt 新增 `coolMemcpyToSymbol` 类 API**，否则降级为仅设备侧）→ M3.5 samples + 边界用例。
       **待确认**：① ~~coolrt 是否新增向量类型~~（已定：新增，提交 `f3cfbdd`）；② coolrt 是否新增
-      `coolMemcpyToSymbol`；③ ~~聚合参数 PTX ABI~~（已定：byval，spike 确认）；④ `dim3` 与 `uint3` 关系；
+      `coolMemcpyToSymbol`；③ ~~聚合参数 PTX ABI~~（已定：byval，spike 确认）；④ ~~`dim3` 与 `uint3` 关系~~
+      （已定：3 分量统一映射为 struct `{T,T,T}`，2/4 分量才走向量 `<N x T>`；见 M3.3）；
       ⑤ 诊断格式（C6）。
 
 ## C. 工程 / 流程
