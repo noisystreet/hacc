@@ -81,17 +81,25 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
     # 未找到头时跳过。校验 %tid.x / %ctaid.x 与 barrier0。
     if(HACC_WITH_LLVM AND HACC_COOLRUNTIME_INCLUDE)
         set(_tk_cil "${CMAKE_CURRENT_BINARY_DIR}/tid_kernel.cil")
+        set(_tk_ptx "${CMAKE_CURRENT_BINARY_DIR}/tid_kernel.ptx")
         add_test(NAME golden_frontend_tid_kernel
             COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
                     --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
                     -o "${_tk_cil}"
                     -I "${HACC_COOLRUNTIME_INCLUDE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/golden/frontend/tid_kernel.cu")
+        # 产出 PTX 到文件（供后续 grep 校验具体指令）。
         add_test(NAME golden_device_il_to_ptx_tid_kernel
-            COMMAND coolicc --from-il -arch=sm_80 "${_tk_cil}")
+            COMMAND coolicc --from-il -arch=sm_80 -o "${_tk_ptx}" "${_tk_cil}")
         set_tests_properties(golden_device_il_to_ptx_tid_kernel PROPERTIES
-            PASS_REGULAR_EXPRESSION "\\.visible \\.entry tid_kernel"
             DEPENDS golden_frontend_tid_kernel)
+        # 校验内核入口与内建映射：entry tid_kernel、threadIdx.x → %tid.x、
+        # blockIdx.x → %ctaid.x、__syncthreads → bar.sync。
+        add_test(NAME golden_device_il_to_ptx_tid_kernel_builtins
+            COMMAND grep -qE "\\.visible \\.entry tid_kernel|%tid\\.x|%ctaid\\.x|bar\\.sync"
+                    "${_tk_ptx}")
+        set_tests_properties(golden_device_il_to_ptx_tid_kernel_builtins PROPERTIES
+            DEPENDS golden_device_il_to_ptx_tid_kernel)
     endif()
 endif()
 

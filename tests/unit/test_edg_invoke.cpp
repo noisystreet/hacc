@@ -38,6 +38,26 @@ bool has_flag(const std::vector<std::string>& args, const std::string& flag) {
     return false;
 }
 
+// 返回 flag 首次出现的下标；未找到返回 -1。
+int index_of(const std::vector<std::string>& args, const std::string& flag) {
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == flag) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+// 返回 value 首次出现的下标；未找到返回 -1。
+int index_of_value(const std::vector<std::string>& args, const std::string& value) {
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == value) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
 }  // namespace
 
 int main() {
@@ -94,6 +114,41 @@ int main() {
         auto a = build_cpfe_args(o, /*for_text=*/false, "");
         expect(has_pair(a, "-I", "/inc"), "-I 透传");
         expect(has_pair(a, "-D", "FOO=1"), "-D 透传");
+    }
+
+    // 3b) -D__COOLCC__ 无条件存在（对标 __CUDACC__，让运行时头暴露设备端内建）。
+    {
+        EdgInvokeOptions o;
+        o.input_path = "k.cu";
+        auto a = build_cpfe_args(o, /*for_text=*/false, "");
+        expect(has_flag(a, "-D__COOLCC__"), "-D__COOLCC__ 无条件存在");
+    }
+
+    // 3c) extra_args（-I/-D）必须排在输入文件**之前**：cpfe 只识别输入前的选项。
+    //     （回归：曾把 extra_args 追加在输入之后，导致 #include <cool/...> 找不到。）
+    {
+        EdgInvokeOptions o;
+        o.input_path = "k.cu";
+        o.extra_args = {"-I", "/inc"};
+        auto a = build_cpfe_args(o, /*for_text=*/false, "");
+        const int inc = index_of(a, "-I");
+        const int input = index_of_value(a, "k.cu");
+        expect(inc >= 0 && input >= 0 && inc < input, "-I 在输入文件之前");
+    }
+
+    // 3d) --sys_include 注入（依赖 gcc 探测；无 gcc 时跳过断言）。
+    {
+        EdgInvokeOptions o;
+        o.input_path = "k.cu";
+        auto a = build_cpfe_args(o, /*for_text=*/false, "");
+        const bool has_sys = has_flag(a, "--sys_include");
+        // 若探测到系统头，则 --sys_include 必须成对出现且值非空。
+        if (has_sys) {
+            const int idx = index_of(a, "--sys_include");
+            expect(idx + 1 < static_cast<int>(a.size()) && !a[idx + 1].empty(),
+                   "--sys_include 后跟非空目录");
+        }
+        // 无 gcc 时不断言（探测返回空，属预期）。
     }
 
     // 4) 无 base：不产生 --edg_base_dir（由 cpfe 自行处理）。
