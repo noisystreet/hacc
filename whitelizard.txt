@@ -3,5 +3,17 @@
 # 注意：函数名须与 lizard 报告一致（C++ 为全限定名，如 hacc::device::map_type）。
 # 阈值见 Makefile 的 ccn 目标（CCN 10 / 函数长度 200）。
 #
-# 当前为空：M1.2 重构后所有函数均满足阈值（见 CHANGELOG）。
-# 若确需临时豁免，在此按上述格式追加，并在注释中说明原因与移除计划。
+# 说明（2026-10）：修复 Makefile 中 ccn 目标的 `||` 吞错后，门禁首次真正生效，
+# 暴露以下存量超标。均为「分支密集的 dispatch/解析/改写」函数，重构需单独排期，
+# 暂按历史债务豁免；重构后逐条移除。
+
+# M2.1 主机侧 <<<>>> 改写（分支密集的字符扫描/括号匹配）。
+src/host/launch_rewrite.cpp:hacc::host::skip_trivia,hacc::host::split_top_level,hacc::host::rewrite_launch,hacc::host::rewrite_source
+
+# 设备侧类型/运算符 dispatch（M3.0/M3.1 新增聚合与数组分支后越过阈值）。
+src/device/il_to_llvm.cpp:hacc::device::map_type,hacc::device::emit_pointer_arith,hacc::device::try_translate_struct_field,hacc::device::classify_operator,hacc::device::translate_operation,hacc::device::emit_ptx_from_il
+
+# 驱动/入口的参数解析与流水线编排。
+src/driver/pipeline.cpp:hacc::driver::run_pipeline
+src/driver/main.cpp:parse_args
+src/frontend/main.cpp:main

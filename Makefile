@@ -33,28 +33,37 @@ build: configure
 test: build
 	$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure
 
+# 工具缺失时跳过（打印提示），存在时违规必须让目标失败（退出码非 0）。
 fmt:
-	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 && \
-		$(CLANG_FORMAT) -i $(FMT_FILES) || \
-		echo "clang-format not found; skipping"
+	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		$(CLANG_FORMAT) -i $(FMT_FILES); \
+	else \
+		echo "clang-format not found; skipping"; \
+	fi
 
 fmt-check:
-	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 && \
-		$(CLANG_FORMAT) --dry-run --Werror $(FMT_FILES) || \
-		echo "clang-format not found; skipping"
+	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		$(CLANG_FORMAT) --dry-run --Werror $(FMT_FILES); \
+	else \
+		echo "clang-format not found; skipping"; \
+	fi
 
 lint: configure
-	@command -v $(CLANG_TIDY) >/dev/null 2>&1 && \
-		$(CLANG_TIDY) -p $(BUILD_DIR) $(FMT_FILES) || \
-		echo "clang-tidy not found; skipping"
+	@if command -v $(CLANG_TIDY) >/dev/null 2>&1; then \
+		$(CLANG_TIDY) -p $(BUILD_DIR) $(FMT_FILES); \
+	else \
+		echo "clang-tidy not found; skipping"; \
+	fi
 
 # 圈复杂度（CCN）与函数长度门禁；历史债务见 $(LIZARD_WHITELIST)。
 ccn:
-	@command -v $(LIZARD) >/dev/null 2>&1 && \
+	@if command -v $(LIZARD) >/dev/null 2>&1; then \
 		$(LIZARD) $(LIZARD_PATHS) -l cpp \
 			-C $(CCN_THRESHOLD) -L $(FUNC_LENGTH_THRESHOLD) \
-			-W $(LIZARD_WHITELIST) -w || \
-		echo "lizard not found; skipping"
+			-W $(LIZARD_WHITELIST) -w; \
+	else \
+		echo "lizard not found; skipping"; \
+	fi
 
 check: fmt-check ccn build test
 
