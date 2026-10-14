@@ -24,7 +24,8 @@ namespace hacc::host {
 // 生成桩代码。kernel_names 为内核名（去重、按序）；ptx_text 为设备映像（PTX 文本）。
 // 返回可直接拼入 host 源的 C++ 代码片段（含末尾换行）。
 // 空 kernel_names 返回空串（无内核则无桩）。
-std::string generate_stubs(const std::vector<std::string>& kernel_names, const std::string& ptx_text);
+std::string generate_stubs(const std::vector<std::string>& kernel_names,
+                           const std::string& ptx_text);
 
 // 把任意字节串渲染为 C 字节数组字面量（`{ 0x.., ... }`，每行 12 字节）。
 // 供 generate_stubs 复用，也便于单测。

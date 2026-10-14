@@ -65,7 +65,8 @@ int main() {
         expect_contains(s, "static const unsigned char __cool_image_foo[] = {", "单内核 image");
         expect_contains(s, "static coolKernel_t __cool_kernel_foo = nullptr;", "单内核 slot");
         expect_contains(s, "static std::once_flag __cool_once_foo;", "单内核 once");
-        expect_contains(s, "static const hacc::KernelRegistration __cool_reg_foo = {", "单内核 reg");
+        expect_contains(s, "static const hacc::KernelRegistration __cool_reg_foo = {",
+                        "单内核 reg");
         expect_contains(s, "\"foo\", __cool_image_foo, sizeof(__cool_image_foo),", "单内核 name");
         expect_contains(s, "&__cool_kernel_foo, &__cool_once_foo};", "单内核 指针");
         // PTX 文本字节（'P'=0x50, 'T'=0x54, 'X'=0x58）。

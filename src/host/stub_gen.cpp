@@ -27,7 +27,8 @@ std::string render_byte_array(const std::string& bytes) {
     return out;
 }
 
-std::string generate_stubs(const std::vector<std::string>& kernel_names, const std::string& ptx_text) {
+std::string generate_stubs(const std::vector<std::string>& kernel_names,
+                           const std::string& ptx_text) {
     if (kernel_names.empty()) {
         return std::string();
     }
@@ -36,12 +37,13 @@ std::string generate_stubs(const std::vector<std::string>& kernel_names, const s
     out += "\n#include <coolcc/hacc_runtime.h>\n";
     out += "\n// ---- hacc 主机桩（M2.2b 自动生成；内嵌设备映像 + 惰性注册描述）----\n";
     for (const std::string& name : kernel_names) {
-        out += "static const unsigned char __cool_image_" + name + "[] = " +
-               render_byte_array(ptx_text) + ";\n";
+        out += "static const unsigned char __cool_image_" + name +
+               "[] = " + render_byte_array(ptx_text) + ";\n";
         out += "static coolKernel_t __cool_kernel_" + name + " = nullptr;\n";
         out += "static std::once_flag __cool_once_" + name + ";\n";
         out += "static const hacc::KernelRegistration __cool_reg_" + name + " = {\n";
-        out += "    \"" + name + "\", __cool_image_" + name + ", sizeof(__cool_image_" + name + "),\n";
+        out +=
+            "    \"" + name + "\", __cool_image_" + name + ", sizeof(__cool_image_" + name + "),\n";
         out += "    &__cool_kernel_" + name + ", &__cool_once_" + name + "};\n";
     }
     return out;

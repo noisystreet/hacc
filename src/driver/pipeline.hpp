@@ -29,16 +29,16 @@ enum class EmitMode {
 
 // 流水线选项。
 struct PipelineOptions {
-    std::string input_path;   // 输入 .cu
-    std::string output_path;  // 输出（-o）：PTX 或可执行文件
-    std::string arch = "sm_80";  // -arch=sm_XX
-    EmitMode emit = EmitMode::Exe;  // 产物模式
-    bool keep = false;        // -keep：保留中间产物（.cil / .hacc.cpp / .ptx）
+    std::string input_path;                 // 输入 .cu
+    std::string output_path;                // 输出（-o）：PTX 或可执行文件
+    std::string arch = "sm_80";             // -arch=sm_XX
+    EmitMode emit = EmitMode::Exe;          // 产物模式
+    bool keep = false;                      // -keep：保留中间产物（.cil / .hacc.cpp / .ptx）
     std::vector<std::string> include_dirs;  // -I：透传给 coolfe++ 与 g++
     // 子工具路径（空则按同目录 / 环境变量推导）。
     std::string coolfe_path;
     std::string coolicc_path;
-    std::string gxx_path;     // 主机编译器（默认 $HACC_GXX 或 "g++"）
+    std::string gxx_path;  // 主机编译器（默认 $HACC_GXX 或 "g++"）
     // COOLRuntime 头目录与库（主机编译用；空则按环境变量 / 默认推导）。
     std::string coolrt_include;  // -I<coolrt>/include
     std::string coolrt_lib;      // <coolrt>/build/libcoolruntime.a
@@ -62,7 +62,8 @@ std::string resolve_coolicc_path(const PipelineOptions& opts);
 std::string resolve_gxx_path(const PipelineOptions& opts);
 
 // 拼装 coolfe++ 参数（不含程序名）：<input.cu> -o <cil>。
-std::vector<std::string> build_coolfe_args(const PipelineOptions& opts, const std::string& cil_path);
+std::vector<std::string> build_coolfe_args(const PipelineOptions& opts,
+                                           const std::string& cil_path);
 
 // 拼装 coolfe++ 参数（含 --emit-host=<host_path>）：<input.cu> --emit-host=<host> -o <cil>。
 std::vector<std::string> build_coolfe_host_args(const PipelineOptions& opts,

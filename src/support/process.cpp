@@ -86,8 +86,8 @@ ProcessResult run_process(const std::vector<std::string>& argv) {
     }
 
     close(pipefd[1]);
-    result.ok = collect_child(pipefd[0], pid, &result.stderr_text, &result.exit_code,
-                              &result.error);
+    result.ok =
+        collect_child(pipefd[0], pid, &result.stderr_text, &result.exit_code, &result.error);
     return result;
 }
 

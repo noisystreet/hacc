@@ -12,8 +12,8 @@ namespace hacc {
 
 // 子进程执行结果。
 struct ProcessResult {
-    bool ok = false;       // 退出码为 0
-    int exit_code = -1;    // 退出码；被信号终止时为 128+signo
+    bool ok = false;          // 退出码为 0
+    int exit_code = -1;       // 退出码；被信号终止时为 128+signo
     std::string stderr_text;  // 子进程 stderr（诊断信息）
     std::string error;        // 失败时的可读原因（如「无法执行」）
 };

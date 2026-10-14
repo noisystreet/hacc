@@ -197,8 +197,7 @@ std::vector<std::string> build_coolicc_args(const PipelineOptions& opts,
     return {"--from-il", "-arch=" + opts.arch, "-o", opts.output_path, cil_path};
 }
 
-std::vector<std::string> build_gxx_args(const PipelineOptions& opts,
-                                        const std::string& host_path) {
+std::vector<std::string> build_gxx_args(const PipelineOptions& opts, const std::string& host_path) {
     // g++ <host.cpp> -I<coolrt>/include -I<hacc>/include [-I <dir> ...] -o <out> <lib> -lcuda
     std::vector<std::string> args;
     args.push_back("-std=c++20");

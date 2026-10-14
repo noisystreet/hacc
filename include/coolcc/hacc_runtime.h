@@ -62,9 +62,15 @@ inline coolKernel_t resolve(const KernelRegistration& reg) {
 }
 
 // grid/block 归一化为 dim3：接受 int（如 (n+255)/256）或 dim3。
-inline dim3 to_dim3(unsigned int v) { return dim3{v, 1, 1}; }
-inline dim3 to_dim3(int v) { return dim3{static_cast<unsigned int>(v), 1, 1}; }
-inline dim3 to_dim3(dim3 d) { return d; }
+inline dim3 to_dim3(unsigned int v) {
+    return dim3{v, 1, 1};
+}
+inline dim3 to_dim3(int v) {
+    return dim3{static_cast<unsigned int>(v), 1, 1};
+}
+inline dim3 to_dim3(dim3 d) {
+    return d;
+}
 
 // 启动跳板：把实参物化为具名临时，取地址成 void*[]，调 coolLaunchKernel。
 // 第一个参数是注册描述（__cool_reg_foo），内部 resolve 为 coolKernel_t。
