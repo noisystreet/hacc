@@ -6,6 +6,7 @@
 //   - 遇到 `__global__`：定位其函数体 `{...}` 并剔除（只留声明）。
 #include "host/launch_rewrite.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -157,6 +158,7 @@ struct LaunchRewrite {
     std::string text;
     std::size_t next = 0;
     std::size_t name_start = 0;  // 内核名在源中的起始下标（供调用方回退已输出的名字）
+    std::string kernel_name;     // 回溯到的内核名（供调用方收集）
     std::string error;
 };
 
@@ -169,6 +171,7 @@ LaunchRewrite rewrite_launch(const std::string& s, std::size_t lt) {
         return r;
     }
     r.name_start = lt - name.size();
+    r.kernel_name = name;
     // 定位 `<<<` 后的配置段，直到 `>>>`。
     std::size_t cfg_begin = lt + 3;
     std::size_t gt = s.find(">>>", cfg_begin);
@@ -222,7 +225,7 @@ struct GlobalStrip {
     std::string error;
 };
 
-// 处理 `__global__`：剥掉关键字；若有函数体则剔除（只留声明）。
+// 处理 `__global__`（host 源）：剥掉关键字，剔除函数体（只留声明）。
 GlobalStrip strip_global(const std::string& s, std::size_t i) {
     GlobalStrip g;
     const std::size_t n = s.size();
@@ -249,8 +252,8 @@ GlobalStrip strip_global(const std::string& s, std::size_t i) {
         g.error = "`__global__` 函数体 `{...}` 括号不配对";
         return g;
     }
-    // 剥掉 `__global__` 与其后空白，保留到 `{` 之间的声明部分（含参数列表），丢弃函数体；
-    // 去掉声明末尾空白再补 `;`（避免 `void k() ;` 这类多余空格）。
+    // host 源：剥掉 `__global__` 与其后空白，保留到 `{` 之间的声明部分（含参数列表），
+    // 丢弃函数体；去掉声明末尾空白再补 `;`（避免 `void k() ;` 这类多余空格）。
     std::size_t decl_begin = skip_ws(s, i + 10);
     std::string decl = s.substr(decl_begin, brace - decl_begin);
     while (!decl.empty() && is_space(decl.back())) {
@@ -264,7 +267,7 @@ GlobalStrip strip_global(const std::string& s, std::size_t i) {
 
 }  // namespace
 
-RewriteResult rewrite_source(const std::string& src) {
+RewriteResult rewrite_source(const std::string& src, const RewriteOptions& options) {
     RewriteResult result;
     std::string out;
     out.reserve(src.size());
@@ -290,6 +293,11 @@ RewriteResult rewrite_source(const std::string& src) {
                 result.error = lr.error;
                 return result;
             }
+            // 记录内核名（去重、按首次出现顺序）。
+            if (std::find(result.kernel_names.begin(), result.kernel_names.end(), lr.kernel_name) ==
+                result.kernel_names.end()) {
+                result.kernel_names.push_back(lr.kernel_name);
+            }
             // 内核名已随主循环逐字符写入 out，需回退（改写文本自带 `__cool_reg_<name>`）。
             out.resize(out.size() - (i - lr.name_start));
             out += lr.text;
@@ -297,8 +305,9 @@ RewriteResult rewrite_source(const std::string& src) {
             continue;
         }
 
-        // `__global__`：剥关键字 + 剔除函数体（只留声明）。
-        if (c == '_' && src.compare(i, 10, "__global__") == 0) {
+        // `__global__`：剥关键字；host 源（keep_global_bodies=false）再剔除函数体。
+        // device 源（keep_global_bodies=true）**不动** `__global__`（cpfe 需其属性识别内核）。
+        if (!options.keep_global_bodies && c == '_' && src.compare(i, 10, "__global__") == 0) {
             GlobalStrip g = strip_global(src, i);
             if (!g.ok) {
                 result.ok = false;

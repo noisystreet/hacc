@@ -37,6 +37,19 @@ std::string rewrite_ok(const std::string& src, const char* what) {
     return r.source;
 }
 
+// 便捷：device 模式改写（保留 `__global__` 函数体）。
+std::string rewrite_device_ok(const std::string& src, const char* what) {
+    hacc::host::RewriteOptions opts;
+    opts.keep_global_bodies = true;
+    auto r = hacc::host::rewrite_source(src, opts);
+    if (!r.ok) {
+        std::fprintf(stderr, "FAIL: %s（改写失败：%s）\n", what, r.error.c_str());
+        ++g_failures;
+        return {};
+    }
+    return r.source;
+}
+
 }  // namespace
 
 int main() {
@@ -118,6 +131,28 @@ int main() {
     {
         auto r = rewrite_source("__global__ void k() { int x = 1;\n");
         expect(!r.ok, "函数体括号不配对应失败");
+    }
+
+    // 16) device 模式：`__global__` 原样保留（cpfe 需其属性识别内核）。
+    expect_eq(
+        rewrite_device_ok("__global__ void k(int* out) {\n    *out = 1;\n}\n", "device 保留体"),
+        "__global__ void k(int* out) {\n    *out = 1;\n}\n", "device 保留体");
+
+    // 17) device 模式：`<<<>>>` 仍改写，`__global__` 原样保留。
+    expect_eq(
+        rewrite_device_ok("__global__ void k() {}\nint main() { k<<<1, 1>>>(); }\n", "device 组合"),
+        "__global__ void k() {}\nint main() { haccLaunch(__cool_reg_k, 1, 1, 0, nullptr); }\n",
+        "device 组合");
+
+    // 18) kernel_names 收集：去重、按首次出现顺序。
+    {
+        auto r = rewrite_source("a<<<1,1>>>();\nb<<<1,1>>>();\na<<<2,2>>>();\n");
+        expect(r.ok, "kernel_names 用例应成功");
+        expect(r.kernel_names.size() == 2, "kernel_names 应去重为 2");
+        if (r.kernel_names.size() == 2) {
+            expect(r.kernel_names[0] == "a", "kernel_names[0] 应为 a");
+            expect(r.kernel_names[1] == "b", "kernel_names[1] 应为 b");
+        }
     }
 
     if (g_failures == 0) {

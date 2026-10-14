@@ -27,6 +27,17 @@ add_test(NAME golden_host_vector_add
             "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu"
             "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.hacc.cpp")
 
+# M2.1 golden：coolfe++ --emit-host-only 产主机源，与期望逐字节比对。
+# 纯文本路径（不调用 cpfe），无需 EDG/LLVM/GPU。
+set(_host_out "${CMAKE_CURRENT_BINARY_DIR}/vector_add.hacc.cpp")
+add_test(NAME golden_host_coolfe_emit_host
+    COMMAND coolfe++ --emit-host-only=${_host_out}
+            "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu")
+add_test(NAME golden_host_coolfe_emit_host_match
+    COMMAND diff -u "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.hacc.cpp" "${_host_out}")
+set_tests_properties(golden_host_coolfe_emit_host_match PROPERTIES
+    DEPENDS golden_host_coolfe_emit_host)
+
 add_test(NAME cli_hacc_version    COMMAND hacc --version)
 add_test(NAME cli_coolfe_version  COMMAND coolfe++ --version)
 add_test(NAME cli_coolicc_version COMMAND coolicc --version)
@@ -63,6 +74,25 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
     set_tests_properties(golden_device_il_list_empty_kernel PROPERTIES
         PASS_REGULAR_EXPRESSION "empty_kernel"
         DEPENDS golden_frontend_empty_kernel)
+
+    # M2.1 golden：含 `<<<>>>` + `__global__` 的 .cu → device 改写源 → cpfe → IL。
+    # 校验：① cpfe 成功（能解析改写后的 haccLaunch）；② 文本 IL 仍含内核 routine
+    # （证明 device 源保留了 `__global__` 函数体，设备 IL 未丢内核）。
+    if(HACC_COOLRUNTIME_INCLUDE)
+        set(_vh_cil "${CMAKE_CURRENT_BINARY_DIR}/vector_add.cil")
+        set(_vh_txt "${CMAKE_CURRENT_BINARY_DIR}/vector_add.il.txt")
+        add_test(NAME golden_host_device_il_vector_add
+            COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                    --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                    -o "${_vh_cil}"
+                    --emit-il-text=${_vh_txt}
+                    -I "${HACC_COOLRUNTIME_INCLUDE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu")
+        add_test(NAME golden_host_device_il_vector_add_has_kernel
+            COMMAND grep -q "routine.*vector_add" "${_vh_txt}")
+        set_tests_properties(golden_host_device_il_vector_add_has_kernel PROPERTIES
+            DEPENDS golden_host_device_il_vector_add)
+    endif()
 
     # M1.2.2 golden：.cil → LLVM IR → PTX（需 EDG + LLVM 同时开启）。
     # 校验最小内核产出 `.visible .entry empty_kernel`。

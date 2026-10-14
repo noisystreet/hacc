@@ -46,6 +46,9 @@ target_link_libraries(hacc PRIVATE hacc_support)
 # coolfe++：CUDA 前端（对标 cudafe++，基于 EDG C++，独立可执行）。
 add_executable(coolfe++ src/frontend/main.cpp src/frontend/edg_invoke.cpp)
 target_link_libraries(coolfe++ PRIVATE hacc_support)
+# 注入 hacc 自身 include 目录（含 coolcc/hacc_device_decls.h），供 device 源 #include。
+target_compile_definitions(coolfe++ PRIVATE
+    HACC_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # HACC_WITH_EDG：把 EDG 前端（cpfe）的默认路径注入 coolfe++（M1.2.0）。
 # 关闭时 coolfe++ 仍可构建；运行期需 --cpfe / $HACC_CPFE 指定 cpfe。
