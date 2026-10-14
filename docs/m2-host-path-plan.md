@@ -49,9 +49,9 @@ cubin/`ptxas`（M6）、分离编译/RDC、动态并行（Non-Goal）。
 ### 2.4 主机侧不需要 EDG 代码生成（关键简化）
 
 - 方案 §3.1 曾列「方案 C：用 EDG 的 C 生成后端产 C，再喂 clang」，但**已否决**（引入 clang 依赖、C 往返丢信息）。
-- **本方案采用更简路径**：host 源 = **改写后的源码本身**——
-  - `<<<>>>` 已改写为 `haccLaunch(...)` 调用；
+- **本方案采用更简路径**：host 源 = **改写后的源码**（`<<<>>>` 已改写为 `haccLaunch(...)`）——
   - `__global__` / `__device__` / `threadIdx` 等由**运行时头**（`include/coolcc/hacc_runtime.h` + COOLRuntime 头）提供宏/声明；
+  - **但 `__global__` 函数体必须剔除**（只留声明）——函数体属设备代码，host 侧编译会因 `threadIdx` 等未定义而失败（**见 §8.2 实测**）；
   - 主机侧就是**普通 C++**，直接交系统 `g++` 编译。
 - **好处**：host 侧不依赖 EDG 的代码生成能力，`coolfe++` 只需「源码改写 + 调 cpfe 产 IL」两件事。
 
@@ -131,18 +131,19 @@ coolKernel_t resolve(const KernelRegistration& reg);
 }
 
 // 启动跳板：把实参物化为具名临时，取地址成 void*[]，调 coolLaunchKernel。
-template <typename... Args>
-void haccLaunch(coolKernel_t kernel, dim3 grid, dim3 block, size_t smem,
+// grid/block 用模板（接受 int / dim3，对齐 CUDA <<<g,b>>> 的隐式转换，见 §8.4）。
+template <typename G, typename B, typename... Args>
+void haccLaunch(const hacc::KernelRegistration& reg, G grid, B block, size_t smem,
                 coolStream_t stream, Args... args);
 ```
 
 **`haccLaunch` 语义**（对齐 cudart）：
 
-- 每个实参在**完整表达式**内物化为具名临时（`auto __a0 = args0; ...`），取地址成 `void* __args[]`。
+- 每个实参在**完整表达式**内物化为具名临时（模板参数 `args...` 按值传入，本身即具名临时），取地址成 `void* argv[]`。
 - `stream` 为 `nullptr` 即默认流。
 - **丢弃** `coolLaunchKernel` 返回码（last error 由 coolrt A 层现有机制覆盖，见 §2.1 与 ADR 0003）。
-- 但 `haccLaunch` 的第一个参数是**内核标识**——`<<<>>>` 改写时传的是**内核名**（如 `foo`），
-  需解析为 `coolKernel_t`。**设计**：改写时传 `__cool_reg_foo`（注册描述），`haccLaunch` 内部 `resolve`。
+- 第一个参数是**注册描述**（`__cool_reg_foo`），`haccLaunch` 内部 `resolve` 为 `coolKernel_t`。
+- **完整原型见 §8.5**（已实测编译链接通过）。
 
 > **改写与桩的衔接**：`<<<>>>` 改写为 `haccLaunch(__cool_reg_foo, grid, block, smem, stream, args...)`，
 > 其中 `__cool_reg_foo` 由桩生成（§3.3）。故**改写需知道内核名 → 注册描述名**的映射（`foo` → `__cool_reg_foo`）。
@@ -155,9 +156,11 @@ void haccLaunch(coolKernel_t kernel, dim3 grid, dim3 block, size_t smem,
 hacc input.cu -o a.out
   ├─ coolfe++ input.cu --emit-host=input.hacc.cpp -o input.cil   # 改写 + IL
   ├─ coolicc --from-il -o input.ptx input.cil                    # IL → PTX
-  ├─ 生成 input.image.cpp（内嵌 PTX 字节 + 注册描述）              # 桩
-  └─ g++ input.hacc.cpp input.image.cpp -I<coolrt> -lcoolrt -o a.out
+  ├─ 生成 input.hacc.cpp 的桩段（内嵌 PTX 字节 + 注册描述，并入同一 TU）  # 桩
+  └─ g++ input.hacc.cpp -I<coolrt> -lcoolrt -o a.out
 ```
+
+> **桩并入 host 源**（同一 TU）——注册描述 `static` 可见性要求（**见 §8.3 实测**）。
 
 **新增选项**：`--emit=exe`（默认）/ `--emit=ptx`（纯设备，M1.2 已有）/ `-keep`（保留中间产物）。
 
@@ -165,7 +168,7 @@ hacc input.cu -o a.out
 
 | 步骤 | 内容 | 验证 | 难度 |
 | --- | --- | --- | --- |
-| **M2.0** | `<<<>>>` 改写器（纯文本，独立模块 `src/host/launch_rewrite.{hpp,cpp}`） | 单测：片段 → 期望输出 | 中 |
+| **M2.0** | 源码改写器（纯文本，独立模块 `src/host/launch_rewrite.{hpp,cpp}`）：① `<<<>>>` → `haccLaunch(...)`；② 剔除 `__global__` 函数体（只留声明） | 单测：片段 → 期望输出 | 中 |
 | **M2.1** | `coolfe++` 产 host 源（改写后源码）+ 仍产 IL | golden：host 源文本比对 | 中 |
 | **M2.2** | `hacc_runtime.h`（`KernelRegistration` + `resolve` + `haccLaunch`）+ 桩生成 | 单测 + 编译通过 | 中 |
 | **M2.3** | driver 编排主机编译（调 `g++` + 链接 coolrt） | 产出可执行文件 | 中 |
@@ -186,11 +189,12 @@ hacc input.cu -o a.out
 
 ## 6. 待确认（实施前）
 
+> **§8 的 M2.0 spike 已解决第 2/4 项**（host 源不需 EDG；`haccLaunch` 用模板），并新增 2 项修正（剔除函数体、桩并入同 TU）。
+
 1. **`<<<>>>` 改写的实现层**：`coolfe++` 内做（调 cpfe 前），还是独立工具？——**倾向 `coolfe++` 内**（与 IL 产出同源）。
-2. **host 源是否需 EDG 参与**：本方案假设**不需要**（改写后源码即 host 源）。需 spike 验证：
-   改写后的源码能否被 `g++` 直接编译（`__global__` 等由运行时头提供）。
+2. ~~**host 源是否需 EDG 参与**~~：**已定——不需要**（§8.1 实测：改写后源码 + 剔除函数体，`g++` 直接编译链接通过）。
 3. **映像内嵌格式**：PTX 文本字节数组（一期）vs 二进制。**倾向文本**（可读）。
-4. **`haccLaunch` 形态**：可变参数模板 vs 宏。**倾向模板**（类型安全、可调试）。
+4. ~~**`haccLaunch` 形态**~~：**已定——可变参数模板**（§8.5 原型已实测通过）。
 5. **符号命名**：`extern "C"` 名字直接采用；否则固定 mangling（与设备侧 PTX 入口名一致）。
 
 ## 7. 与 M1.2 的衔接
@@ -198,3 +202,76 @@ hacc input.cu -o a.out
 - **设备侧不变**：M1.2 的 `.cu` → IL → PTX 链路**原样复用**。
 - **新增主机侧**：`<<<>>>` 改写 + 桩 + 内嵌映像 + 主机编译。
 - **driver 扩展**：M1.2.5 的 `pipeline.{hpp,cpp}` 增加主机编译阶段。
+
+## 8. M2.0 spike 实测结论（2026-10，已核验）
+
+用 Python 原型 + 真实工具链（`g++` + coolrt + RTX 4060）验证了 M2 的**核心不确定性**，
+**结论：方案可行，端到端跑通**。实测发现 3 处需修正方案细节：
+
+### 8.1 端到端验证（成功）
+
+```
+tid_kernel.cu → hacc → 真实 PTX → 内嵌字节数组 → g++ 编译链接 → 在 RTX 4060 上运行
+                                                                  → result = 0 ✓
+```
+
+- 真实 PTX（M1.2 产出）内嵌为 C 字节数组；
+- `coolMalloc` / `coolLaunchKernel` / `coolDeviceSynchronize` / `coolMemcpy` 全链路跑通；
+- 内核启动成功，结果校验通过（`tid.x=0 + ctaid.x=0 = 0`）。
+
+### 8.2 修正 1：host 侧**必须剔除 `__global__` 函数体**（关键）
+
+- **原方案 §2.4 说「host 源 = 改写后源码本身」不准确**。
+- **实测**：host 侧（无 `__COOLCC__`）编译 `__global__` 函数体时，`threadIdx` / `__syncthreads`
+  未声明 → **编译失败**；即使补声明，函数体仍产生**未定义引用**（链接失败）。
+- **修正**：host 源里 `__global__` 函数**只留声明**（剔除函数体）：
+  ```cpp
+  // 输入：__global__ void tid_kernel(int* out) { ... }
+  // host 源：void tid_kernel(int* out);   // 只留声明
+  ```
+  函数体属设备代码，由 `coolicc` 从 IL 生成 PTX，**不在 host 侧编译**。
+- **实现**：改写器需识别 `__global__` 函数边界（`{ ... }` 配对），剔除函数体。
+
+### 8.3 修正 2：桩**必须与 host 源同 TU**
+
+- **原方案 §3.5 说「生成 `input.image.cpp`」不准确**。
+- **实测**：注册描述 `__cool_reg_foo` 若在独立 TU 且 `static`，host 源**看不到**（编译失败）。
+- **修正**：桩（内嵌映像 + 注册描述）**并入 host 源**（同一 TU），或注册描述用非 `static` + `extern` 声明。
+  **倾向并入**（简单、无跨 TU 符号管理）。
+
+### 8.4 修正 3：`haccLaunch` 的 grid/block 需**模板化**
+
+- **原方案 §3.4 写的是 `dim3` 参数**。
+- **实测**：`<<<g, b>>>` 的 `g`/`b` 常为 `int`（如 `(n+255)/256`），`dim3` 是 C struct（无构造函数），
+  **不能隐式转换** → 编译失败。
+- **修正**：`haccLaunch` 的 grid/block 参数用**模板**，内部经 `to_dim3` 统一转 `dim3`：
+  ```cpp
+  inline dim3 to_dim3(unsigned int v) { return dim3{v, 1, 1}; }
+  inline dim3 to_dim3(dim3 d) { return d; }
+  template <typename G, typename B, typename... Args>
+  void haccLaunch(const hacc::KernelRegistration& reg, G grid, B block,
+                  std::size_t smem, coolStream_t stream, Args... args);
+  ```
+
+### 8.5 已验证的 `haccLaunch` 原型（可直接落地）
+
+```cpp
+template <typename G, typename B, typename... Args>
+void haccLaunch(const hacc::KernelRegistration& reg, G grid, B block,
+                std::size_t smem, coolStream_t stream, Args... args) {
+    coolKernel_t k = hacc::resolve(reg);
+    if (k == nullptr) return;                       // 失败静默（last error 由 coolrt 覆盖）
+    void* argv[] = { (void*)&args... };             // 实参物化为具名临时（模板参数即临时）
+    (void)coolLaunchKernel(k, hacc::to_dim3(grid), hacc::to_dim3(block), argv, smem, stream);
+}
+```
+
+> **注**：`(void*)&args...` 中 `args` 是**按值传入的模板参数**，本身即具名临时，生命周期覆盖整个调用——
+> 满足「实参按值物化」语义（§3.4）。无需额外 `auto __a0 = ...`。
+
+### 8.6 对分步实施的影响
+
+- **M2.0（改写器）**：需同时做两件事——① `<<<>>>` → `haccLaunch(...)`；② 剔除 `__global__` 函数体。
+  两者都是**纯文本变换**，可独立单测。
+- **M2.2（桩/运行时头）**：桩并入 host 源；`haccLaunch` 用 §8.5 原型。
+- **M2.4（e2e）**：本机 GPU 已验证可跑通，**非跳过**。
