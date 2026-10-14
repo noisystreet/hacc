@@ -101,6 +101,34 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         set_tests_properties(golden_device_il_to_ptx_tid_kernel_builtins PROPERTIES
             DEPENDS golden_device_il_to_ptx_tid_kernel)
     endif()
+
+    # M1.2.5 e2e：hacc driver 编排 `.cu` → PTX（coolfe++ → coolicc）。
+    # hacc 按 argv[0] 同目录定位子工具（构建产物在一起）。
+    if(HACC_WITH_LLVM)
+        set(_e2e_sk_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_scalar_kernel.ptx")
+        add_test(NAME e2e_hacc_scalar_kernel
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/frontend/scalar_kernel.cu"
+                    --emit=ptx -o "${_e2e_sk_ptx}")
+        # 校验端到端产物：内核入口 + 算术。
+        add_test(NAME e2e_hacc_scalar_kernel_ptx
+            COMMAND grep -qE "\\.visible \\.entry add_kernel|add\\.s32" "${_e2e_sk_ptx}")
+        set_tests_properties(e2e_hacc_scalar_kernel_ptx PROPERTIES
+            DEPENDS e2e_hacc_scalar_kernel)
+
+        # 内建变量 + __syncthreads 的端到端（需 COOLRuntime 头）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_e2e_tk_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_tid_kernel.ptx")
+            add_test(NAME e2e_hacc_tid_kernel
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/frontend/tid_kernel.cu"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        --emit=ptx -o "${_e2e_tk_ptx}")
+            add_test(NAME e2e_hacc_tid_kernel_ptx
+                COMMAND grep -qE "\\.visible \\.entry tid_kernel|%tid\\.x|%ctaid\\.x|bar\\.sync"
+                        "${_e2e_tk_ptx}")
+            set_tests_properties(e2e_hacc_tid_kernel_ptx PROPERTIES
+                DEPENDS e2e_hacc_tid_kernel)
+        endif()
+    endif()
 endif()
 
 # M1.1 golden：LLVM IR → PTX（仅当 coolicc 编译了 LLVM 后端时）。

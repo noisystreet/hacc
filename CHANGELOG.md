@@ -52,6 +52,13 @@
   以 `--sys_include` 传给 `cpfe`（`cpfe --g++` 不自动带系统 include 路径）。`CMakeLists.txt` 新增
   `HACC_COOLRUNTIME_DIR`（默认 `../coolruntime`，可覆盖）自动定位运行时头；未找到时相关 golden
   测试跳过。
+- **M1.2.5 端到端（`.cu` → PTX，`hacc` driver 编排）**：`hacc` driver 从 M0 骨架接入真实流水线——
+  解析 `-o` / `-I` / `-arch=sm_XX` / `-keep` / `--emit=ptx`，以子进程编排 `coolfe++`（`.cu` → EDG IL）
+  与 `coolicc`（IL → PTX）。子工具按 `argv[0]` **同目录**定位（构建产物在一起），可用
+  `$HACC_COOLFE` / `$HACC_COOLICC` 覆盖。新增 `src/driver/pipeline.{hpp,cpp}`（编排逻辑，纯逻辑与
+  执行分离）与 `src/support/process.{hpp,cpp}`（通用子进程执行，fork/exec + stderr 捕获）。
+  中间 `.cil` 默认删除，`-keep` 保留。新增 e2e 测试 `e2e_hacc_scalar_kernel[_ptx]` 与
+  `e2e_hacc_tid_kernel[_ptx]`（`.cu` → PTX，校验内核入口与内建映射）。
 
 ### Changed
 

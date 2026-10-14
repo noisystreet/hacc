@@ -97,14 +97,20 @@
       探测 gcc 系统头（`--sys_include`），支持 `.cu` `#include <cool/cool_runtime.h>`（COOLRuntime
       运行时头，`HACC_COOLRUNTIME_DIR` 定位）。测试：`golden_frontend_tid_kernel`、
       `golden_device_il_to_ptx_tid_kernel`（校验 `%tid.x` / `%ctaid.x` / `bar.sync`）。见 CHANGELOG。
-- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0/M1.2.1/M1.2.2/M1.2.3/M1.2.4 已完成**——见
+- [x] **M1.2.5 端到端（`.cu` → PTX，`hacc` driver 编排）**：**已实现**——`hacc` driver 接入真实流水线，
+      解析 `-o` / `-I` / `-arch=sm_XX` / `-keep` / `--emit=ptx`，以子进程编排 `coolfe++`（`.cu` → EDG IL）
+      与 `coolicc`（IL → PTX）。子工具按 `argv[0]` 同目录定位（`$HACC_COOLFE` / `$HACC_COOLICC` 可覆盖）。
+      新增 `src/driver/pipeline.{hpp,cpp}` 与 `src/support/process.{hpp,cpp}`。测试：`e2e_hacc_scalar_kernel[_ptx]`、
+      `e2e_hacc_tid_kernel[_ptx]`。见 CHANGELOG。
+- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0–M1.2.5 全部完成**——见
       [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。核心结论：EDG IL 是**内存树**（非文本契约），
       采用**链接 EDG 前端库、内存遍历 IL**（官方「逐函数翻译后丢弃」路径）；阶段 A 的「IL 文件」是
       **二进制 IL**（`il_read` 读回），非文本解析。
       **已拍板**：① `coolicc` 直接链接 EDG 库；② IL 文件 = 二进制 IL；③ 翻译核心 = 独立库
       （`src/device/il_to_llvm/`）；④ **IL 须能 dump 成人类可读**（`cdisp` 对含属性 IL 崩溃，
       改用 `coolfe++` 落文本 + 自建 `hacc-il-dump`，见方案 §7.1）。
-      **下一步**：M1.2.4（内建变量 `threadIdx` 等 + `__syncthreads()`，golden PTX 比对）。
+      **下一步**：M1.2 阶段收尾——补 `edg-il-reference.md §5.6`（内建变量/`__syncthreads` 实测），
+      或进入 M1.3（主机侧：桩生成 / `<<<>>>` 改写 / 内嵌映像注册）。
 
 ## C. 工程 / 流程
 

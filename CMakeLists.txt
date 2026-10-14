@@ -32,13 +32,14 @@ endif()
 # 公共支持层：诊断 / 选项 / 版本 / 进程封装（src/support）。
 add_library(hacc_support STATIC
     src/support/version.cpp
+    src/support/process.cpp
 )
 target_include_directories(hacc_support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(hacc_support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_definitions(hacc_support PRIVATE HACC_VERSION_STRING="${PROJECT_VERSION}")
 
 # hacc：命令行驱动（对标 nvcc）—— 选项解析 / 阶段编排 / 子进程调度。
-add_executable(hacc src/driver/main.cpp)
+add_executable(hacc src/driver/main.cpp src/driver/pipeline.cpp)
 target_link_libraries(hacc PRIVATE hacc_support)
 
 # coolfe++：CUDA 前端（对标 cudafe++，基于 EDG C++，独立可执行）。
