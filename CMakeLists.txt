@@ -33,6 +33,7 @@ endif()
 add_library(hacc_support STATIC
     src/support/version.cpp
     src/support/process.cpp
+    src/host/launch_rewrite.cpp
 )
 target_include_directories(hacc_support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(hacc_support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

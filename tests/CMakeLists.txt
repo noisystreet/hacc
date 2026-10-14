@@ -13,6 +13,20 @@ add_executable(test_edg_invoke unit/test_edg_invoke.cpp
 target_link_libraries(test_edg_invoke PRIVATE hacc_support)
 add_test(NAME unit_edg_invoke COMMAND test_edg_invoke)
 
+# M2.0：主机源码改写器（`<<<>>>` → haccLaunch + 剔除 `__global__` 函数体）。
+# 纯文本变换，无需 EDG/LLVM/GPU。
+add_executable(test_launch_rewrite unit/test_launch_rewrite.cpp)
+target_link_libraries(test_launch_rewrite PRIVATE hacc_support)
+add_test(NAME unit_launch_rewrite COMMAND test_launch_rewrite)
+
+# M2.0 golden：对真实 .cu 跑改写器，与期望 host 源逐字节比对。
+add_executable(test_launch_rewrite_golden unit/test_launch_rewrite_golden.cpp)
+target_link_libraries(test_launch_rewrite_golden PRIVATE hacc_support)
+add_test(NAME golden_host_vector_add
+    COMMAND test_launch_rewrite_golden
+            "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu"
+            "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.hacc.cpp")
+
 add_test(NAME cli_hacc_version    COMMAND hacc --version)
 add_test(NAME cli_coolfe_version  COMMAND coolfe++ --version)
 add_test(NAME cli_coolicc_version COMMAND coolicc --version)
