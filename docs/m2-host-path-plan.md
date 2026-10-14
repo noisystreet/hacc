@@ -1,6 +1,7 @@
 # M2 方案：主机路径（桩 + 内嵌映像 + `<<<>>>` 改写）
 
-> 状态：**方案细化中（待评审）**（2026-10）。
+> 状态：**已完成（M2.0–M2.4）**（2026-10）。本机 RTX 4060 上真 vectorAdd 跑通并校验结果
+> （`vectorAdd OK: 256 elements verified`）；全量 33/33 测试通过。见 [CHANGELOG](../CHANGELOG.md)。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §6.2（主机端）、§7（与 coolrt 的 ABI 衔接）、§10（里程碑 M2）。
 > 前置：M1.2 已完成（`.cu` → EDG IL → LLVM IR → PTX，见 [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)）。
 > 相关：[ADR 0003](adr/0003-host-stub-fatbin-registration.md)（主机桩 + 内嵌映像注册）、

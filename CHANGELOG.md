@@ -59,6 +59,40 @@
   执行分离）与 `src/support/process.{hpp,cpp}`（通用子进程执行，fork/exec + stderr 捕获）。
   中间 `.cil` 默认删除，`-keep` 保留。新增 e2e 测试 `e2e_hacc_scalar_kernel[_ptx]` 与
   `e2e_hacc_tid_kernel[_ptx]`（`.cu` → PTX，校验内核入口与内建映射）。
+- **M2.0 主机源码改写器（`<<<>>>` → `haccLaunch` + 剔除 `__global__` 函数体）**：新增
+  `src/host/launch_rewrite.{hpp,cpp}`（纯函数 `rewrite_source`，单趟词法扫描，跳过注释/字符串
+  字面量；`<<<` 歧义或括号不配对时 fail loud）。`<<<>>>` 改写为 `haccLaunch(...)`，并剔除
+  `__global__` 函数体（host 侧不编译设备代码，见方案 §8.2）。新增单测 `unit_launch_rewrite`
+  与 golden `golden_host_vector_add`（对真实 `.cu` 跑改写并与期望 host 源逐字节比对）。
+- **M2.1 `coolfe++` 产 device 改写源喂 `cpfe`（含 `<<<>>>` 的 `.cu` → 设备 IL）**：改写器新增
+  `keep_global_bodies` 开关（device 源保留 `__global__` 函数体供 cpfe 识别内核，host 源仍剔除）
+  并回传 `kernel_names`；新增 `include/coolcc/hacc_device_decls.h`（device 源前置声明 `haccLaunch`
+  与 `__COOL_REG_DECL(name)` 宏）。`coolfe++` 生成 device 源（注入声明头 + 每个内核的 `__cool_reg_*`
+  声明）写临时文件喂 cpfe，用完删除。新增 IL golden `golden_host_device_il_vector_add`（校验内核
+  routine 仍在，防回归）。
+- **M2.2 运行时头落定 + 主机桩生成器（内嵌映像 + 惰性注册）**：`include/coolcc/hacc_runtime.h`
+  从占位落定为实现——`KernelRegistration`（name/image/size/slot/once）、`resolve`（`call_once`
+  惰性 `coolModuleLoadData` + `coolModuleGetFunction`，失败静默返回 `nullptr`）、`to_dim3` 重载、
+  `haccLaunch` 模板（实参物化为具名临时，取地址成 `void*[]`）。`resolve` 实现放头文件（inline），
+  随生成的 host 源编译、由最终 `g++` 链接 coolrt，hacc 自身工具链不引入 coolrt 依赖。新增
+  `src/host/stub_gen.{hpp,cpp}`（为每个内核生成内嵌 PTX 字节数组 + 注册描述，纯文本变换）。
+  新增单测 `unit_stub_gen`。
+- **M2.3 driver 编排主机编译（`.cu` → 可执行文件）**：`pipeline` 新增 `EmitMode`（`Exe` 默认 /
+  `Ptx`）与主机编译阶段——`coolfe++`（产 host 源 + IL）→ `coolicc`（产 PTX）→ 拼桩（读 host 源 +
+  PTX，跑改写器拿内核名，`generate_stubs` 拼到 host 源顶部）→ `g++` 编译链接 coolrt。新增
+  `resolve_gxx_path` / `build_coolfe_host_args` / `build_gxx_args`；`resolve_coolrt_root` 支持
+  显式 > 环境变量 > 构建期默认 > 回退。新增 e2e `e2e_hacc_vector_add_exe`（编译链接成功即通过）。
+- **M2.4 指针算术 + 真 vectorAdd e2e 跑通并校验结果**：device 后端新增**指针算术**——EDG 用
+  专门运算符 `eok_padd` / `eok_psubtract`（非 `eok_add` / `eok_subtract`）表示指针加减，此前未
+  覆盖导致 `*(p + i)` 报「不支持的运算符」。新增 `emit_pointer_arith`：按 pointee 类型发 GEP，
+  索引转 i64，减法取负；仅支持「指针 ± 整数」（指针 - 指针留待后续）。`coolfe++` 系统头探测改用
+  `g++ -x c++ -E -Wp,-v -`（原 `gcc` 只有 C 头，`<cstdio>` 找不到）。新增
+  `tests/golden/e2e/vector_add.cu`（真 vectorAdd：`c[i] = a[i] + b[i]`，`threadIdx.x` 索引，256
+  线程，含结果校验；无 CUDA 设备时返回 77 供测试框架 SKIP）。新增测试：指针算术 golden
+  `golden_frontend_vector_add_ptr_arith` + `golden_device_il_to_ptx_vector_add_ptr_arith[_gep]`
+  （校验 `mul.wide.s32` + `add.s64`）；e2e 真跑 `e2e_hacc_vector_add_run[_build]`（编译 + 运行 +
+  校验 `c[i] == 3*i`，`SKIP_RETURN_CODE 77`）。**本机 RTX 4060 上真跑通过**（输出
+  `vectorAdd OK: 256 elements verified`）。
 
 ### Changed
 

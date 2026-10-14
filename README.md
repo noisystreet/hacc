@@ -32,8 +32,15 @@ hacc 是 [coolrt](../coolruntime) 的**编译前端**，用于补上 coolrt 架�
 
 ## 状态
 
-**M1.1 进行中**：骨架（M0）已落地；设备后端已打通 **LLVM IR → PTX**（`coolicc` 接入 LLVM/NVPTX）。
-EDG 前端接入（`coolfe++`）与 EDG IL → LLVM IR（M1.2）尚在进行。
+**M2 已完成**：设备后端（LLVM IR → PTX，M1.1）与前端（`.cu` → EDG IL → LLVM IR → PTX，M1.2）
+均已打通；主机路径（M2）已落地——`<<<>>>` 改写、主机桩 + 内嵌 PTX 映像 + 惰性注册、
+driver 编排主机编译链接，**`.cu` 一步到可执行文件**。真 vectorAdd 已在本机 GPU 上跑通并校验结果。
+
+```sh
+# 一步到可执行文件（默认 --emit=exe）
+build/hacc tests/golden/e2e/vector_add.cu -o vector_add
+./vector_add        # → vectorAdd OK: 256 elements verified
+```
 
 ## 构建与使用
 
@@ -67,6 +74,7 @@ build/coolicc --emit=ptx -arch=sm_80 tests/golden/device/empty_kernel.ll
 | --- | --- |
 | [compiler-implementation-plan.md](docs/compiler-implementation-plan.md) | 编译器实现方案（主文档）：架构、流水线、目录、里程碑、风险 |
 | [m1.2-il-to-llvm-plan.md](docs/m1.2-il-to-llvm-plan.md) | M1.2 方案：EDG IL → LLVM IR（选型、翻译核心、分步实施） |
+| [m2-host-path-plan.md](docs/m2-host-path-plan.md) | M2 方案：主机路径（桩 + 内嵌映像 + `<<<>>>` 改写） |
 | [edg-il-reference.md](docs/edg-il-reference.md) | EDG IL 表项速查（字段级参考，依据 `il_def.h`） |
 | [ADR 0001](docs/adr/0001-edg-cpp-frontend.md) | 前端采用开源 EDG C++ 前端 |
 | [ADR 0002](docs/adr/0002-llvm-nvptx-device-backend.md) | 设备端走 LLVM IR → NVPTX → PTX |
