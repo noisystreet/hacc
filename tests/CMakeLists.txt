@@ -239,6 +239,42 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "vectorType OK")
 
+        # M3.1 golden：__shared__ 静态共享内存 → PTX .shared 段 + st.shared/ld.shared。
+        # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_sr_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_shared_reduce.cil")
+            set(_sr_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_shared_reduce.ptx")
+            add_test(NAME golden_frontend_shared_reduce
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_sr_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/shared_reduce.cu")
+            add_test(NAME golden_device_il_to_ptx_shared_reduce
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_sr_ptx}" "${_sr_cil}")
+            set_tests_properties(golden_device_il_to_ptx_shared_reduce PROPERTIES
+                DEPENDS golden_frontend_shared_reduce)
+            # 校验：内核入口 + .shared 段 + 共享内存读写指令。
+            add_test(NAME golden_device_il_to_ptx_shared_reduce_shared
+                COMMAND grep -qE "\\.visible \\.entry shared_reduce|\\.shared \\.align [0-9]+ \\.b8 __shared_sdata\\[1024\\]|st\\.shared|ld\\.shared"
+                        "${_sr_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_shared_reduce_shared PROPERTIES
+                DEPENDS golden_device_il_to_ptx_shared_reduce)
+        endif()
+
+        # M3.1 e2e：__shared__ 共享内存编译 + 运行 + 结果校验（out[i] == N-1-i）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_sr_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_shared_reduce_run")
+        add_test(NAME e2e_hacc_shared_reduce_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/shared_reduce.cu"
+                    -o "${_e2e_sr_run_exe}")
+        add_test(NAME e2e_hacc_shared_reduce_run
+            COMMAND "${_e2e_sr_run_exe}")
+        set_tests_properties(e2e_hacc_shared_reduce_run PROPERTIES
+            DEPENDS e2e_hacc_shared_reduce_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "sharedReduce OK")
+
         # 内建变量 + __syncthreads 的端到端（需 COOLRuntime 头）。
         if(HACC_COOLRUNTIME_INCLUDE)
             set(_e2e_tk_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_tid_kernel.ptx")

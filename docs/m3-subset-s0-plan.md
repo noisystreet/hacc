@@ -1,6 +1,7 @@
 # M3 方案：子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）
 
-> 状态：**进行中（M3.0 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）已实现并真跑通过。
+> 状态：**进行中（M3.0 / M3.1 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）与
+> M3.1 `__shared__`（静态共享内存 → addrspace(3)）已实现并真跑通过。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围）、§10（里程碑 M3）。
 > 前置：M2 已完成（主机路径端到端跑通，见 [m2-host-path-plan.md](m2-host-path-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围）、
@@ -64,7 +65,7 @@
 
 ## 3. 方案设计
 
-### 3.1 M3.1 `__shared__`（建议先做，纯设备侧）
+### 3.1 M3.1 `__shared__`（建议先做，纯设备侧）——**已完成**
 
 **设备侧**（`il_to_llvm`）：
 
@@ -77,6 +78,20 @@
 **验证**：golden PTX 校验 `.shared` 段 + `st.shared` / `ld.shared` 指令；e2e 用共享内存做归约。
 
 **风险**：`__shared__` 数组的**动态索引**（`sdata[tid]`）需 GEP + 地址空间正确传播。
+
+**落地（2026-10，已核验）**：
+
+- `map_type` 新增 `tk_array` → `llvm::ArrayType`（`map_array_type`，仅常量上界，VLA 报错）。
+- `translate_decl` 识别 `cool_shared` → 发射 `internal addrspace(3) global`（名字加 `__shared_` 前缀，
+  避免不同内核同名冲突）；文件作用域 `__shared__` 报错。
+- 新增 `eok_array_to_pointer`（数组→指针退化，GEP `[0,0]`；操作数已是指针时恒等）与
+  `eok_subscript`（下标 → GEP 元素地址；rvalue 时 load）。
+- `translate_init` 扩展支持 `dik_constant` / `dik_zero`（`int t = 0;` 等）。
+- `KernelContext.locals` 由 `AllocaInst*` 放宽为 `Value*`（容纳 alloca 与全局）。
+- **测试**：golden `golden_frontend_shared_reduce` + `golden_device_il_to_ptx_shared_reduce[_shared]`
+  （校验 `.shared .align 4 .b8 __shared_sdata[1024]` + `st.shared`/`ld.shared`）；e2e
+  `e2e_hacc_shared_reduce_run[_build]`（`__shared__ int sdata[256]` + 跨线程读，校验 `out[i] == 255-i`）。
+  **本机 RTX 4060 真跑通过**（`sharedReduce OK: 256 elements verified`）。
 
 ### 3.2 M3.0 向量类型（承接 B3-b）——**已完成**
 
@@ -140,7 +155,7 @@
 
 | 步骤 | 内容 | 依赖 | 验证 | 难度 |
 | --- | --- | --- | --- | --- |
-| **M3.1** | `__shared__`（静态共享内存 → addrspace(3)） | 无（纯设备侧） | golden PTX + e2e 归约 | 中 |
+| **M3.1** | `__shared__`（静态共享内存 → addrspace(3)） | 无（纯设备侧） | golden PTX + e2e 归约 | 中 | ✅ **已完成** |
 | **M3.3** | `dim3` 设备侧类型映射 | 无 | golden PTX | 低 |
 | **M3.4** | 诊断格式（源位置） | 无 | 单测（错误消息） | 低 |
 | **M3.0** | 向量类型 + 聚合参数 ABI | **coolrt 新增类型** | golden + e2e | 高 | ✅ **已完成** |

@@ -53,6 +53,9 @@ namespace {
 // 内核属性名（契约见 tools/il_spike/cuda-attributes.md；A2 决策 (a) 按 name 匹配）。
 constexpr const char* kKernelAttributeName = "cool_global";
 
+// __shared__ 变量属性名（M3.1；契约见 cuda-attributes.md §1）。
+constexpr const char* kCoolSharedAttributeName = "cool_shared";
+
 // 翻译失败时抛出，由顶层 emit_ptx_from_il 捕获并转成 err_out。
 // 用异常而非错误码，避免在深层递归里层层传递错误状态（clean-code：失败显式）。
 class TranslateError : public std::exception {
@@ -210,6 +213,19 @@ llvm::Type* map_float_type(a_type_ptr t, llvm::LLVMContext& ctx) {
 // M1.2.3 覆盖标量（整型/浮点）与指针；M3.0 新增聚合（tk_struct，如向量类型 float4）。
 llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx);
 
+// 数组类型（tk_array）→ LLVM ArrayType。仅支持常量上界（VLA 不支持）。
+llvm::Type* map_array_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    if (t->variant.array.is_variable_size_array || t->variant.array.is_vla) {
+        fail("不支持变长数组（VLA）");
+    }
+    a_targ_size_t n = t->variant.array.variant.number_of_elements;
+    if (n == 0) {
+        fail("不支持不完整数组类型（[]）");
+    }
+    llvm::Type* elem = map_type(t->variant.array.element_type, ctx);
+    return llvm::ArrayType::get(elem, static_cast<uint64_t>(n));
+}
+
 // 聚合类型（tk_struct/tk_class/tk_union）→ LLVM 类型。
 //
 // M3.0：向量类型（成员全同标量、2/3/4 个）→ LLVM `<N x T>`（对齐 §8 选型：
@@ -267,6 +283,9 @@ llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx) {
         case tk_union:
             // 聚合类型（M3.0）：向量类型（float4 等）即 tk_struct。
             return map_struct_type(t, ctx);
+        case tk_array:
+            // 数组类型（M3.1）：[N x T]。仅支持常量上界（VLA 不支持）。
+            return map_array_type(t, ctx);
         default:
             fail("不支持的类型 kind（M1.2.3 仅覆盖标量与指针）");
     }
@@ -292,16 +311,19 @@ bool is_unsigned_integer(a_type_ptr t) {
 // 单个内核的翻译上下文：变量 → LLVM 存储地址的映射，以及当前 IRBuilder。
 struct KernelContext {
     llvm::LLVMContext& ctx;
+    llvm::Module& module;
     llvm::IRBuilder<> builder;
-    // 变量 → 其「存储地址」（alloca）。变量引用先取地址再 load。
-    std::unordered_map<a_variable_ptr, llvm::AllocaInst*> locals;
+    // 变量 → 其「存储地址」。局部变量是 alloca；__shared__ 变量是 addrspace(3) 全局。
+    // 变量引用先取地址再 load（数组名除外，见 translate_expr）。
+    std::unordered_map<a_variable_ptr, llvm::Value*> locals;
 
-    explicit KernelContext(llvm::LLVMContext& c) : ctx(c), builder(c) {}
+    KernelContext(llvm::LLVMContext& c, llvm::Module& m) : ctx(c), module(m), builder(c) {}
 };
 
 // 前向声明（语句与表达式互相递归）。
 void translate_statement(a_statement_ptr stmt, KernelContext& kc);
 llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc);
+llvm::Value* translate_subscript(an_expr_node_ptr expr, KernelContext& kc);
 
 // 取变量的「地址」（alloca）。参数在函数入口已 alloca。
 llvm::Value* variable_address(a_variable_ptr var, KernelContext& kc) {
@@ -323,6 +345,10 @@ llvm::Value* translate_expr_address(an_expr_node_ptr expr, KernelContext& kc) {
     if (expr->kind == enk_operation && expr->variant.operation.kind == eok_indirect) {
         // *p 的地址就是 p 的值。
         return translate_expr(expr->variant.operation.operands, kc);
+    }
+    if (expr->kind == enk_operation && expr->variant.operation.kind == eok_subscript) {
+        // a[i] 的地址即 GEP 结果（translate_subscript 返回元素地址）。
+        return translate_subscript(expr, kc);
     }
     fail("不支持的左值表达式（M1.2.3 仅支持变量与 *p）");
 }
@@ -627,10 +653,9 @@ const char* field_dimension_suffix(const char* name) {
 // 发射对 NVVM 特殊寄存器的读取：llvm.nvvm.read.ptx.sreg.<base>.<dim>。
 // 该 intrinsic 返回 i32（与 CUDA 内建变量的 unsigned int 成员一致）。
 llvm::Value* emit_sreg_read(const char* base, const char* dim, KernelContext& kc) {
-    const std::string fn_name =
-        std::string("llvm.nvvm.read.ptx.sreg.") + base + "." + dim;
-    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent()->getParent()->getFunction(
-        fn_name);
+    const std::string fn_name = std::string("llvm.nvvm.read.ptx.sreg.") + base + "." + dim;
+    llvm::Function* fn =
+        kc.builder.GetInsertBlock()->getParent()->getParent()->getFunction(fn_name);
     if (fn == nullptr) {
         llvm::FunctionType* fn_ty =
             llvm::FunctionType::get(llvm::Type::getInt32Ty(kc.ctx), /*isVarArg=*/false);
@@ -719,6 +744,55 @@ llvm::Value* try_translate_struct_field(an_expr_node_ptr expr, KernelContext& kc
     return kc.builder.CreateLoad(map_type(field->type, kc.ctx), member_addr);
 }
 
+// 数组→指针退化（eok_array_to_pointer）：数组名 → 指向首元素的指针。
+// EDG 在数组下标/指针算术前插入此节点（compiler_generated）。
+// 操作数可能是数组（sdata）或已是指针（out，EDG 仍插退化节点）：
+//   - 数组：GEP [0, 0] 取首元素地址；
+//   - 指针：直接返回其值（退化是恒等）。
+llvm::Value* translate_array_to_pointer(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr arr = expr->variant.operation.operands;
+    if (arr == nullptr) {
+        fail("数组→指针退化缺少操作数");
+    }
+    llvm::Value* arr_addr = translate_expr(arr, kc);
+    a_type_ptr arr_ty = arr->type;
+    while (arr_ty != nullptr && arr_ty->kind == tk_typeref) {
+        arr_ty = arr_ty->variant.typeref.type;
+    }
+    if (arr_ty == nullptr) {
+        fail("数组→指针退化的操作数类型为空");
+    }
+    if (arr_ty->kind == tk_pointer) {
+        // 已是指针：退化是恒等（如 out[t]，out 为 int*）。
+        return arr_addr;
+    }
+    if (arr_ty->kind != tk_array) {
+        fail("数组→指针退化的操作数既不是数组也不是指针");
+    }
+    llvm::Type* elem_ty = map_type(arr_ty->variant.array.element_type, kc.ctx);
+    llvm::Value* zero = kc.builder.getInt64(0);
+    return kc.builder.CreateGEP(elem_ty, arr_addr, {zero, zero});
+}
+
+// 数组下标（eok_subscript）：base[idx] → 元素地址（lvalue）。
+// operands 链：第一个是「数组→指针退化」或指针表达式，第二个是索引。
+llvm::Value* translate_subscript(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr base = expr->variant.operation.operands;
+    an_expr_node_ptr idx_expr = (base != nullptr) ? base->next : nullptr;
+    if (base == nullptr || idx_expr == nullptr) {
+        fail("数组下标缺少操作数");
+    }
+    llvm::Value* base_ptr = translate_expr(base, kc);
+    llvm::Value* idx = translate_expr(idx_expr, kc);
+    // 索引统一为 i64（GEP 索引类型）。
+    if (idx->getType() != kc.builder.getInt64Ty()) {
+        idx = kc.builder.CreateIntCast(idx, kc.builder.getInt64Ty(), /*isSigned=*/true);
+    }
+    // 元素类型：从下标表达式的结果类型取（eok_subscript 的 type 即元素类型）。
+    llvm::Type* elem_ty = map_type(expr->type, kc.ctx);
+    return kc.builder.CreateGEP(elem_ty, base_ptr, idx);
+}
+
 // 翻译内建函数调用（__syncthreads 等）。
 // 返回 nullptr 表示「不是内建函数调用」，交由调用方走普通路径。
 llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc) {
@@ -740,14 +814,25 @@ llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc
     if (fn == nullptr) {
         llvm::FunctionType* fn_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(kc.ctx),
                                                             /*isVarArg=*/false);
-        fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage,
-                                    "llvm.nvvm.barrier0", module);
+        fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "llvm.nvvm.barrier0",
+                                    module);
     }
     return kc.builder.CreateCall(fn);
 }
 
 // 运算符类别（用于把多 case 的 dispatch 收敛为少量分支）。
-enum class OpClass { Assign, Arith, Compare, Cast, Unary, DotField, Call, Unsupported };
+enum class OpClass {
+    Assign,
+    Arith,
+    Compare,
+    Cast,
+    Unary,
+    DotField,
+    Call,
+    ArrayToPointer,
+    Subscript,
+    Unsupported
+};
 
 // 是否为二元算术运算符（+ - * / %，含指针算术 padd/psubtract）。
 bool is_arith_operator(an_expr_operator_kind op) {
@@ -804,6 +889,12 @@ OpClass classify_operator(an_expr_operator_kind op) {
     if (op == eok_call) {
         return OpClass::Call;
     }
+    if (op == eok_array_to_pointer) {
+        return OpClass::ArrayToPointer;
+    }
+    if (op == eok_subscript) {
+        return OpClass::Subscript;
+    }
     return OpClass::Unsupported;
 }
 
@@ -840,6 +931,13 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             }
             return v;
         }
+        case OpClass::ArrayToPointer:
+            return translate_array_to_pointer(expr, kc);
+        case OpClass::Subscript: {
+            // 下标表达式作为 rvalue：取元素地址后 load。
+            llvm::Value* elem_addr = translate_subscript(expr, kc);
+            return kc.builder.CreateLoad(map_type(expr->type, kc.ctx), elem_addr);
+        }
         default:
             fail("不支持的运算符（M1.2.3 仅覆盖算术/比较/赋值/取址/解引用/转换）");
     }
@@ -853,6 +951,14 @@ llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc) {
     switch (expr->kind) {
         case enk_variable: {
             llvm::Value* addr = variable_address(expr->variant.variable.ptr, kc);
+            // 数组类型：变量名即地址（不 load），供 eok_array_to_pointer / eok_subscript 使用。
+            a_type_ptr vt = expr->type;
+            while (vt != nullptr && vt->kind == tk_typeref) {
+                vt = vt->variant.typeref.type;
+            }
+            if (vt != nullptr && vt->kind == tk_array) {
+                return addr;
+            }
             return kc.builder.CreateLoad(map_type(expr->type, kc.ctx), addr);
         }
         case enk_constant:
@@ -866,6 +972,9 @@ llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc) {
 
 // 声明语句：为每个实体建 alloca（局部变量）。
 // entities 是 tagged pointer 链表；只处理 iek_variable。
+//
+// M3.1：带 cool_shared 属性的变量 → 发射 addrspace(3) 全局（静态共享内存），
+// 而非 alloca。CUDA 语义：__shared__ 变量在块内所有线程间共享，生命周期为整个块。
 void translate_decl(a_statement_ptr stmt, KernelContext& kc) {
     for (an_il_entity_list_entry_ptr e = stmt->variant.decl.entities; e != nullptr; e = e->next) {
         if (e->entity.kind != iek_variable) {
@@ -876,19 +985,29 @@ void translate_decl(a_statement_ptr stmt, KernelContext& kc) {
             continue;
         }
         llvm::Type* ty = map_type(v->type, kc.ctx);
+        if (has_attribute(v->source_corresp.attributes, kCoolSharedAttributeName)) {
+            // __shared__ 变量 → addrspace(3) 全局（internal，零初始化）。
+            // 名字加前缀避免与其它内核的同名 __shared__ 冲突（CUDA 中 __shared__ 是
+            // 函数局部，不同内核可同名）。
+            std::string gname = std::string("__shared_") + v->source_corresp.name;
+            llvm::GlobalVariable* gv = new llvm::GlobalVariable(
+                kc.module, ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+                llvm::Constant::getNullValue(ty), gname, /*InsertBefore=*/nullptr,
+                llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/3);
+            kc.locals[v] = gv;
+            continue;
+        }
         llvm::AllocaInst* slot = kc.builder.CreateAlloca(ty, nullptr, v->source_corresp.name);
         kc.locals[v] = slot;
     }
 }
 
 // 动态初始化：int c = a + b; 走这里（dik_expression）。
+// M3.1 扩展：dik_constant（int t = 0;）/ dik_zero（零初始化）。
 void translate_init(a_statement_ptr stmt, KernelContext& kc) {
     a_dynamic_init_ptr di = stmt->variant.dynamic_init;
     if (di == nullptr) {
         fail("stmk_init 缺少 dynamic_init");
-    }
-    if (di->kind != dik_expression) {
-        fail("不支持的初始化 kind（M1.2.3 仅覆盖 dik_expression）");
     }
     a_variable_ptr var = di->variable;
     if (var == nullptr) {
@@ -901,7 +1020,20 @@ void translate_init(a_statement_ptr stmt, KernelContext& kc) {
         llvm::AllocaInst* slot = kc.builder.CreateAlloca(ty, nullptr, var->source_corresp.name);
         it = kc.locals.emplace(var, slot).first;
     }
-    llvm::Value* val = translate_expr(di->variant.expression, kc);
+    llvm::Value* val = nullptr;
+    switch (di->kind) {
+        case dik_expression:
+            val = translate_expr(di->variant.expression, kc);
+            break;
+        case dik_constant:
+            val = translate_constant(di->variant.constant.ptr, kc.ctx);
+            break;
+        case dik_zero:
+            val = llvm::Constant::getNullValue(map_type(var->type, kc.ctx));
+            break;
+        default:
+            fail("不支持的初始化 kind（M3.1 覆盖 dik_expression/dik_constant/dik_zero）");
+    }
     kc.builder.CreateStore(val, it->second);
 }
 
@@ -1038,7 +1170,7 @@ llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
 
     // 函数体：entry block + 参数 alloca + 语句翻译。
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
-    KernelContext kc(ctx);
+    KernelContext kc(ctx, module);
     kc.builder.SetInsertPoint(entry);
 
     // 函数体 scope（经 function_def_number 定位）。
@@ -1086,6 +1218,12 @@ bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std
 
     unsigned kernel_count = 0;
     try {
+        // 文件作用域 __shared__ 变量：CUDA 不允许（__shared__ 仅函数内），报错。
+        for (a_variable_ptr v = file_scope->variables; v != nullptr; v = v->next) {
+            if (has_attribute(v->source_corresp.attributes, kCoolSharedAttributeName)) {
+                fail("__shared__ 变量不能声明在文件作用域（仅允许内核内）");
+            }
+        }
         for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
             if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
                 continue;  // 非内核（设备函数等）一期跳过。
