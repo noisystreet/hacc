@@ -262,6 +262,9 @@ coolKernel_t resolve(const KernelRegistration& reg);
 - **符号命名**：子集内要求内核名在同一 TU 内唯一；PTX 入口名与主机注册名使用同一确定性方案
   （`extern "C"` 名字直接采用；否则用固定 mangling），保证 `coolModuleGetFunction` 能按名取到。
 
+> **M2 细化方案**（`<<<>>>` 改写、主机桩、内嵌映像、driver 编排、分步实施）见
+> [m2-host-path-plan.md](m2-host-path-plan.md)。**M1.2（设备路径）已完成**（`.cu` → EDG IL → LLVM IR → PTX）。
+
 ### 6.3 中间产物与命名（一期，参考 nvcc）
 
 一期的中间产物**参考 nvcc 的对应产物**划分与命名，**只保留基本集**；RDC/dlink、fatbin 容器、

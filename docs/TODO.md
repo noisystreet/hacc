@@ -102,15 +102,22 @@
       与 `coolicc`（IL → PTX）。子工具按 `argv[0]` 同目录定位（`$HACC_COOLFE` / `$HACC_COOLICC` 可覆盖）。
       新增 `src/driver/pipeline.{hpp,cpp}` 与 `src/support/process.{hpp,cpp}`。测试：`e2e_hacc_scalar_kernel[_ptx]`、
       `e2e_hacc_tid_kernel[_ptx]`。见 CHANGELOG。
-- [ ] **M1.2 EDG IL → LLVM IR**：**方案已定稿（§7 决策已拍板），M1.2.0–M1.2.5 全部完成**——见
+- [x] **M1.2 EDG IL → LLVM IR**：**已完成（M1.2.0–M1.2.5）**——见
       [m1.2-il-to-llvm-plan.md](m1.2-il-to-llvm-plan.md)。核心结论：EDG IL 是**内存树**（非文本契约），
       采用**链接 EDG 前端库、内存遍历 IL**（官方「逐函数翻译后丢弃」路径）；阶段 A 的「IL 文件」是
       **二进制 IL**（`il_read` 读回），非文本解析。
       **已拍板**：① `coolicc` 直接链接 EDG 库；② IL 文件 = 二进制 IL；③ 翻译核心 = 独立库
       （`src/device/il_to_llvm/`）；④ **IL 须能 dump 成人类可读**（`cdisp` 对含属性 IL 崩溃，
       改用 `coolfe++` 落文本 + 自建 `hacc-il-dump`，见方案 §7.1）。
-      **下一步**：M1.2 阶段收尾——补 `edg-il-reference.md §5.6`（内建变量/`__syncthreads` 实测），
-      或进入 M1.3（主机侧：桩生成 / `<<<>>>` 改写 / 内嵌映像注册）。
+      字段级参考见 [edg-il-reference.md](edg-il-reference.md)（§5.5 标量参数、§5.6 内建变量/`__syncthreads`）。
+- [ ] **M2 主机路径（桩 + 内嵌映像 + `<<<>>>` 改写）**：**方案已细化（待评审）**——见
+      [m2-host-path-plan.md](m2-host-path-plan.md)。目标：让 `__global__` + `<<<>>>` 的源码经 hacc
+      编译后在 coolrt 上跑通。关键设计：① `<<<>>>` 在**词法层改写**为 `haccLaunch(...)`（纯文本变换，可独立单测）；
+      ② host 源 = **改写后源码本身**（不需 EDG 代码生成，`__global__` 等由运行时头提供）；
+      ③ 主机桩 + 内嵌 PTX 映像 + 惰性注册（`hacc_runtime.h` 收敛公共逻辑，对齐 ADR 0003）；
+      ④ driver 编排 `g++` 主机编译与链接。分步：M2.0 改写器 → M2.1 host 源 → M2.2 桩/运行时头 →
+      M2.3 driver 编排 → M2.4 e2e（vectorAdd，本机有 GPU 可真验证）。
+      **下一步**：评审 M2 方案，确认 §6 待确认项（改写实现层 / host 源是否需 EDG / 映像格式 / `haccLaunch` 形态 / 符号命名）。
 
 ## C. 工程 / 流程
 
