@@ -275,3 +275,83 @@ void haccLaunch(const hacc::KernelRegistration& reg, G grid, B block,
   两者都是**纯文本变换**，可独立单测。
 - **M2.2（桩/运行时头）**：桩并入 host 源；`haccLaunch` 用 §8.5 原型。
 - **M2.4（e2e）**：本机 GPU 已验证可跑通，**非跳过**。
+
+## 9. 与 CUDA（nvcc/cudafe++）的对照（2026-10）
+
+参考《Deep Dive Into CUDA》对 CUDA 13.1 工具链的实测分析（`cudafe++` / 注册链 / kernel launch），
+对照本方案，**核心机制一致**，但有 3 处**有意差异**。
+
+### 9.1 CUDA 的机制（实测）
+
+| 环节 | CUDA 做法 |
+| --- | --- |
+| `<<<>>>` 改写 | `kernel<<<g,b>>>(args)` → **`kernel(args)`**（隐式转 wrapper 调用）；配置另经 `__cudaPushCallConfiguration(g,b,smem,stream)` 压栈 |
+| host 侧 `__global__` | **替换为 wrapper**（`vector_add(...)` → 调 `__device_stub__...`），**保留函数体位置** |
+| stub | `__cudaLaunchPrologue(n)` + `__cudaSetupArgSimple(arg, offset)`（**按 ABI 偏移**）+ `__cudaLaunch((char*)kernel)` |
+| 注册时机 | **`main` 前**（`.init_array` constructor `__sti____cudaRegisterAll`） |
+| 映像内嵌 | `.nv_fatbin` 段（汇编 `.quad`）+ `.nvFatBinSegment`（`__fatBinC_Wrapper_t`） |
+| 符号映射 | `__cudaRegisterFunction(host_ptr, mangled_name)` |
+| launch 查表 | `__cudaGetKernel`（O(1) 查表，缓存 `__handle`）→ `cuLaunchKernel_ptsz` |
+
+### 9.2 本方案的机制
+
+| 环节 | hacc 做法 |
+| --- | --- |
+| `<<<>>>` 改写 | `kernel<<<g,b>>>(args)` → **`haccLaunch(__cool_reg_kernel, g, b, smem, stream, args...)`**（配置+参数一起传） |
+| host 侧 `__global__` | **剔除函数体**（只留声明） |
+| 桩 | `KernelRegistration{name, image, size, slot}` + `haccLaunch` 内 `void* argv[] = {&args...}` |
+| 注册时机 | **惰性**（首次启动时 `resolve`，`call_once` 保护） |
+| 映像内嵌 | C 字节数组（`static const unsigned char[]`） |
+| 符号映射 | `KernelRegistration.name`（`coolModuleGetFunction` 按名取） |
+| launch 查表 | `resolve`（缓存 `slot`）→ `coolLaunchKernel` |
+
+### 9.3 三处有意差异（及理由）
+
+#### 差异 1：`<<<>>>` 改写目标（`haccLaunch(...)` vs `kernel(args)`）
+
+- **CUDA**：改写为**普通函数调用** `kernel(args)`，配置走 `Push/Pop` 隐式栈。
+  - 好处：`kernel` 仍是可调用符号（`&kernel` 可用）；配置与参数解耦。
+- **hacc**：改写为 `haccLaunch(__cool_reg_kernel, g, b, smem, stream, args...)`。
+  - **理由**：coolrt **没有** `__cudaPushCallConfiguration` / `__cudaPopCallConfiguration` 等价物，
+    也**没有** `__cudaSetupArgSimple`。coolrt 的 ABI 是 `coolLaunchKernel(kernel, grid, block, void** args, smem, stream)`
+    ——**配置与参数在同一次调用**。故 `haccLaunch` 把两者一起传，**更贴近 coolrt ABI**。
+  - **代价**：`&kernel` 不可用（但 M2 子集不需要 `cudaFuncGetAttributes` 类能力）。
+
+#### 差异 2：host 侧 `__global__` 函数体（剔除 vs wrapper）
+
+- **CUDA**：**保留 wrapper**（`vector_add(...)` → 调 stub），函数体位置保留。
+- **hacc**：**剔除函数体**（只留声明）。
+  - **理由**：CUDA 的 wrapper 调 `__device_stub__...`（用 `__cudaSetupArgSimple`），
+    coolrt 无此 API；且 `<<<>>>` 已改写为 `haccLaunch(...)`，**不再需要 wrapper**。
+  - **代价**：`&kernel` 不可用（同差异 1）。
+  - **注**：若后续需 `&kernel`（如 `cudaFuncGetAttributes`），可改为「保留 wrapper（空体或调 `haccLaunch`）」——
+    但 M2 子集不需要。
+
+#### 差异 3：注册时机（惰性 vs `main` 前）
+
+- **CUDA**：**`main` 前**静态注册（`.init_array` constructor）。
+- **hacc**：**惰性**（首次启动时 `resolve`）。
+  - **理由**：ADR 0003 已定「惰性注册」——避免未用内核的无谓开销与初始化顺序问题。
+  - **代价**：首次启动有一次性 `coolModuleLoadData` 开销（可接受）。
+
+### 9.4 一致之处（验证方案方向正确）
+
+1. **`<<<>>>` 是编译期改写**（非运行时）——CUDA 与 hacc 一致。
+2. **host/device 代码分离**——CUDA 用 `.cudafe1.cpp` / `.cudafe1.gpu`；hacc 用 host 源 / IL。
+3. **参数按 ABI 偏移打包**——CUDA `__cudaSetupArgSimple(arg, offset)`；hacc `void* argv[]`（顺序即偏移）。
+4. **host 函数 ↔ device 符号映射**——CUDA `__cudaRegisterFunction`；hacc `KernelRegistration.name`。
+5. **launch 查表缓存**——CUDA `__handle`；hacc `slot`。
+6. **映像内嵌进可执行文件**——CUDA `.nv_fatbin` 段；hacc C 字节数组（**更简单，无需自定义段**）。
+
+### 9.5 可借鉴的改进（后续可选）
+
+1. **映像内嵌用自定义段**（如 `.cool_fatbin`）——比 C 字节数组更接近 CUDA，且可被工具扫描。
+   **一期不做**（C 字节数组更简单、可读）。
+2. **`main` 前静态注册**——若后续需「未用内核也注册」或与 cudart 语义更近，可加 constructor。
+   **一期不做**（惰性已够）。
+3. **保留 wrapper**——若后续需 `&kernel`，可改为「wrapper 调 `haccLaunch`」。
+   **一期不做**（子集不需要）。
+
+> **结论**：本方案与 CUDA 的**核心机制一致**，差异均源于 **coolrt ABI 与 cudart 的不同**
+> （coolrt 无 `Push/Pop` 配置栈、无 `__cudaSetupArgSimple`），且**差异方向更贴近 coolrt**。
+> 方案方向经 CUDA 实测对照**验证正确**。
