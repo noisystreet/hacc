@@ -287,6 +287,21 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_il_to_ptx_shared_reduce)
         endif()
 
+        # M3.4 诊断质量：翻译错误消息带源位置（"文件:行: 成因"）。
+        # 用脚本捕获 stderr 并校验 ":<行号>: " 前缀（错误在 stderr，PASS_REGULAR_EXPRESSION 只匹配 stdout）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            add_test(NAME diag_position_bad_op
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_position.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_bad_op.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" "10")
+            add_test(NAME diag_position_bad_shared
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_position.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_bad_shared.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" "6")
+        endif()
+
         # M3.1 e2e：__shared__ 共享内存编译 + 运行 + 结果校验（out[i] == N-1-i）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_sr_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_shared_reduce_run")

@@ -230,6 +230,10 @@ bool write_device_source(const std::string& input_path, const std::string& outpu
     for (const auto& name : r.kernel_names) {
         out << "__COOL_REG_DECL(" << name << ");\n";
     }
+    // M3.4：插入的前置行会偏移行号，用 #line 重置回原始 .cu 的行号，
+    // 使 EDG 诊断（如 "文件:行: 成因"）指向用户看到的原始源，而非改写后的 device 源。
+    // 改写器对 device 源逐字符复制（仅同行内替换 <<<>>>），故 r.source 行号与原始源一致。
+    out << "#line 1 \"" << input_path << "\"\n";
     out << r.source;
     return static_cast<bool>(out);
 }

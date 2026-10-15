@@ -60,15 +60,49 @@ constexpr const char* kCoolSharedAttributeName = "cool_shared";
 // 用异常而非错误码，避免在深层递归里层层传递错误状态（clean-code：失败显式）。
 class TranslateError : public std::exception {
    public:
-    explicit TranslateError(std::string msg) : msg_(std::move(msg)) {}
+    explicit TranslateError(std::string msg, bool has_position = false)
+        : msg_(std::move(msg)), has_position_(has_position) {}
     const char* what() const noexcept override { return msg_.c_str(); }
+    // 消息是否已含源位置前缀（供上层决定是否补位置，避免重复）。
+    bool has_position() const noexcept { return has_position_; }
 
    private:
     std::string msg_;
+    bool has_position_;
 };
 
-[[noreturn]] void fail(const std::string& msg) {
-    throw TranslateError(msg);
+// 把 IL 源位置（a_source_position）格式化为 "文件:行"（M3.4 诊断质量）。
+// seq == 0 表示位置未知 → 返回空串（调用方据此省略位置前缀）。
+// 依赖 EDG 的 conv_seq_to_file_and_line（见 il.h）；at_end_of_source 为真时文件名无效。
+std::string format_position(const a_source_position& pos) {
+    if (pos.seq == 0) {
+        return "";
+    }
+    a_const_char* file_name = nullptr;
+    a_const_char* full_name = nullptr;
+    a_line_number line_number = 0;
+    a_boolean at_end_of_source = false;
+    (void)conv_seq_to_file_and_line(pos.seq, &file_name, &full_name, &line_number,
+                                    &at_end_of_source);
+    if (at_end_of_source || file_name == nullptr) {
+        return "";
+    }
+    std::string out = file_name;
+    if (line_number != SP_LINE_UNKNOWN) {
+        out += ":";
+        out += std::to_string(static_cast<unsigned long>(line_number));
+    }
+    return out;
+}
+
+// 翻译失败：抛出 TranslateError。可选 pos 给出源位置（M3.4），
+// 有位置时消息格式为 "<文件:行>: <成因>"，否则仅 "<成因>"。
+[[noreturn]] void fail(const std::string& msg, const a_source_position& pos = {0, 0}) {
+    std::string where = format_position(pos);
+    if (where.empty()) {
+        throw TranslateError(msg);
+    }
+    throw TranslateError(where + ": " + msg, /*has_position=*/true);
 }
 
 // routine 的 source_corresp.attributes 链中是否含指定名字的属性。
@@ -329,6 +363,8 @@ struct KernelContext {
 // 前向声明（语句与表达式互相递归）。
 void translate_statement(a_statement_ptr stmt, KernelContext& kc);
 llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc);
+// 表达式翻译主体（不含 M3.4 的位置补全包装，见 translate_expr）。
+llvm::Value* translate_expr_inner(an_expr_node_ptr expr, KernelContext& kc);
 llvm::Value* translate_subscript(an_expr_node_ptr expr, KernelContext& kc);
 
 // 取变量的「地址」（alloca）。参数在函数入口已 alloca。
@@ -949,11 +985,8 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
     }
 }
 
-// 表达式翻译主入口：返回 rvalue（变量引用会 load）。
-llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc) {
-    if (expr == nullptr) {
-        fail("表达式为空指针");
-    }
+// 表达式翻译主体：按 kind 分派（不含位置补全，见 translate_expr）。
+llvm::Value* translate_expr_inner(an_expr_node_ptr expr, KernelContext& kc) {
     switch (expr->kind) {
         case enk_variable: {
             llvm::Value* addr = variable_address(expr->variant.variable.ptr, kc);
@@ -973,6 +1006,23 @@ llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc) {
             return translate_operation(expr, kc);
         default:
             fail("不支持的表达式 kind（M1.2.3 仅覆盖变量/常量/运算）");
+    }
+}
+
+// 表达式翻译主入口：返回 rvalue（变量引用会 load）。
+llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc) {
+    if (expr == nullptr) {
+        fail("表达式为空指针");
+    }
+    // M3.4：表达式级错误补源位置——深层 fail 抛出的无位置错误，在此补上当前表达式位置。
+    // 主体抽到 translate_expr_inner，避免 try/catch 抬高本函数圈复杂度（ccn 门禁）。
+    try {
+        return translate_expr_inner(expr, kc);
+    } catch (const TranslateError& e) {
+        if (e.has_position()) {
+            throw;  // 已带位置，原样上抛。
+        }
+        fail(e.what(), expr->position);
     }
 }
 
@@ -1188,8 +1238,16 @@ llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
     bind_parameters(fn, body_scope, kc);
 
     // 翻译函数体顶层 block。
+    // M3.4：语句级错误若未带位置，用内核声明位置兜底（表达式级已在 translate_expr 补过）。
     if (body_scope != nullptr && body_scope->assoc_block != nullptr) {
-        translate_statement(body_scope->assoc_block, kc);
+        try {
+            translate_statement(body_scope->assoc_block, kc);
+        } catch (const TranslateError& e) {
+            if (e.has_position()) {
+                throw;
+            }
+            fail(e.what(), r->source_corresp.decl_position);
+        }
     }
 
     // 若最后一条语句未终止（如无显式 return），补 ret void。
@@ -1227,7 +1285,8 @@ bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std
         // 文件作用域 __shared__ 变量：CUDA 不允许（__shared__ 仅函数内），报错。
         for (a_variable_ptr v = file_scope->variables; v != nullptr; v = v->next) {
             if (has_attribute(v->source_corresp.attributes, kCoolSharedAttributeName)) {
-                fail("__shared__ 变量不能声明在文件作用域（仅允许内核内）");
+                fail("__shared__ 变量不能声明在文件作用域（仅允许内核内）",
+                     v->source_corresp.decl_position);
             }
         }
         for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
