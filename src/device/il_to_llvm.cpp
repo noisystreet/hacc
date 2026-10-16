@@ -731,6 +731,34 @@ llvm::Value* try_translate_builtin_field(an_expr_node_ptr expr, KernelContext& k
     return emit_sreg_read(sreg, dim, kc);
 }
 
+// 解引用 typedef/限定符，定位到聚合类型；非聚合返回 nullptr。
+a_type_ptr resolve_aggregate_type(a_type_ptr ty) {
+    while (ty != nullptr && ty->kind == tk_typeref) {
+        ty = ty->variant.typeref.type;
+    }
+    if (ty == nullptr) {
+        return nullptr;
+    }
+    if (ty->kind != tk_struct && ty->kind != tk_class && ty->kind != tk_union) {
+        return nullptr;
+    }
+    return ty;
+}
+
+// 在聚合类型的 field_list 中按名字定位成员索引；未找到返回 false。
+bool find_field_index(a_type_ptr agg_ty, const char* field_name, unsigned* out_idx) {
+    unsigned idx = 0;
+    for (a_field_ptr f = agg_ty->variant.class_struct_union.field_list; f != nullptr;
+         f = f->next, ++idx) {
+        const char* fname = f->source_corresp.name;
+        if (fname != nullptr && std::strcmp(fname, field_name) == 0) {
+            *out_idx = idx;
+            return true;
+        }
+    }
+    return false;
+}
+
 // 翻译普通结构体成员访问（如向量类型 a.x）。
 // 返回 nullptr 表示「不是普通结构体成员访问」，交由调用方走其它路径。
 //
@@ -741,15 +769,8 @@ llvm::Value* try_translate_struct_field(an_expr_node_ptr expr, KernelContext& kc
     if (base == nullptr || base->kind != enk_variable) {
         return nullptr;
     }
-    a_type_ptr base_ty = base->type;
+    a_type_ptr base_ty = resolve_aggregate_type(base->type);
     if (base_ty == nullptr) {
-        return nullptr;
-    }
-    // 解引用 typedef/限定符，定位到聚合类型。
-    while (base_ty->kind == tk_typeref) {
-        base_ty = base_ty->variant.typeref.type;
-    }
-    if (base_ty->kind != tk_struct && base_ty->kind != tk_class && base_ty->kind != tk_union) {
         return nullptr;  // 非聚合：交回调用方（可能是内建变量等）。
     }
     an_expr_node_ptr field = base->next;
@@ -760,18 +781,8 @@ llvm::Value* try_translate_struct_field(an_expr_node_ptr expr, KernelContext& kc
     if (field_name == nullptr) {
         fail("结构体成员无名字");
     }
-    // 在 field_list 中按名字定位成员索引。
     unsigned idx = 0;
-    bool found = false;
-    for (a_field_ptr f = base_ty->variant.class_struct_union.field_list; f != nullptr;
-         f = f->next, ++idx) {
-        const char* fname = f->source_corresp.name;
-        if (fname != nullptr && std::strcmp(fname, field_name) == 0) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
+    if (!find_field_index(base_ty, field_name, &idx)) {
         fail("结构体成员名未在类型中找到");
     }
     llvm::Value* base_addr = variable_address(base->variant.variable.ptr, kc);

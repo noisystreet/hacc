@@ -216,6 +216,79 @@ std::vector<std::string> build_gxx_args(const PipelineOptions& opts, const std::
     return args;
 }
 
+// 把子进程失败信息拼成「<阶段名>失败[: 错误][\n stderr]」。
+std::string format_process_error(const char* stage, const ProcessResult& r) {
+    std::string msg = std::string(stage) + "失败";
+    if (!r.error.empty()) {
+        msg += ": " + r.error;
+    }
+    if (!r.stderr_text.empty()) {
+        msg += "\n" + r.stderr_text;
+    }
+    return msg;
+}
+
+// 跑一个子进程阶段；失败时把错误写入 result 并返回 false。
+bool run_stage(const std::vector<std::string>& argv, const char* stage, PipelineResult* result) {
+    ProcessResult r = run_process(argv);
+    if (!r.ok) {
+        result->error = format_process_error(stage, r);
+        return false;
+    }
+    return true;
+}
+
+// 阶段 1：.cu → EDG IL（Exe 模式同时产 host 源）。
+bool run_frontend_stage(const PipelineOptions& opts, const std::string& cil,
+                        const std::string& host, bool want_exe, PipelineResult* result) {
+    std::vector<std::string> argv = {resolve_coolfe_path(opts)};
+    std::vector<std::string> fe_args =
+        want_exe ? build_coolfe_host_args(opts, cil, host) : build_coolfe_args(opts, cil);
+    for (const auto& a : fe_args) {
+        argv.push_back(a);
+    }
+    return run_stage(argv, "coolfe++", result);
+}
+
+// 阶段 2：EDG IL → PTX（Exe 模式 PTX 落中间文件；Ptx 模式直接落 -o）。
+bool run_device_stage(const PipelineOptions& opts, const std::string& cil, const std::string& ptx,
+                      PipelineResult* result) {
+    std::vector<std::string> argv = {resolve_coolicc_path(opts)};
+    std::vector<std::string> cc_args = {"--from-il", "-arch=" + opts.arch, "-o", ptx, cil};
+    for (const auto& a : cc_args) {
+        argv.push_back(a);
+    }
+    return run_stage(argv, "coolicc", result);
+}
+
+// 阶段 3（仅 Exe）：拼桩 + 主机编译。
+bool run_host_stage(const PipelineOptions& opts, const std::string& host, const std::string& ptx,
+                    PipelineResult* result) {
+    std::string err;
+    if (!stitch_stubs(opts, host, ptx, &err)) {
+        result->error = err;
+        return false;
+    }
+    std::vector<std::string> argv = {resolve_gxx_path(opts)};
+    for (const auto& a : build_gxx_args(opts, host)) {
+        argv.push_back(a);
+    }
+    return run_stage(argv, "主机编译（g++）", result);
+}
+
+// 清理中间产物（除非 -keep）。
+void cleanup_intermediates(const PipelineOptions& opts, const std::string& cil,
+                           const std::string& host, const std::string& ptx, bool want_exe) {
+    if (opts.keep) {
+        return;
+    }
+    std::remove(cil.c_str());
+    if (want_exe) {
+        std::remove(host.c_str());
+        std::remove(ptx.c_str());
+    }
+}
+
 PipelineResult run_pipeline(const PipelineOptions& opts) {
     PipelineResult result;
     if (opts.input_path.empty()) {
@@ -232,80 +305,17 @@ PipelineResult run_pipeline(const PipelineOptions& opts) {
     const std::string host = host_path_for(opts);
     const std::string ptx = want_exe ? ptx_path_for(opts) : opts.output_path;
 
-    // 阶段 1：.cu → EDG IL（Exe 模式同时产 host 源）。
-    {
-        std::vector<std::string> argv = {resolve_coolfe_path(opts)};
-        std::vector<std::string> fe_args =
-            want_exe ? build_coolfe_host_args(opts, cil, host) : build_coolfe_args(opts, cil);
-        for (const auto& a : fe_args) {
-            argv.push_back(a);
-        }
-        ProcessResult r = run_process(argv);
-        if (!r.ok) {
-            result.error = "coolfe++ 失败";
-            if (!r.error.empty()) {
-                result.error += ": " + r.error;
-            }
-            if (!r.stderr_text.empty()) {
-                result.error += "\n" + r.stderr_text;
-            }
-            return result;
-        }
+    if (!run_frontend_stage(opts, cil, host, want_exe, &result)) {
+        return result;
+    }
+    if (!run_device_stage(opts, cil, ptx, &result)) {
+        return result;
+    }
+    if (want_exe && !run_host_stage(opts, host, ptx, &result)) {
+        return result;
     }
 
-    // 阶段 2：EDG IL → PTX。
-    {
-        std::vector<std::string> argv = {resolve_coolicc_path(opts)};
-        // Exe 模式 PTX 落中间文件；Ptx 模式直接落 -o。
-        std::vector<std::string> cc_args = {"--from-il", "-arch=" + opts.arch, "-o", ptx, cil};
-        for (const auto& a : cc_args) {
-            argv.push_back(a);
-        }
-        ProcessResult r = run_process(argv);
-        if (!r.ok) {
-            result.error = "coolicc 失败";
-            if (!r.error.empty()) {
-                result.error += ": " + r.error;
-            }
-            if (!r.stderr_text.empty()) {
-                result.error += "\n" + r.stderr_text;
-            }
-            return result;
-        }
-    }
-
-    // 阶段 3（仅 Exe）：拼桩 + 主机编译。
-    if (want_exe) {
-        std::string err;
-        if (!stitch_stubs(opts, host, ptx, &err)) {
-            result.error = err;
-            return result;
-        }
-        std::vector<std::string> argv = {resolve_gxx_path(opts)};
-        for (const auto& a : build_gxx_args(opts, host)) {
-            argv.push_back(a);
-        }
-        ProcessResult r = run_process(argv);
-        if (!r.ok) {
-            result.error = "主机编译失败（g++）";
-            if (!r.error.empty()) {
-                result.error += ": " + r.error;
-            }
-            if (!r.stderr_text.empty()) {
-                result.error += "\n" + r.stderr_text;
-            }
-            return result;
-        }
-    }
-
-    // 清理中间产物（除非 -keep）。
-    if (!opts.keep) {
-        std::remove(cil.c_str());
-        if (want_exe) {
-            std::remove(host.c_str());
-            std::remove(ptx.c_str());
-        }
-    }
+    cleanup_intermediates(opts, cil, host, ptx, want_exe);
 
     result.ok = true;
     return result;

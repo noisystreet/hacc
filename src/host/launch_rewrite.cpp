@@ -32,6 +32,39 @@ std::size_t skip_ws(const std::string& s, std::size_t i) {
     return i;
 }
 
+// 跳过行注释（`//` 起，到行尾不含换行），返回之后的下标。
+std::size_t skip_line_comment(const std::string& s, std::size_t i) {
+    std::size_t j = i + 2;
+    while (j < s.size() && s[j] != '\n') {
+        ++j;
+    }
+    return j;
+}
+
+// 跳过块注释（`/*` 起，到 `*/` 之后），返回之后的下标。
+std::size_t skip_block_comment(const std::string& s, std::size_t i) {
+    const std::size_t n = s.size();
+    std::size_t j = i + 2;
+    while (j + 1 < n && !(s[j] == '*' && s[j + 1] == '/')) {
+        ++j;
+    }
+    return (j + 1 < n) ? j + 2 : n;
+}
+
+// 跳过字符串 / 字符字面量（含反斜杠转义），返回闭合引号之后的下标。
+std::size_t skip_literal(const std::string& s, std::size_t i) {
+    const std::size_t n = s.size();
+    const char quote = s[i];
+    std::size_t j = i + 1;
+    while (j < n && s[j] != quote) {
+        if (s[j] == '\\' && j + 1 < n) {
+            ++j;
+        }
+        ++j;
+    }
+    return (j < n) ? j + 1 : n;
+}
+
 // 若 s[i] 处是注释或字符串/字符字面量，返回其**之后**的下标；否则原样返回 i。
 // 统一「跳过词法噪声」逻辑，供括号配对 / 顶层切分 / 主扫描复用。
 std::size_t skip_trivia(const std::string& s, std::size_t i) {
@@ -39,33 +72,15 @@ std::size_t skip_trivia(const std::string& s, std::size_t i) {
     if (i >= n) {
         return i;
     }
-    char c = s[i];
-    // 行注释：跳到行尾（不含换行）。
+    const char c = s[i];
     if (c == '/' && i + 1 < n && s[i + 1] == '/') {
-        std::size_t j = i + 2;
-        while (j < n && s[j] != '\n') {
-            ++j;
-        }
-        return j;
+        return skip_line_comment(s, i);
     }
-    // 块注释：跳到 `*/` 之后。
     if (c == '/' && i + 1 < n && s[i + 1] == '*') {
-        std::size_t j = i + 2;
-        while (j + 1 < n && !(s[j] == '*' && s[j + 1] == '/')) {
-            ++j;
-        }
-        return (j + 1 < n) ? j + 2 : n;
+        return skip_block_comment(s, i);
     }
-    // 字符串 / 字符字面量：跳到闭合引号之后（处理反斜杠转义）。
     if (c == '"' || c == '\'') {
-        std::size_t j = i + 1;
-        while (j < n && s[j] != c) {
-            if (s[j] == '\\' && j + 1 < n) {
-                ++j;
-            }
-            ++j;
-        }
-        return (j < n) ? j + 1 : n;
+        return skip_literal(s, i);
     }
     return i;
 }
