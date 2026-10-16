@@ -123,6 +123,15 @@
   `ld.param.u32`。新增 golden `golden_frontend_dim3_param` + `golden_device_il_to_ptx_dim3_param[_struct]`
   （校验 `.param .align 4 .b8 dim3_kernel_param_0[12]` + `ld.param.u32`）。**顺带修正 `float3` 的同类
   ABI 隐患**（原 `<3 x float>` 亦为 16 字节）。
+- **M3.4 诊断质量（翻译错误带源位置）**：翻译失败消息此前只有成因、无源位置，用户难以定位。
+  现按方案 §3.5 输出 `"<文件:行>: <成因>"`——`il_to_llvm` 的 `fail()` 增加可选位置参数，新增
+  `format_position()` 用 EDG 的 `conv_seq_to_file_and_line` 把 IL 位置序号转成「文件:行」（`seq==0`
+  视为未知）；`translate_expr` 入口补表达式位置（主体抽到 `translate_expr_inner` 以守住 CCN 门禁），
+  `build_kernel` 用内核位置兜底语句级错误，文件作用域 `__shared__` 错误补变量位置。`coolfe++` 在
+  device 源开头插入的 `#include`/`__COOL_REG_DECL` 会偏移行号，插入后加 `#line 1 "<原始.cu>"`
+  重置回原始源行号与文件名。新增 `tests/scripts/check_diag_position.sh` + 两个 golden 用例
+  （`diag_bad_op.cu` 不支持的运算符、`diag_bad_shared.cu` 文件作用域 `__shared__`），校验 stderr
+  含 `":<行号>: "` 位置前缀。
 
 
 ### Changed

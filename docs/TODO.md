@@ -134,7 +134,7 @@
       [m3-subset-s0-plan.md](m3-subset-s0-plan.md)。目标：补齐 S0 子集中 M1/M2 未覆盖的部分。
       分步：**M3.0 向量类型 + 聚合参数 ABI（✅ 已完成，承接 B3-b）** → **M3.1 `__shared__`（addrspace(3)，
       纯设备侧）（✅ 已完成）** → **M3.3 `dim3` 设备侧（✅ 已完成：3 分量聚合 → struct，修正 12 字节 ABI）** →
-      M3.4 诊断格式（源位置）→ M3.2 `__constant__`
+      M3.4 诊断格式（源位置）（✅ 已完成：`<文件:行>: <成因>`，见 CHANGELOG）→ M3.2 `__constant__`
       （**需 coolrt 新增 `coolMemcpyToSymbol` 类 API**，否则降级为仅设备侧）→ M3.5 samples + 边界用例。
       **待确认**：① ~~coolrt 是否新增向量类型~~（已定：新增，提交 `f3cfbdd`）；② coolrt 是否新增
       `coolMemcpyToSymbol`；③ ~~聚合参数 PTX ABI~~（已定：byval，spike 确认）；④ ~~`dim3` 与 `uint3` 关系~~
