@@ -361,6 +361,24 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_local_array_index)
         endif()
 
+        # M3.5 samples：samples/ 下的示例应始终可编译 + 可运行（结果自校验）。
+        # 无可用 CUDA 设备时示例返回 77，测试框架按 SKIP 处理。
+        # 与 golden/e2e 的区别：samples 是面向用户的示例，此处仅做「示例不腐化」回归。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            foreach(_sample vector_add vector_type shared_reduce constant_pi dim3_grid)
+                set(_sample_exe "${CMAKE_CURRENT_BINARY_DIR}/sample_${_sample}")
+                add_test(NAME sample_${_sample}_build
+                    COMMAND hacc "${CMAKE_SOURCE_DIR}/samples/${_sample}.cu"
+                            -o "${_sample_exe}" -I "${HACC_COOLRUNTIME_INCLUDE}")
+                add_test(NAME sample_${_sample}_run
+                    COMMAND "${_sample_exe}")
+                set_tests_properties(sample_${_sample}_run PROPERTIES
+                    DEPENDS sample_${_sample}_build
+                    SKIP_RETURN_CODE 77
+                    PASS_REGULAR_EXPRESSION "OK")
+            endforeach()
+        endif()
+
         # M3.1 e2e：__shared__ 共享内存编译 + 运行 + 结果校验（out[i] == N-1-i）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_sr_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_shared_reduce_run")

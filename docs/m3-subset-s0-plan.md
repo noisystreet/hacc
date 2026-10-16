@@ -1,6 +1,6 @@
 # M3 方案：子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）
 
-> 状态：**进行中（M3.0 / M3.1 / M3.2 / M3.3 / M3.4 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）、
+> 状态：**已完成（M3.0 / M3.1 / M3.2 / M3.3 / M3.4 / M3.5 全部完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）、
 > M3.1 `__shared__`（静态共享内存 → addrspace(3)）、M3.2 `__constant__`（常量内存 → addrspace(4) + 主机侧符号拷贝）
 > 与 M3.3 `dim3` 设备侧（3 分量聚合 → struct）已实现并验证。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围）、§10（里程碑 M3）。
@@ -182,11 +182,15 @@
 - 统一诊断格式：`<阶段>: <源位置>: <成因>`（如 `coolicc: foo.cu:12: 不支持的运算符 eok_xxx`）。
 - 当前 `fail()` 只给字符串，**无源位置**——需从 IL 的 `source_corresp` 取行列。
 
-### 3.6 M3.5 samples + 边界用例
+### 3.6 M3.5 samples + 边界用例——**已完成**
 
-- `samples/`：`vectorAdd`（已有）、`shared_reduce`（共享内存归约）、`constant_pi`（常量内存）等。
-  > M3.1 / M3.2 已落地，`shared_reduce` / `constant_pi` 样例的前置能力**均已具备**（见 §3.2 / §3.3）。
-- 边界用例：越界索引、类型不匹配、未覆盖构造的 fail loud 消息。
+- `samples/`：`README.md` + 5 个自包含、可编译运行的示例——`vector_add`（基础内核）、
+  `vector_type`（`float4` 聚合参数）、`shared_reduce`（`__shared__` + `__syncthreads`）、
+  `constant_pi`（`__constant__` + `coolMemcpyToSymbol`）、`dim3_grid`（`dim3` 参数）。
+  `tests/CMakeLists.txt` 为每个示例加 `sample_<name>_build` / `_run` 测试（编译 + 运行 +
+  结果自校验，无设备时按 77 SKIP），防止示例腐化。
+- 边界用例（fail loud）：`diag_unsupported_while` / `diag_unsupported_switch`（子集未覆盖构造）、
+  `diag_type_mismatch`（前端类型错误）、`golden_device_local_array_index`（局部数组动态下标正向回归）。
 
 ## 4. 分步实施（建议）
 
@@ -197,7 +201,7 @@
 | **M3.4** | 诊断格式（源位置） | 无 | 单测（错误消息） | 低 | ✅ **已完成** |
 | **M3.0** | 向量类型 + 聚合参数 ABI | **coolrt 新增类型** | golden + e2e | 高 | ✅ **已完成** |
 | **M3.2** | `__constant__`（+ 主机侧拷贝） | **coolrt 新增 API** | golden + e2e | 中 | ✅ **已完成** |
-| **M3.5** | samples + 边界用例 | 上述 | samples 全绿 | 低 |
+| **M3.5** | samples + 边界用例 | 上述 | samples 全绿 | 低 | ✅ **已完成** |
 
 > **推荐顺序**：先做**无 coolrt 依赖**的 M3.1 / M3.3 / M3.4（可立即交付），
 > 再与 coolrt 对齐后做 M3.0 / M3.2（跨项目）。

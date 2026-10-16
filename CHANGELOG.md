@@ -147,6 +147,15 @@
   重置回原始源行号与文件名。新增 `tests/scripts/check_diag_position.sh` + 两个 golden 用例
   （`diag_bad_op.cu` 不支持的运算符、`diag_bad_shared.cu` 文件作用域 `__shared__`），校验 stderr
   含 `":<行号>: "` 位置前缀。
+- **M3.5 samples + 边界用例**：新增面向用户的 `samples/` 示例集（`README.md` + 5 个自包含、
+  可编译运行的 `.cu`）：`vector_add`（基础内核）、`vector_type`（`float4` 聚合参数）、
+  `shared_reduce`（`__shared__` + `__syncthreads`）、`constant_pi`（`__constant__` +
+  `coolMemcpyToSymbol`）、`dim3_grid`（`dim3` 参数）。`tests/CMakeLists.txt` 为每个示例加
+  `sample_<name>_build` / `_run` 两个测试（编译 + 运行 + 结果自校验，无设备时按 77 SKIP），
+  防止示例腐化。边界用例（fail loud）此前已随 M3.4 落地：`diag_unsupported_while` /
+  `diag_unsupported_switch`（子集未覆盖构造）、`diag_type_mismatch`（前端类型错误）、
+  `golden_device_local_array_index`（局部数组动态下标正向回归）。本机 RTX 4060 上 5 个示例
+  真跑通过；`make check` 68/68 全绿。
 
 
 ### Changed
