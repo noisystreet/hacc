@@ -1,7 +1,8 @@
 # M3 方案：子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`）
 
-> 状态：**进行中（M3.0 / M3.1 / M3.3 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）、
-> M3.1 `__shared__`（静态共享内存 → addrspace(3)）与 M3.3 `dim3` 设备侧（3 分量聚合 → struct）已实现并验证。
+> 状态：**进行中（M3.0 / M3.1 / M3.2 / M3.3 / M3.4 已完成）**（2026-10）。M3.0 向量类型（聚合参数 + 成员访问）、
+> M3.1 `__shared__`（静态共享内存 → addrspace(3)）、M3.2 `__constant__`（常量内存 → addrspace(4) + 主机侧符号拷贝）
+> 与 M3.3 `dim3` 设备侧（3 分量聚合 → struct）已实现并验证。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围）、§10（里程碑 M3）。
 > 前置：M2 已完成（主机路径端到端跑通，见 [m2-host-path-plan.md](m2-host-path-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围）、
@@ -125,7 +126,7 @@
    `e2e_hacc_vector_type_run[_build]`（`float4` 内核参数 + 成员访问，校验 `out == 110`）。
    **本机 RTX 4060 真跑通过**（`vectorType OK: 110.000000`）。
 
-### 3.3 M3.2 `__constant__`
+### 3.3 M3.2 `__constant__`——**已完成**
 
 **设备侧**：`__constant__` 变量 → `addrspace(4)` 全局变量。
 
@@ -134,6 +135,24 @@
   运行时拷贝延后到 coolrt 提供 API 后。
 
 **验证**：golden PTX（`.const` 段）；e2e（若 coolrt 支持拷贝）。
+
+**落地（2026-10，已核验）**：coolrt 已有 `coolMemcpyToSymbol`（`cool_runtime_api.h`），故按完整方案落地。
+
+- **设备侧**（`il_to_llvm`）：文件作用域 `cool_constant` 属性 → `addrspace(4)` 全局，
+  `ExternalLinkage` + **原名**（运行时按名 `cuModuleGetGlobal` 解析）；`isConstant=false`
+  （否则 LLVM 把 load 折叠成 initializer 0）。内核内引用经 `KernelContext.constant_globals`
+  并入 `locals`（`seed_constant_globals`）。**内核内 `__constant__` 报错**（CUDA 仅文件作用域）。
+- **主机侧**：`KernelRegistration` 加 `module` 槽位（`resolve()` 保存模块句柄）；
+  `hacc_runtime.h` 加 `haccMemcpyToSymbolAll`（遍历**所有**内核模块——每个内核是独立模块，
+  同一符号各有一份）；`stub_gen` 生成 `coolSymbolDesc` + 包装 `__cool_memcpy_to_symbol_<sym>`
+  + 全局注册表 `__cool_all_regs[]`。
+- **改写器**（`launch_rewrite`）：预扫描收集 `__constant__` 名；host 源剔除 `__constant__` 声明
+  （g++ 不认识该关键字）并把 `cudaMemcpyToSymbol`/`coolMemcpyToSymbol` 改写为包装调用；
+  device 源把该调用替换为 `(void)0`（仅需可解析）。
+- **测试**：golden `golden_frontend_const_mem` + `golden_device_il_to_ptx_const_mem[_const]`
+  （校验 `.visible .const .align 4 .f32 c_scale` + `ld.const.f32`）；e2e
+  `e2e_hacc_const_mem_run[_build]`（`__constant__ float c_scale` + `coolMemcpyToSymbol`，
+  校验 `constMem OK: 64 elements verified`）。**本机 RTX 4060 真跑通过**。
 
 ### 3.4 M3.3 `dim3` 设备侧——**已完成**
 
@@ -172,7 +191,7 @@
 | **M3.3** | `dim3` 设备侧类型映射 | 无 | golden PTX | 低 | ✅ **已完成** |
 | **M3.4** | 诊断格式（源位置） | 无 | 单测（错误消息） | 低 | ✅ **已完成** |
 | **M3.0** | 向量类型 + 聚合参数 ABI | **coolrt 新增类型** | golden + e2e | 高 | ✅ **已完成** |
-| **M3.2** | `__constant__`（+ 主机侧拷贝） | **coolrt 新增 API** | golden + e2e | 中 |
+| **M3.2** | `__constant__`（+ 主机侧拷贝） | **coolrt 新增 API** | golden + e2e | 中 | ✅ **已完成** |
 | **M3.5** | samples + 边界用例 | 上述 | samples 全绿 | 低 |
 
 > **推荐顺序**：先做**无 coolrt 依赖**的 M3.1 / M3.3 / M3.4（可立即交付），

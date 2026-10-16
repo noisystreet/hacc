@@ -287,6 +287,29 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_il_to_ptx_shared_reduce)
         endif()
 
+        # M3.2 golden：__constant__ 常量内存 → PTX .const 段 + ld.const。
+        # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_cm_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_const_mem.cil")
+            set(_cm_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_const_mem.ptx")
+            add_test(NAME golden_frontend_const_mem
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_cm_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/const_mem.cu")
+            add_test(NAME golden_device_il_to_ptx_const_mem
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_cm_ptx}" "${_cm_cil}")
+            set_tests_properties(golden_device_il_to_ptx_const_mem PROPERTIES
+                DEPENDS golden_frontend_const_mem)
+            # 校验：内核入口 + .const 段（可见符号 c_scale）+ 常量内存加载指令。
+            add_test(NAME golden_device_il_to_ptx_const_mem_const
+                COMMAND grep -qE "\\.visible \\.entry scale_kernel|\\.visible \\.const \\.align [0-9]+ \\.f32 c_scale|ld\\.const\\.f32"
+                        "${_cm_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_const_mem_const PROPERTIES
+                DEPENDS golden_device_il_to_ptx_const_mem)
+        endif()
+
         # M3.4 诊断质量：翻译错误消息带源位置（"文件:行: 成因"）。
         # 用脚本捕获 stderr 并校验 ":<行号>: " 前缀（错误在 stderr，PASS_REGULAR_EXPRESSION 只匹配 stdout）。
         if(HACC_COOLRUNTIME_INCLUDE)
@@ -350,6 +373,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_shared_reduce_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "sharedReduce OK")
+
+        # M3.2 e2e：__constant__ 常量内存编译 + 运行 + 结果校验（out[i] == 6.0）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_cm_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_const_mem_run")
+        add_test(NAME e2e_hacc_const_mem_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/const_mem.cu"
+                    -o "${_e2e_cm_run_exe}")
+        add_test(NAME e2e_hacc_const_mem_run
+            COMMAND "${_e2e_cm_run_exe}")
+        set_tests_properties(e2e_hacc_const_mem_run PROPERTIES
+            DEPENDS e2e_hacc_const_mem_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "constMem OK")
 
         # 内建变量 + __syncthreads 的端到端（需 COOLRuntime 头）。
         if(HACC_COOLRUNTIME_INCLUDE)

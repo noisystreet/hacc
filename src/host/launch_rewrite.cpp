@@ -280,12 +280,98 @@ GlobalStrip strip_global(const std::string& s, std::size_t i) {
     return g;
 }
 
+// 从 `__constant__` 声明处收集变量名：`__constant__ <type> <name> ...;`。
+// 返回变量名（无则空串）。i 指向 `__constant__` 起始。
+std::string constant_name_after(const std::string& s, std::size_t i) {
+    // 跳过 `__constant__` 与其后空白。
+    std::size_t j = skip_ws(s, i + 12);
+    // 跳过类型（可能含 `const`/`unsigned` 等与 `*`/`&`），直到标识符后跟 `;`/`[`/`=`/`,`。
+    // 简化：取最后一个「标识符」作为变量名（类型与变量名之间以空白分隔）。
+    std::string last_ident;
+    while (j < s.size()) {
+        char c = s[j];
+        if (c == ';' || c == '=' || c == '[' || c == ',' || c == '(') {
+            break;
+        }
+        if (is_ident_char(c)) {
+            std::size_t b = j;
+            while (j < s.size() && is_ident_char(s[j])) {
+                ++j;
+            }
+            last_ident = s.substr(b, j - b);
+            continue;
+        }
+        ++j;
+    }
+    return last_ident;
+}
+
+// 改写 `cudaMemcpyToSymbol` / `coolMemcpyToSymbol`：把第一个参数（符号名）替换为
+// hacc 生成的包装函数名，并去掉 kind 参数（包装固定 H2D）。
+// 仅当第一个参数是已收集的 `__constant__` 符号名时才改写；否则原样返回（ok=false）。
+struct SymbolCopyRewrite {
+    bool ok = false;
+    std::string text;
+    std::size_t next = 0;
+};
+
+SymbolCopyRewrite rewrite_memcpy_to_symbol(const std::string& s, std::size_t i,
+                                           const std::vector<std::string>& constants) {
+    SymbolCopyRewrite r;
+    // 定位紧随的 `(`。
+    std::size_t paren = skip_ws(s, i);
+    if (paren >= s.size() || s[paren] != '(') {
+        return r;
+    }
+    std::size_t close = match_paren(s, paren);
+    if (close == std::string::npos) {
+        return r;
+    }
+    std::vector<std::string> args = split_top_level(s.substr(paren + 1, close - paren - 1));
+    if (args.size() < 3) {
+        return r;  // 至少 symbol, src, count
+    }
+    std::string sym = trim(args[0]);
+    if (std::find(constants.begin(), constants.end(), sym) == constants.end()) {
+        return r;  // 非已知 __constant__ 符号：不改写
+    }
+    // 包装签名：__cool_memcpy_to_symbol_<sym>(src, count, offset)。
+    std::string src_arg = trim(args[1]);
+    std::string count_arg = trim(args[2]);
+    std::string offset_arg = (args.size() >= 4) ? trim(args[3]) : "0";
+    r.text = "__cool_memcpy_to_symbol_" + sym + "(" + src_arg + ", " + count_arg + ", " +
+             offset_arg + ")";
+    r.next = close + 1;
+    r.ok = true;
+    return r;
+}
+
 }  // namespace
 
 RewriteResult rewrite_source(const std::string& src, const RewriteOptions& options) {
     RewriteResult result;
     std::string out;
     out.reserve(src.size());
+
+    // M3.2 预扫描：收集文件作用域 `__constant__` 变量名（供改写 cudaMemcpyToSymbol）。
+    // 单趟主循环中 `__constant__` 声明通常先于使用，但预扫描更稳妥（顺序无关）。
+    for (std::size_t k = 0; k + 12 <= src.size();) {
+        std::size_t sk = skip_trivia(src, k);
+        if (sk != k) {
+            k = sk;
+            continue;
+        }
+        if (src.compare(k, 12, "__constant__") == 0) {
+            std::string nm = constant_name_after(src, k);
+            if (!nm.empty() && std::find(result.constant_names.begin(), result.constant_names.end(),
+                                         nm) == result.constant_names.end()) {
+                result.constant_names.push_back(nm);
+            }
+            k += 12;
+            continue;
+        }
+        ++k;
+    }
 
     std::size_t i = 0;
     const std::size_t n = src.size();
@@ -332,6 +418,48 @@ RewriteResult rewrite_source(const std::string& src, const RewriteOptions& optio
             out += g.text;
             i = g.next;
             continue;
+        }
+
+        // M3.2 `__constant__`：host 源剔除声明（g++ 不认识该关键字）；device 源原样保留。
+        if (!options.keep_global_bodies && c == '_' && src.compare(i, 12, "__constant__") == 0) {
+            // 跳到声明末尾 `;`（跳过括号/字面量）。
+            std::size_t j = i + 12;
+            while (j < n && src[j] != ';') {
+                std::size_t sj = skip_trivia(src, j);
+                if (sj != j) {
+                    j = sj;
+                    continue;
+                }
+                ++j;
+            }
+            i = (j < n) ? j + 1 : n;  // 连同 `;` 一起剔除
+            continue;
+        }
+
+        // M3.2 `cudaMemcpyToSymbol` / `coolMemcpyToSymbol`：
+        //   host 源 → 改写为 hacc 包装调用（__cool_memcpy_to_symbol_<sym>）；
+        //   device 源 → 整体替换为 `(void)0`（该调用只在 host 侧执行，device 源仅需
+        //     能解析；且 `c_scale` 是 __constant__ 变量，直接传参类型不符）。
+        if (c == 'c' && (src.compare(i, 18, "cudaMemcpyToSymbol") == 0 ||
+                         src.compare(i, 18, "coolMemcpyToSymbol") == 0)) {
+            if (options.keep_global_bodies) {
+                std::size_t paren = skip_ws(src, i + 18);
+                if (paren < n && src[paren] == '(') {
+                    std::size_t close = match_paren(src, paren);
+                    if (close != std::string::npos) {
+                        out += "(void)0";
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            } else {
+                SymbolCopyRewrite sr = rewrite_memcpy_to_symbol(src, i + 18, result.constant_names);
+                if (sr.ok) {
+                    out += sr.text;
+                    i = sr.next;
+                    continue;
+                }
+            }
         }
 
         out += c;

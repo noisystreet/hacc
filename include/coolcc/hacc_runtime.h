@@ -39,6 +39,7 @@ struct KernelRegistration {
     std::size_t imageSize;  // 映像字节数
     coolKernel_t* slot;     // 句柄槽位（惰性解析后缓存）
     std::once_flag* once;   // 一次性注册保护（每个注册描述一个）
+    coolModule_t* module;   // 模块句柄槽位（M3.2：__constant__ 符号解析需要）
 };
 
 // 惰性解析：首次调用时 coolModuleLoadData + coolModuleGetFunction，缓存到 *slot。
@@ -57,8 +58,42 @@ inline coolKernel_t resolve(const KernelRegistration& reg) {
             return;  // 取函数失败：*reg.slot 保持 nullptr
         }
         *reg.slot = kernel;
+        if (reg.module != nullptr) {
+            *reg.module = module;  // M3.2：保存模块句柄，供 __constant__ 符号解析
+        }
     });
     return *reg.slot;
+}
+
+// M3.2：把主机数据拷入设备符号（__constant__）。
+// 由于每个内核是独立模块（各自载入 PTX），同一 __constant__ 符号在每个模块里
+// 各有一份；故需遍历**所有**内核注册，对每个模块都做拷贝，确保任一内核读到新值。
+// regs/count 为 hacc 生成的全局注册表；desc 为符号描述符。
+// 返回首个非成功错误码（全部成功返回 coolSuccess）。
+inline coolError_t haccMemcpyToSymbolAll(const KernelRegistration* const* regs, std::size_t count,
+                                         coolSymbolDesc* desc, const void* src, std::size_t bytes,
+                                         std::size_t offset) {
+    if (desc == nullptr) {
+        return coolErrorInvalidValue;
+    }
+    coolError_t first_err = coolSuccess;
+    for (std::size_t i = 0; i < count; ++i) {
+        const KernelRegistration* reg = regs[i];
+        if (reg == nullptr) {
+            continue;
+        }
+        (void)resolve(*reg);  // 确保模块已载入并填充 reg->module
+        if (reg->module == nullptr || *reg->module == nullptr) {
+            continue;  // 该模块未成功载入：跳过
+        }
+        desc->module = *reg->module;
+        const coolError_t err =
+            coolMemcpyToSymbol(desc, src, bytes, offset, coolMemcpyHostToDevice);
+        if (err != coolSuccess && first_err == coolSuccess) {
+            first_err = err;
+        }
+    }
+    return first_err;
 }
 
 // grid/block 归一化为 dim3：接受 int（如 (n+255)/256）或 dim3。

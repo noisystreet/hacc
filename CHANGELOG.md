@@ -114,6 +114,21 @@
   `KernelContext.locals` 放宽为 `Value*`。新增 e2e `e2e_hacc_shared_reduce_run[_build]`
   （`__shared__ int sdata[256]` + 跨线程读，校验 `sharedReduce OK: 256 elements verified`）。
   **本机 RTX 4060 上真跑通过**。
+- **M3.2 `__constant__` 常量内存（→ `addrspace(4)` 全局 + 主机侧符号拷贝）**：新增**常量内存**支持。
+  **设备侧**：`il_to_llvm` 识别文件作用域 `cool_constant` 属性，发射 `addrspace(4)` 全局
+  （`ExternalLinkage` + **原名**，供运行时按名 `cuModuleGetGlobal` 解析；`isConstant=false` 以避免
+  LLVM 把 load 折叠成 initializer）；内核内引用经 `KernelContext.constant_globals` 并入 `locals`
+  （新增 `seed_constant_globals`，守住 `build_kernel` 的 CCN 门禁）。**内核内 `__constant__` 报错**
+  （CUDA 仅允许文件作用域）。**主机侧**：`KernelRegistration` 新增 `module` 槽位（`resolve()` 保存
+  模块句柄）；`hacc_runtime.h` 新增 `haccMemcpyToSymbolAll`（遍历**所有**内核模块填充符号——因每个
+  内核是独立模块，同一符号各有一份）；`stub_gen` 为每个 `__constant__` 符号生成 `coolSymbolDesc`
+  + 拷贝包装 `__cool_memcpy_to_symbol_<sym>`，并生成全局注册表 `__cool_all_regs[]`。**改写器**：
+  `launch_rewrite` 预扫描收集 `__constant__` 名；host 源剔除 `__constant__` 声明（g++ 不认识该关键字）
+  并把 `cudaMemcpyToSymbol`/`coolMemcpyToSymbol` 改写为包装调用；device 源把该调用替换为 `(void)0`
+  （仅需可解析）。新增 golden `golden_frontend_const_mem` + `golden_device_il_to_ptx_const_mem[_const]`
+  （校验 `.visible .const .align 4 .f32 c_scale` + `ld.const.f32`）；e2e `e2e_hacc_const_mem_run[_build]`
+  （`__constant__ float c_scale` + `coolMemcpyToSymbol`，校验 `constMem OK: 64 elements verified`）。
+  **本机 RTX 4060 上真跑通过**。
 - **M3.3 `dim3` 设备侧类型映射（3 分量聚合 → struct）**：修正 `map_struct_type` 的向量识别——
   由「成员数 2/3/4 且全同类型 → `<N x T>`」收紧为「**成员数 2 或 4** 且全同类型 → `<N x T>`」，
   **3 分量类型（`dim3` / `uint3` / `float3`）改映射为 struct `{T,T,T}`**。原因：PTX 只有 `v2`/`v4`

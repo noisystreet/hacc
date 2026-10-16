@@ -28,7 +28,8 @@ std::string render_byte_array(const std::string& bytes) {
 }
 
 std::string generate_stubs(const std::vector<std::string>& kernel_names,
-                           const std::string& ptx_text) {
+                           const std::string& ptx_text,
+                           const std::vector<ConstantSymbol>& constant_symbols) {
     if (kernel_names.empty()) {
         return std::string();
     }
@@ -40,11 +41,33 @@ std::string generate_stubs(const std::vector<std::string>& kernel_names,
         out += "static const unsigned char __cool_image_" + name +
                "[] = " + render_byte_array(ptx_text) + ";\n";
         out += "static coolKernel_t __cool_kernel_" + name + " = nullptr;\n";
+        out += "static coolModule_t __cool_module_" + name + " = nullptr;\n";
         out += "static std::once_flag __cool_once_" + name + ";\n";
         out += "static const hacc::KernelRegistration __cool_reg_" + name + " = {\n";
         out +=
             "    \"" + name + "\", __cool_image_" + name + ", sizeof(__cool_image_" + name + "),\n";
-        out += "    &__cool_kernel_" + name + ", &__cool_once_" + name + "};\n";
+        out += "    &__cool_kernel_" + name + ", &__cool_once_" + name + ", &__cool_module_" +
+               name + "};\n";
+    }
+    // M3.2：全局注册表（供 haccMemcpyToSymbol 遍历所有模块填充 __constant__ 符号）。
+    out += "static const hacc::KernelRegistration* const __cool_all_regs[] = {\n";
+    for (const std::string& name : kernel_names) {
+        out += "    &__cool_reg_" + name + ",\n";
+    }
+    out += "};\n";
+    out +=
+        "static const std::size_t __cool_all_regs_count = " + std::to_string(kernel_names.size()) +
+        ";\n";
+    // M3.2：__constant__ 符号描述符 + 拷贝包装（module 由 haccMemcpyToSymbolAll 运行时填充）。
+    // 包装函数遍历所有内核模块，确保每个模块里的该符号都被填充。
+    for (const ConstantSymbol& sym : constant_symbols) {
+        out += "static coolSymbolDesc __cool_sym_" + sym.name + " = {nullptr, \"" + sym.name +
+               "\", " + std::to_string(sym.size) + "};\n";
+        out += "static inline coolError_t __cool_memcpy_to_symbol_" + sym.name +
+               "(const void* src, std::size_t count, std::size_t offset) {\n";
+        out += "    return hacc::haccMemcpyToSymbolAll(__cool_all_regs, __cool_all_regs_count,\n";
+        out += "        &__cool_sym_" + sym.name + ", src, count, offset);\n";
+        out += "}\n";
     }
     return out;
 }

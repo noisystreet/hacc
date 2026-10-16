@@ -56,6 +56,9 @@ constexpr const char* kKernelAttributeName = "cool_global";
 // __shared__ 变量属性名（M3.1；契约见 cuda-attributes.md §1）。
 constexpr const char* kCoolSharedAttributeName = "cool_shared";
 
+// __constant__ 变量属性名（M3.2；契约见 cuda-attributes.md §1）。
+constexpr const char* kCoolConstantAttributeName = "cool_constant";
+
 // 翻译失败时抛出，由顶层 emit_ptx_from_il 捕获并转成 err_out。
 // 用异常而非错误码，避免在深层递归里层层传递错误状态（clean-code：失败显式）。
 class TranslateError : public std::exception {
@@ -353,9 +356,13 @@ struct KernelContext {
     llvm::LLVMContext& ctx;
     llvm::Module& module;
     llvm::IRBuilder<> builder;
-    // 变量 → 其「存储地址」。局部变量是 alloca；__shared__ 变量是 addrspace(3) 全局。
+    // 变量 → 其「存储地址」。局部变量是 alloca；__shared__ 变量是 addrspace(3) 全局；
+    // __constant__ 变量是 addrspace(4) 全局（文件级，见 constant_globals）。
     // 变量引用先取地址再 load（数组名除外，见 translate_expr）。
     std::unordered_map<a_variable_ptr, llvm::Value*> locals;
+    // 文件作用域 __constant__ 变量 → addrspace(4) 全局（M3.2）。
+    // 由 emit_ptx_from_il 预先发射，build_kernel 时并入 locals，使内核内引用可解析。
+    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>* constant_globals = nullptr;
 
     KernelContext(llvm::LLVMContext& c, llvm::Module& m) : ctx(c), module(m), builder(c) {}
 };
@@ -1218,8 +1225,21 @@ void bind_parameters(llvm::Function* fn, a_scope_ptr body_scope, KernelContext& 
     }
 }
 
+// M3.2：把文件作用域 __constant__ 全局并入内核上下文的 locals，
+// 使内核内对 __constant__ 变量的引用可解析（variable_address 查 locals）。
+void seed_constant_globals(
+    KernelContext& kc,
+    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& constant_globals) {
+    kc.constant_globals = &constant_globals;
+    for (const auto& kv : constant_globals) {
+        kc.locals[kv.first] = kv.second;
+    }
+}
+
 // 为内核建 Function：参数 + 函数体。
-llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
+llvm::Function* build_kernel(
+    a_routine_ptr r, llvm::Module& module,
+    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& constant_globals) {
     llvm::LLVMContext& ctx = module.getContext();
     const char* name = r->source_corresp.name;
     if (name == nullptr) {
@@ -1240,6 +1260,7 @@ llvm::Function* build_kernel(a_routine_ptr r, llvm::Module& module) {
     // 函数体：entry block + 参数 alloca + 语句翻译。
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
     KernelContext kc(ctx, module);
+    seed_constant_globals(kc, constant_globals);
     kc.builder.SetInsertPoint(entry);
 
     // 函数体 scope（经 function_def_number 定位）。
@@ -1295,18 +1316,37 @@ bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std
 
     unsigned kernel_count = 0;
     try {
-        // 文件作用域 __shared__ 变量：CUDA 不允许（__shared__ 仅函数内），报错。
+        // 文件作用域变量：__shared__ 报错（CUDA 不允许）；__constant__ 发射 addrspace(4) 全局。
+        std::unordered_map<a_variable_ptr, llvm::GlobalVariable*> constant_globals;
         for (a_variable_ptr v = file_scope->variables; v != nullptr; v = v->next) {
             if (has_attribute(v->source_corresp.attributes, kCoolSharedAttributeName)) {
                 fail("__shared__ 变量不能声明在文件作用域（仅允许内核内）",
                      v->source_corresp.decl_position);
+            }
+            if (has_attribute(v->source_corresp.attributes, kCoolConstantAttributeName)) {
+                // __constant__ 变量 → addrspace(4) 全局（M3.2）。
+                // 用 ExternalLinkage + 原名：常量内存是模块级符号，运行时按名
+                // （cuModuleGetGlobal）解析，故名字不加前缀、对外可见。
+                const char* vname = v->source_corresp.name;
+                if (vname == nullptr) {
+                    fail("__constant__ 变量无源实体名", v->source_corresp.decl_position);
+                }
+                llvm::Type* ty = map_type(v->type, ctx);
+                // isConstant=false：避免 LLVM 把 load 折叠成 initializer（0）。
+                // 语义上 __constant__ 只读，但设备侧需真实 load（运行时经
+                // coolMemcpyToSymbol 填充），故此处按可变全局发射。
+                llvm::GlobalVariable* gv = new llvm::GlobalVariable(
+                    module, ty, /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
+                    llvm::Constant::getNullValue(ty), vname, /*InsertBefore=*/nullptr,
+                    llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/4);
+                constant_globals[v] = gv;
             }
         }
         for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
             if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
                 continue;  // 非内核（设备函数等）一期跳过。
             }
-            build_kernel(r, module);
+            build_kernel(r, module, constant_globals);
             ++kernel_count;
         }
     } catch (const TranslateError& e) {

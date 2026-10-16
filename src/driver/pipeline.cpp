@@ -129,7 +129,13 @@ bool stitch_stubs(const PipelineOptions& opts, const std::string& host_path,
         *error = "源码改写失败（取内核名）：" + r.error;
         return false;
     }
-    std::string stubs = hacc::host::generate_stubs(r.kernel_names, ptx);
+    // M3.2：__constant__ 符号描述符（size 由 coolrt 后端经 cuModuleGetGlobal 解析，
+    // 此处仅占位 0；符号名用于按名解析）。
+    std::vector<hacc::host::ConstantSymbol> constants;
+    for (const std::string& nm : r.constant_names) {
+        constants.push_back(hacc::host::ConstantSymbol{nm, 0});
+    }
+    std::string stubs = hacc::host::generate_stubs(r.kernel_names, ptx, constants);
     if (!write_file(host_path, stubs + host_src)) {
         *error = "无法写回主机源：" + host_path;
         return false;

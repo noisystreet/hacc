@@ -68,9 +68,29 @@ int main() {
         expect_contains(s, "static const hacc::KernelRegistration __cool_reg_foo = {",
                         "单内核 reg");
         expect_contains(s, "\"foo\", __cool_image_foo, sizeof(__cool_image_foo),", "单内核 name");
-        expect_contains(s, "&__cool_kernel_foo, &__cool_once_foo};", "单内核 指针");
+        expect_contains(s, "&__cool_kernel_foo, &__cool_once_foo, &__cool_module_foo};",
+                        "单内核 指针");
         // PTX 文本字节（'P'=0x50, 'T'=0x54, 'X'=0x58）。
         expect_contains(s, "0x50,0x54,0x58,0x00", "单内核 PTX 字节");
+        // M3.2：全局注册表。
+        expect_contains(s, "static const hacc::KernelRegistration* const __cool_all_regs[] = {",
+                        "单内核 注册表");
+        expect_contains(s, "&__cool_reg_foo,", "单内核 注册表项");
+        expect_contains(s, "static const std::size_t __cool_all_regs_count = 1;",
+                        "单内核 注册表计数");
+    }
+
+    // 3b) M3.2：__constant__ 符号描述符 + 拷贝包装。
+    {
+        std::vector<hacc::host::ConstantSymbol> syms = {{"c_scale", 4}};
+        std::string s = generate_stubs({"foo"}, "PTX", syms);
+        expect_contains(s, "static coolSymbolDesc __cool_sym_c_scale = {nullptr, \"c_scale\", 4};",
+                        "常量符号 描述符");
+        expect_contains(s, "static inline coolError_t __cool_memcpy_to_symbol_c_scale(",
+                        "常量符号 包装");
+        expect_contains(s, "hacc::haccMemcpyToSymbolAll(__cool_all_regs, __cool_all_regs_count,",
+                        "常量符号 遍历注册表");
+        expect_contains(s, "&__cool_sym_c_scale, src, count, offset);", "常量符号 传描述符");
     }
 
     // 4) 多内核：各自独立命名，互不串扰。

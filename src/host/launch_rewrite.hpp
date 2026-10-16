@@ -32,6 +32,9 @@ struct RewriteResult {
     std::string error;   // 失败时的可读原因（含大致位置）
     // `<<<>>>` 引用到的内核名（去重、按首次出现顺序）。供生成注册描述声明。
     std::vector<std::string> kernel_names;
+    // 文件作用域 `__constant__` 变量名（去重、按首次出现顺序，M3.2）。
+    // 供生成符号描述符与改写 cudaMemcpyToSymbol。
+    std::vector<std::string> constant_names;
 };
 
 // 对 CUDA C++ 子集源码做改写（`<<<>>>` → haccLaunch；按选项处理 `__global__` 函数体）。
