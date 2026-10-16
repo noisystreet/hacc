@@ -302,6 +302,42 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                         "${HACC_COOLRUNTIME_INCLUDE}" "6")
         endif()
 
+        # M3.5 边界用例：非法/未覆盖构造应 fail loud（编译失败 + 诊断匹配）。
+        # 用脚本捕获 stderr 并校验诊断正则（错误在 stderr，PASS_REGULAR_EXPRESSION 只匹配 stdout）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            # while 循环（子集未覆盖）→ 翻译失败，诊断带源位置（第 6 行）。
+            add_test(NAME diag_unsupported_while
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_unsupported_while.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" ":6: 不支持的语句 kind")
+            # switch 语句（子集未覆盖）→ 翻译失败，诊断带源位置（第 6 行）。
+            add_test(NAME diag_unsupported_switch
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_unsupported_switch.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" ":6: 不支持的语句 kind")
+            # 类型不匹配（指针赋整型）→ 前端 cpfe 报错（第 8 行）。
+            add_test(NAME diag_type_mismatch
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_type_mismatch.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" "line 8: error:")
+        endif()
+
+        # M3.5 边界用例（正向）：局部数组 + 动态下标（a[i]）应正常编译为 PTX。
+        # 回归保护：曾因数组退化的 GEP 源类型误用元素类型而产出非法 LLVM IR。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_lai_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_local_array_index.ptx")
+            add_test(NAME golden_device_local_array_index
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/local_array_index.cu"
+                        --emit=ptx -o "${_lai_ptx}" -I "${HACC_COOLRUNTIME_INCLUDE}")
+            add_test(NAME golden_device_local_array_index_ptx
+                COMMAND grep -qE "\\.visible \\.entry local_array_index" "${_lai_ptx}")
+            set_tests_properties(golden_device_local_array_index_ptx PROPERTIES
+                DEPENDS golden_device_local_array_index)
+        endif()
+
         # M3.1 e2e：__shared__ 共享内存编译 + 运行 + 结果校验（out[i] == N-1-i）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_sr_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_shared_reduce_run")

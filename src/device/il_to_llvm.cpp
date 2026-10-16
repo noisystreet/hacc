@@ -822,9 +822,11 @@ llvm::Value* translate_array_to_pointer(an_expr_node_ptr expr, KernelContext& kc
     if (arr_ty->kind != tk_array) {
         fail("数组→指针退化的操作数既不是数组也不是指针");
     }
-    llvm::Type* elem_ty = map_type(arr_ty->variant.array.element_type, kc.ctx);
+    // 数组退化：GEP 源类型须为数组类型（[N x T]），索引 [0, 0] 取首元素地址。
+    // 若误用元素类型作源类型，会产出非法 IR（不透明指针下索引类型不匹配）。
+    llvm::Type* arr_llvm_ty = map_type(arr_ty, kc.ctx);
     llvm::Value* zero = kc.builder.getInt64(0);
-    return kc.builder.CreateGEP(elem_ty, arr_addr, {zero, zero});
+    return kc.builder.CreateGEP(arr_llvm_ty, arr_addr, {zero, zero});
 }
 
 // 数组下标（eok_subscript）：base[idx] → 元素地址（lvalue）。
