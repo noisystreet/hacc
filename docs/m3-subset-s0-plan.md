@@ -63,6 +63,10 @@
 
 > **关键约束**：M3.0 / M3.2 涉及 **coolrt 侧改动**（新增类型 / API），属**跨项目**。
 > 需与 coolrt 维护者对齐（类似 TODO B4 的跨项目协调）。
+>
+> **现状更新（2026-10，M3.0/M3.2 落地后）**：上表为 M3 规划时的快照。coolrt 已补齐——
+> 向量类型（`device_builtins.h`，提交 `f3cfbdd`）与 `coolMemcpyToSymbol`（`cool_runtime_api.h`）
+> **均已具备**，故 M3.0 / M3.2 均按**完整方案**落地（无降级）。
 
 ## 3. 方案设计
 
@@ -181,6 +185,7 @@
 ### 3.6 M3.5 samples + 边界用例
 
 - `samples/`：`vectorAdd`（已有）、`shared_reduce`（共享内存归约）、`constant_pi`（常量内存）等。
+  > M3.1 / M3.2 已落地，`shared_reduce` / `constant_pi` 样例的前置能力**均已具备**（见 §3.2 / §3.3）。
 - 边界用例：越界索引、类型不匹配、未覆盖构造的 fail loud 消息。
 
 ## 4. 分步实施（建议）
@@ -202,7 +207,7 @@
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
 | ~~聚合参数 PTX ABI 不确定~~ | ~~高（M3.0 核心）~~ | **已消除（§8 spike）**：byval / `<N x T>` 均跑通，选 `<N x T>` |
-| coolrt 无向量类型 / `__constant__` API | 中（M3.0/M3.2 阻塞） | 跨项目对齐；M3.2 可降级为「仅设备侧」 |
+| ~~coolrt 无向量类型 / `__constant__` API~~ | ~~中（M3.0/M3.2 阻塞）~~ | **已消除**：coolrt 已补向量类型（`f3cfbdd`）与 `coolMemcpyToSymbol`，M3.0/M3.2 均按完整方案落地 |
 | `__shared__` 动态索引的地址空间传播 | 中 | GEP + addrspace 正确性单测 |
 | `dim3` 与 `uint3` 关系不清 | 低 | 明确：设备侧 `dim3` 用于参数，内建变量用 `uint3` |
 | 诊断源位置获取 | 低 | 从 IL `source_corresp` 取行列 |
@@ -211,7 +216,8 @@
 
 1. ~~**coolrt 是否新增向量类型**？（M3.0 前置）~~ **已解决**：coolrt 已新增（`device_builtins.h` 补全
    `float2/3/4`、`int2/4`、`uint2/4`、`double2/4`，带正确对齐），提交 `f3cfbdd`。
-2. **coolrt 是否新增 `coolMemcpyToSymbol`**？（M3.2 前置）——若无，M3.2 降级。
+2. ~~**coolrt 是否新增 `coolMemcpyToSymbol`**？（M3.2 前置）——若无，M3.2 降级。~~ **已解决**：coolrt
+   **已有** `coolMemcpyToSymbol`（`cool_runtime_api.h`），M3.2 按完整方案落地（见 §3.3）。
 3. ~~**聚合参数 PTX ABI**：byval vs 拆解？——需 spike。~~ **已解决（§8 spike）**：byval struct 与
    `<4 x float>` 均端到端跑通；**选 `<N x T>` 向量类型**（`ld.param.vN.f32` 向量化，对齐明确）。
 4. ~~**`dim3` 设备侧**：是否需与 `uint3` 合并？~~ **已解决（M3.3）**：3 分量聚合统一映射为 struct
