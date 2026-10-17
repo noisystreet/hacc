@@ -1,6 +1,6 @@
 # M4 方案：子集 S1（原子 / `__threadfence` / 设备全局 `__device__` / `__restrict__`）
 
-> 状态：**进行中**（2026-10）。M4.0 已完成；M4.1–M4.6 规划中。本文为 M4 的**实施方案**，落地后逐节回写「已完成」。
+> 状态：**进行中**（2026-10）。M4.0 / M4.1 已完成；M4.2–M4.6 规划中。本文为 M4 的**实施方案**，落地后逐节回写「已完成」。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围 S1）、§10（里程碑 M4）。
 > 前置：M3 已完成（子集 S0 全部落地，见 [m3-subset-s0-plan.md](m3-subset-s0-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围 S1）、
@@ -104,7 +104,7 @@ OK   attribute in IL: address_space
 OK   IL contains 'kind: unrecognized' entries
 ```
 
-### 3.2 M4.1 设备全局 `__device__` 变量（纯设备侧）
+### 3.2 M4.1 设备全局 `__device__` 变量（纯设备侧）——✅ 已完成
 
 **设备侧**（`il_to_llvm`）：
 
@@ -119,6 +119,14 @@ OK   IL contains 'kind: unrecognized' entries
    报错（fail loud）。
 
 **验证**：golden PTX 校验 `.global` 段 + `ld.global` / `st.global`；e2e 用设备全局变量做累加。
+
+> **已完成（M4.1）**：`il_to_llvm.cpp` 新增 `kCoolDeviceAttributeName` → `addrspace(1)` 全局
+> （`ExternalLinkage` + 原名、`isConstant=false`）；`initk_static` 时用 `translate_constant` 取初值
+> （其余零初始化）。`KernelContext` 增 `device_globals`，`seed_file_scope_globals` 同时 seed
+> `__constant__` / `__device__`；内核内 `__device__` 声明 fail loud。
+> 验证：`tests/golden/e2e/dev_global.cu`（`__device__ int g_counter = 100`），golden 校验
+> `.visible .global ... g_counter = 100` + `ld.global.u32` / `st.global.u32`；e2e 在 RTX 4060 上
+> 跑通（`g_counter == 105`）。`make check` 73/73 全绿。
 
 **风险**：`__device__` 变量的**主机侧可见性**——CUDA 中 `__device__` 变量主机侧不可直接访问
 （需 `cudaMemcpyFromSymbol`）。M4.1 一期**只做设备侧**，主机侧符号访问延后（见 §6 待确认）。

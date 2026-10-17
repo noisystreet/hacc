@@ -310,6 +310,29 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_il_to_ptx_const_mem)
         endif()
 
+        # M4.1 golden：__device__ 设备全局 → PTX .global 段（addrspace 1）+ ld.global/st.global。
+        # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_dg_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global.cil")
+            set(_dg_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global.ptx")
+            add_test(NAME golden_frontend_dev_global
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_dg_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/dev_global.cu")
+            add_test(NAME golden_device_il_to_ptx_dev_global
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_dg_ptx}" "${_dg_cil}")
+            set_tests_properties(golden_device_il_to_ptx_dev_global PROPERTIES
+                DEPENDS golden_frontend_dev_global)
+            # 校验：内核入口 + .global 段（可见符号 g_counter，带静态初值 100）+ 全局访存指令。
+            add_test(NAME golden_device_il_to_ptx_dev_global_global
+                COMMAND grep -qE "\\.visible \\.entry dev_global_kernel|\\.visible \\.global \\.align [0-9]+ \\.u32 g_counter = 100|ld\\.global\\.u32|st\\.global\\.u32"
+                        "${_dg_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_dev_global_global PROPERTIES
+                DEPENDS golden_device_il_to_ptx_dev_global)
+        endif()
+
         # M3.4 诊断质量：翻译错误消息带源位置（"文件:行: 成因"）。
         # 用脚本捕获 stderr 并校验 ":<行号>: " 前缀（错误在 stderr，PASS_REGULAR_EXPRESSION 只匹配 stdout）。
         if(HACC_COOLRUNTIME_INCLUDE)
@@ -404,6 +427,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_const_mem_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "constMem OK")
+
+        # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_dg_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global_run")
+        add_test(NAME e2e_hacc_dev_global_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/dev_global.cu"
+                    -o "${_e2e_dg_run_exe}")
+        add_test(NAME e2e_hacc_dev_global_run
+            COMMAND "${_e2e_dg_run_exe}")
+        set_tests_properties(e2e_hacc_dev_global_run PROPERTIES
+            DEPENDS e2e_hacc_dev_global_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "devGlobal OK")
 
         # 内建变量 + __syncthreads 的端到端（需 COOLRuntime 头）。
         if(HACC_COOLRUNTIME_INCLUDE)
