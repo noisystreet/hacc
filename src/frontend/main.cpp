@@ -29,7 +29,7 @@ constexpr const char* kUsage =
     "coolfe++ —— hacc CUDA 前端（对标 cudafe++，基于 EDG C++）。\n"
     "用法: coolfe++ [选项] <input.cu>\n"
     "  -o <file>            二进制 IL 输出（默认 <input>.cil）\n"
-    "  --emit-il-text[=F]   人类可读文本 IL 输出（默认 <input>.il.txt）\n"
+    "  --emit-il-text[=F]   人类可读文本 IL（默认不产出；省略 F 时为 <input>.il.txt）\n"
     "  --emit-host[=F]      主机源输出（改写后源码，默认 <input>.hacc.cpp）\n"
     "  --emit-host-only[=F] 仅产主机源，不调用 cpfe（纯文本，无需 EDG）\n"
     "  --cpfe <path>        cpfe 可执行路径（默认 $HACC_CPFE 或构建期默认）\n"
@@ -46,14 +46,24 @@ std::string stem_of(const std::string& path) {
     return (dot == std::string::npos) ? base : base.substr(0, dot);
 }
 
+// 替换扩展名但**保留目录前缀**（与 stem_of 不同，不丢目录）。
+// 用于「显式请求的辅助产物」——落在输入文件旁边，而不是调用者的 cwd。
+std::string sibling_with_ext(const std::string& path, const char* ext) {
+    size_t slash = path.find_last_of('/');
+    size_t dot = path.find_last_of('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+        return path.substr(0, dot) + ext;
+    }
+    return path + ext;
+}
+
 // 命令行选项。
 struct Options {
     hacc::frontend::EdgInvokeOptions edg;
     std::string input_path;
-    std::string il_output;   // 显式 -o
-    std::string il_text;     // 显式 --emit-il-text=...
-    bool want_text = false;  // 是否产出文本（默认 true）
-    bool text_explicit = false;
+    std::string il_output;    // 显式 -o
+    std::string il_text;      // 显式 --emit-il-text=...
+    bool want_text = false;   // 是否产出文本（默认 false；仅 --emit-il-text 开启）
     std::string host_output;  // 显式 --emit-host=...
     bool want_host = false;   // 是否产出主机源（默认 false）
     bool host_only = false;   // --emit-host-only：仅产主机源，不调用 cpfe
@@ -83,7 +93,6 @@ bool take_emit_il_text_option(const char* a, Options* out) {
         return false;
     }
     out->want_text = true;
-    out->text_explicit = true;
     if (a[14] == '=') {
         out->il_text = a + 15;
     }
@@ -154,16 +163,16 @@ int parse_args(int argc, char** argv, Options* out) {
     return -1;  // 继续执行
 }
 
-// 推导默认输出名（方案 §7.1 方案 ②）：二进制 IL + 文本 IL + 主机源。
+// 推导默认输出名（方案 §7.1 方案 ②）：二进制 IL + 主机源；文本 IL 需显式请求。
 void resolve_outputs(Options* o) {
     if (o->il_output.empty()) {
         o->il_output = stem_of(o->input_path) + ".cil";
     }
-    if (!o->text_explicit) {
-        o->want_text = true;
-    }
+    // 文本 IL 是调试辅助，**默认不产出**：hacc 驱动每次编译都会调 coolfe++，
+    // 默认开启会让每次编译都往调用者 cwd 丢一个 0.5–1.6 MB 的 .il.txt。
+    // 显式请求（无 =F）时落在输入文件旁边，而不是 cwd。
     if (o->want_text && o->il_text.empty()) {
-        o->il_text = stem_of(o->input_path) + ".il.txt";
+        o->il_text = sibling_with_ext(o->input_path, ".il.txt");
     }
     if (o->want_host && o->host_output.empty()) {
         o->host_output = stem_of(o->input_path) + ".hacc.cpp";

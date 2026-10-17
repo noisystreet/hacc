@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`coolfe++` 不再默认产出文本 IL**（`*.il.txt`）。此前 `resolve_outputs` 无条件把 `want_text`
+  置为 true，且默认名经 `stem_of()` 丢掉了输入文件的目录前缀——结果是**每次**编译都往调用者
+  当前目录丢一个 0.5–1.6 MB 的 IL 文本（`hacc` 驱动每次编译都会调 `coolfe++`，仓库根目录曾因此
+  累积 11 MB 残留）。现改为：仅 `--emit-il-text[=F]` 显式请求时产出；省略 `=F` 时落在**输入文件
+  旁边**（新增 `sibling_with_ext`），不再污染 cwd。移除已无用的 `text_explicit` 字段。
+  相关 golden 测试本就显式传 `--emit-il-text=`，断言不变。
+
 ### Added
 
 - 项目骨架（M0）：CMake 构建、`Makefile` 质量入口（`make check`）、`.clang-format`、
