@@ -60,6 +60,12 @@ make lint       # clang-tidy（未安装时跳过）
 
 ## Documentation Rules
 
+- **完成任务后及时更新文档进度**：里程碑 / 子任务完成时，**当轮**同步更新进度载体——
+  `README.md` 的「状态」段、`docs/TODO.md` 对应条目的勾选与 `make check` 计数、
+  `docs/known-issues.md` 的 KI 状态、`CHANGELOG.md`。不要留到事后补：文档进度落后于代码，
+  会让后续接手者（含 Agent）按过时信息判断方向、重复已完成的工作。
+  （`README.md` 的「状态」段属进度同步，可随任务完成直接更新；其余架构性内容仍按
+  Hard Constraints 要求人工批准。）
 - 语言范围变更更新 [ADR 0004](docs/adr/0004-cuda-cpp-subset-scope.md) 与方案 §9。
 - 架构/流水线变更更新 `docs/compiler-implementation-plan.md` 或新增 ADR。
 - 用户可见变更更新 `CHANGELOG.md`。

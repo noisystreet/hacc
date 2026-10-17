@@ -32,15 +32,31 @@ hacc 是 [coolrt](../coolruntime) 的**编译前端**，用于补上 coolrt 架�
 
 ## 状态
 
-**M2 已完成**：设备后端（LLVM IR → PTX，M1.1）与前端（`.cu` → EDG IL → LLVM IR → PTX，M1.2）
-均已打通；主机路径（M2）已落地——`<<<>>>` 改写、主机桩 + 内嵌 PTX 映像 + 惰性注册、
-driver 编排主机编译链接，**`.cu` 一步到可执行文件**。真 vectorAdd 已在本机 GPU 上跑通并校验结果。
+**子集 S1 主体已落地（M4.0–M4.4、M4.6）**：设备后端（LLVM IR → PTX，M1.1）、前端
+（`.cu` → EDG IL → LLVM IR → PTX，M1.2）、主机路径（M2：`<<<>>>` 改写、主机桩 + 内嵌 PTX
+映像 + 惰性注册、driver 编排主机编译链接，**`.cu` 一步到可执行文件**）、子集 S0（M3：
+`__shared__` / `__constant__` / 向量类型 / `dim3`）与子集 S1（M4：`__device__` 设备全局 /
+`__restrict__` / `__threadfence*` / 原子内建 / samples 与边界用例）均已打通。
+真 kernel 已在本机 GPU 上跑通并校验结果。
+
+> M4.5（指针地址空间传播）**待拍板**：一期论证为可先不做（原子改走原生 `atomicrmw` 后不再
+> 依赖地址空间区分，现有 e2e 在 generic 指针下全部跑通），见
+> [m4-subset-s1-plan.md](docs/m4-subset-s1-plan.md) §3.6。
 
 ```sh
 # 一步到可执行文件（默认 --emit=exe）
 build/hacc tests/golden/e2e/vector_add.cu -o vector_add
 ./vector_add        # → vectorAdd OK: 256 elements verified
+
+# 用户示例集（结果自校验；无 CUDA 设备时打印 SKIP 并返回 77）
+build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
+# → atomicReduce OK: sum(0..127) = 8128
 ```
+
+`make check`：**112/112 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
+**fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `while` / `switch`、
+`double` 等未覆盖的原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
+[known-issues.md](docs/known-issues.md)。
 
 ## 构建与使用
 
