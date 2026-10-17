@@ -62,6 +62,9 @@ constexpr const char* kCoolConstantAttributeName = "cool_constant";
 // __device__ 变量属性名（M4.1；契约见 cuda-attributes.md §2，→ addrspace(1)）。
 constexpr const char* kCoolDeviceAttributeName = "cool_device";
 
+// __restrict__ 指针参数属性名（M4.2；契约见 cuda-attributes.md §3，→ LLVM noalias）。
+constexpr const char* kCoolRestrictAttributeName = "cool_restrict";
+
 // 翻译失败时抛出，由顶层 emit_ptx_from_il 捕获并转成 err_out。
 // 用异常而非错误码，避免在深层递归里层层传递错误状态（clean-code：失败显式）。
 class TranslateError : public std::exception {
@@ -1235,6 +1238,66 @@ void bind_parameters(llvm::Function* fn, a_scope_ptr body_scope, KernelContext& 
     }
 }
 
+// 解引用 typedef / 限定符后是否为指针类型（C 中数组形参退化为指针，一并接受）。
+bool is_pointer_like_type(a_type_ptr t) {
+    while (t != nullptr && t->kind == tk_typeref) {
+        t = t->variant.typeref.type;
+    }
+    if (t == nullptr) {
+        return false;
+    }
+    return t->kind == tk_pointer || t->kind == tk_array;
+}
+
+// 在类型链（typeref → 目标类型）上查属性。
+// EDG 对「类型上的属性」会合成一个 kind=tk_typeref / for_type_attributes 的节点
+// 并把属性挂在它的 source_corresp.attributes 上（如 `int __restrict__ v`），
+// 与「参数上的属性」（param-type.attributes，如 `int * __restrict__ a`）是两条路径。
+bool type_chain_has_attribute(a_type_ptr t, const char* wanted) {
+    while (t != nullptr) {
+        if (has_attribute(t->source_corresp.attributes, wanted)) {
+            return true;
+        }
+        if (t->kind != tk_typeref) {
+            return false;
+        }
+        t = t->variant.typeref.type;
+    }
+    return false;
+}
+
+// 形参是否带 cool_restrict（两条 EDG 路径都查：param-type 属性 / 类型链属性）。
+bool param_has_restrict(a_param_type_ptr p) {
+    if (has_attribute(p->attributes, kCoolRestrictAttributeName)) {
+        return true;
+    }
+    return type_chain_has_attribute(p->type, kCoolRestrictAttributeName) ||
+           type_chain_has_attribute(p->declared_type, kCoolRestrictAttributeName);
+}
+
+// M4.2：把参数上的 cool_restrict 属性降为 LLVM noalias（CUDA __restrict__ 的语义）。
+// 严格限定指针形参：非指针带 __restrict__ 一律 fail loud（CUDA 中无意义，
+// 且误标 noalias 可能引入错误优化）。位置用内核声明位置兜底（param-type 无独立位置）。
+void apply_param_noalias(llvm::Function* fn, a_type_ptr fn_type, const a_source_position& pos) {
+    a_routine_type_supplement_ptr supp =
+        (fn_type != nullptr) ? fn_type->variant.routine.extra_info : nullptr;
+    if (supp == nullptr) {
+        return;
+    }
+    unsigned idx = 0;
+    for (a_param_type_ptr p = supp->param_type_list; p != nullptr; p = p->next, ++idx) {
+        if (!param_has_restrict(p)) {
+            continue;
+        }
+        if (!is_pointer_like_type(p->type)) {
+            fail("__restrict__ 只能用于指针形参", pos);
+        }
+        if (idx < fn->arg_size()) {
+            fn->addParamAttr(idx, llvm::Attribute::NoAlias);
+        }
+    }
+}
+
 // M3.2/M4.1：把文件作用域 __constant__ / __device__ 全局并入内核上下文的 locals，
 // 使内核内对这些变量的引用可解析（variable_address 查 locals）。
 void seed_file_scope_globals(
@@ -1273,6 +1336,9 @@ llvm::Function* build_kernel(
     fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
     fn->addFnAttr("nvptx-kernel");
 
+    // M4.2：__restrict__ 指针形参 → noalias。
+    apply_param_noalias(fn, fn_type, r->source_corresp.decl_position);
+
     // 函数体：entry block + 参数 alloca + 语句翻译。
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
     KernelContext kc(ctx, module);
@@ -1307,18 +1373,77 @@ llvm::Function* build_kernel(
     return fn;
 }
 
+// M3.2：__constant__ 变量 → addrspace(4) 全局。
+// 用 ExternalLinkage + 原名：常量内存是模块级符号，运行时按名（cuModuleGetGlobal）
+// 解析，故名字不加前缀、对外可见。
+llvm::GlobalVariable* emit_constant_global(a_variable_ptr v, llvm::Module& module,
+                                           llvm::LLVMContext& ctx) {
+    const char* vname = v->source_corresp.name;
+    if (vname == nullptr) {
+        fail("__constant__ 变量无源实体名", v->source_corresp.decl_position);
+    }
+    llvm::Type* ty = map_type(v->type, ctx);
+    // isConstant=false：避免 LLVM 把 load 折叠成 initializer（0）。
+    // 语义上 __constant__ 只读，但设备侧需真实 load（运行时经
+    // coolMemcpyToSymbol 填充），故此处按可变全局发射。
+    return new llvm::GlobalVariable(module, ty, /*isConstant=*/false,
+                                    llvm::GlobalValue::ExternalLinkage,
+                                    llvm::Constant::getNullValue(ty), vname,
+                                    /*InsertBefore=*/nullptr, llvm::GlobalValue::NotThreadLocal,
+                                    /*AddressSpace=*/4);
+}
+
+// M4.1：__device__ 变量 → addrspace(1) 全局（含静态初始化器）。
+// 与 __constant__ 一致：ExternalLinkage + 原名；isConstant=false（设备侧可读写，
+// 且避免 LLVM 把 load 折叠成 initializer）。
+llvm::GlobalVariable* emit_device_global(a_variable_ptr v, llvm::Module& module,
+                                         llvm::LLVMContext& ctx) {
+    const char* vname = v->source_corresp.name;
+    if (vname == nullptr) {
+        fail("__device__ 变量无源实体名", v->source_corresp.decl_position);
+    }
+    llvm::Type* ty = map_type(v->type, ctx);
+    // 静态初始化器：CUDA 允许 __device__ 变量编译期初始化（如 `= 7`）。
+    // initk_static 时 initializer.constant 即初值；其余（无初值/零初始化）用零。
+    llvm::Constant* init = llvm::Constant::getNullValue(ty);
+    if (v->init_kind == initk_static) {
+        init = translate_constant(v->initializer.constant, ctx);
+    }
+    return new llvm::GlobalVariable(module, ty, /*isConstant=*/false,
+                                    llvm::GlobalValue::ExternalLinkage, init, vname,
+                                    /*InsertBefore=*/nullptr, llvm::GlobalValue::NotThreadLocal,
+                                    /*AddressSpace=*/1);
+}
+
+// 文件作用域变量：__shared__ 报错（CUDA 不允许）；__constant__ / __device__ 发射全局。
+// 结果填入两张表，供内核翻译解析变量引用。
+void emit_file_scope_globals(
+    a_scope_ptr file_scope, llvm::Module& module, llvm::LLVMContext& ctx,
+    std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>* constant_globals,
+    std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>* device_globals) {
+    for (a_variable_ptr v = file_scope->variables; v != nullptr; v = v->next) {
+        an_attribute_ptr attrs = v->source_corresp.attributes;
+        if (has_attribute(attrs, kCoolSharedAttributeName)) {
+            fail("__shared__ 变量不能声明在文件作用域（仅允许内核内）",
+                 v->source_corresp.decl_position);
+        }
+        if (has_attribute(attrs, kCoolConstantAttributeName)) {
+            (*constant_globals)[v] = emit_constant_global(v, module, ctx);
+            continue;
+        }
+        if (has_attribute(attrs, kCoolDeviceAttributeName)) {
+            (*device_globals)[v] = emit_device_global(v, module, ctx);
+        }
+    }
+}
+
 }  // namespace
 
-bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std::string* ptx_out,
-                      std::string* err_out) {
-    if (ptx_out == nullptr) {
-        if (err_out != nullptr) {
-            *err_out = "内部错误：ptx_out 为空";
-        }
-        return false;
-    }
-    ptx_out->clear();
-
+// 从 EDG IL 构建 LLVM 模块并序列化为 IR 文本（M1.2.2 起的内核翻译主体）。
+// 抽成独立函数供两条对外路径复用：emit_ir_from_il（IR 层校验，M4.2 起）
+// 与 emit_ptx_from_il（IR → PTX）。成功返回 true 并写 *ir_out。
+static bool build_ir_from_il(const std::string& cil_path, std::string* ir_out,
+                             std::string* err_out) {
     FILE* il_file = nullptr;
     a_scope_ptr file_scope = read_file_scope(cil_path, &il_file, err_out);
     if (file_scope == nullptr) {
@@ -1332,56 +1457,10 @@ bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std
 
     unsigned kernel_count = 0;
     try {
-        // 文件作用域变量：__shared__ 报错（CUDA 不允许）；__constant__ 发射 addrspace(4) 全局；
-        // __device__ 发射 addrspace(1) 全局（M4.1）。
+        // 文件作用域变量：__shared__ 报错；__constant__ / __device__ 发射全局。
         std::unordered_map<a_variable_ptr, llvm::GlobalVariable*> constant_globals;
         std::unordered_map<a_variable_ptr, llvm::GlobalVariable*> device_globals;
-        for (a_variable_ptr v = file_scope->variables; v != nullptr; v = v->next) {
-            if (has_attribute(v->source_corresp.attributes, kCoolSharedAttributeName)) {
-                fail("__shared__ 变量不能声明在文件作用域（仅允许内核内）",
-                     v->source_corresp.decl_position);
-            }
-            if (has_attribute(v->source_corresp.attributes, kCoolConstantAttributeName)) {
-                // __constant__ 变量 → addrspace(4) 全局（M3.2）。
-                // 用 ExternalLinkage + 原名：常量内存是模块级符号，运行时按名
-                // （cuModuleGetGlobal）解析，故名字不加前缀、对外可见。
-                const char* vname = v->source_corresp.name;
-                if (vname == nullptr) {
-                    fail("__constant__ 变量无源实体名", v->source_corresp.decl_position);
-                }
-                llvm::Type* ty = map_type(v->type, ctx);
-                // isConstant=false：避免 LLVM 把 load 折叠成 initializer（0）。
-                // 语义上 __constant__ 只读，但设备侧需真实 load（运行时经
-                // coolMemcpyToSymbol 填充），故此处按可变全局发射。
-                llvm::GlobalVariable* gv = new llvm::GlobalVariable(
-                    module, ty, /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
-                    llvm::Constant::getNullValue(ty), vname, /*InsertBefore=*/nullptr,
-                    llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/4);
-                constant_globals[v] = gv;
-                continue;
-            }
-            if (has_attribute(v->source_corresp.attributes, kCoolDeviceAttributeName)) {
-                // __device__ 变量 → addrspace(1) 全局（M4.1）。
-                // 与 __constant__ 一致：ExternalLinkage + 原名（模块级符号，运行时按名解析），
-                // isConstant=false（设备侧可读写，且避免 LLVM 把 load 折叠成 initializer）。
-                const char* vname = v->source_corresp.name;
-                if (vname == nullptr) {
-                    fail("__device__ 变量无源实体名", v->source_corresp.decl_position);
-                }
-                llvm::Type* ty = map_type(v->type, ctx);
-                // 静态初始化器：CUDA 允许 __device__ 变量编译期初始化（如 `= 7`）。
-                // initk_static 时 initializer.constant 即初值；其余（无初值/零初始化）用零。
-                llvm::Constant* init = llvm::Constant::getNullValue(ty);
-                if (v->init_kind == initk_static) {
-                    init = translate_constant(v->initializer.constant, ctx);
-                }
-                llvm::GlobalVariable* gv = new llvm::GlobalVariable(
-                    module, ty, /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage, init,
-                    vname, /*InsertBefore=*/nullptr, llvm::GlobalValue::NotThreadLocal,
-                    /*AddressSpace=*/1);
-                device_globals[v] = gv;
-            }
-        }
+        emit_file_scope_globals(file_scope, module, ctx, &constant_globals, &device_globals);
         for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
             if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
                 continue;  // 非内核（设备函数等）一期跳过。
@@ -1405,12 +1484,38 @@ bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std
         return false;
     }
 
-    // 序列化为 LLVM IR 文本，复用 M1.1 的 emit_ptx（IR 文本 → PTX）。
-    std::string ir_text;
-    llvm::raw_string_ostream os(ir_text);
+    // 序列化为 LLVM IR 文本（供 emit_ir_from_il 直接输出，或交 emit_ptx 继续降级）。
+    llvm::raw_string_ostream os(*ir_out);
     module.print(os, nullptr);
     os.flush();
+    return true;
+}
 
+bool emit_ir_from_il(const std::string& cil_path, std::string* ir_out, std::string* err_out) {
+    if (ir_out == nullptr) {
+        if (err_out != nullptr) {
+            *err_out = "内部错误：ir_out 为空";
+        }
+        return false;
+    }
+    ir_out->clear();
+    return build_ir_from_il(cil_path, ir_out, err_out);
+}
+
+bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std::string* ptx_out,
+                      std::string* err_out) {
+    if (ptx_out == nullptr) {
+        if (err_out != nullptr) {
+            *err_out = "内部错误：ptx_out 为空";
+        }
+        return false;
+    }
+    ptx_out->clear();
+
+    std::string ir_text;
+    if (!build_ir_from_il(cil_path, &ir_text, err_out)) {
+        return false;
+    }
     return emit_ptx(ir_text, opts, ptx_out, err_out);
 }
 

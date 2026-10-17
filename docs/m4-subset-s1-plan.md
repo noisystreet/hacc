@@ -1,6 +1,6 @@
 # M4 方案：子集 S1（原子 / `__threadfence` / 设备全局 `__device__` / `__restrict__`）
 
-> 状态：**进行中**（2026-10）。M4.0 / M4.1 已完成；M4.2–M4.6 规划中。本文为 M4 的**实施方案**，落地后逐节回写「已完成」。
+> 状态：**进行中**（2026-10）。M4.0 / M4.1 / M4.2 已完成；M4.3–M4.6 规划中。本文为 M4 的**实施方案**，落地后逐节回写「已完成」。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围 S1）、§10（里程碑 M4）。
 > 前置：M3 已完成（子集 S0 全部落地，见 [m3-subset-s0-plan.md](m3-subset-s0-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围 S1）、
@@ -131,7 +131,7 @@ OK   IL contains 'kind: unrecognized' entries
 **风险**：`__device__` 变量的**主机侧可见性**——CUDA 中 `__device__` 变量主机侧不可直接访问
 （需 `cudaMemcpyFromSymbol`）。M4.1 一期**只做设备侧**，主机侧符号访问延后（见 §6 待确认）。
 
-### 3.3 M4.2 `__restrict__`（纯设备侧）
+### 3.3 M4.2 `__restrict__`（纯设备侧）——✅ 已完成
 
 **设备侧**（`il_to_llvm`）：
 
@@ -141,6 +141,19 @@ OK   IL contains 'kind: unrecognized' entries
    （建议 fail loud，与「未覆盖构造一律 fail loud」一致）。
 
 **验证**：golden PTX 校验参数带 `noalias`（IR 层校验更直接，可加 IR 片段单测）。
+
+> **已完成（M4.2）**：`il_to_llvm.cpp` 新增 `kCoolRestrictAttributeName` → `apply_param_noalias`
+> 给对应参数加 `llvm::Attribute::NoAlias`。EDG 的属性位置有**两条路径**（`param-type.attributes`
+> 用于 `int * __restrict__ a`；合成 `tk_typeref`/`for_type_attributes` 节点的
+> `source_corresp.attributes` 用于 `int __restrict__ v`），故 `param_has_restrict` 两路都查；
+> 非指针形参带 `__restrict__` → fail loud（带源位置）。
+> 为在 IR 层可校验，新增 `emit_ir_from_il` API 与 `coolicc --emit=llvm-ir`（PTX 层看不到 `noalias`）；
+> `emit_ptx_from_il` 与它共用抽出的 `build_ir_from_il`（同时拆出 `emit_file_scope_globals`
+> 以控制圈复杂度）。
+> 验证：`tests/golden/e2e/restrict_param.cu` → IR 含
+> `define ptx_kernel void @axpy(ptr noalias %0, ptr noalias %1)`；`--emit=ptx` 仍产出
+> `.visible .entry axpy`；`diag_restrict_non_pointer.cu` 报错且带行号；e2e 在 RTX 4060 上跑通
+> （`restrict OK`）。`make check` 81/81 全绿。
 
 **风险**：`noalias` 是**优化提示**，不影响正确性；但若前端误判（如把非指针标 `noalias`）可能引入
 错误优化——故**严格限定仅指针参数**。

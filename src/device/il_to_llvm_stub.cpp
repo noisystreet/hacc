@@ -16,4 +16,15 @@ bool emit_ptx_from_il(const std::string& /*cil_path*/, const NvptxOptions& /*opt
     return false;
 }
 
+bool emit_ir_from_il(const std::string& /*cil_path*/, std::string* ir_out, std::string* err_out) {
+    if (ir_out != nullptr) {
+        ir_out->clear();
+    }
+    if (err_out != nullptr) {
+        *err_out =
+            "本构建未启用 EDG IL → LLVM IR 翻译（需 -DHACC_WITH_EDG=ON 且 -DHACC_WITH_LLVM=ON）";
+    }
+    return false;
+}
+
 }  // namespace hacc::device

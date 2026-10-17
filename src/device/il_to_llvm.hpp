@@ -28,6 +28,14 @@ namespace hacc::device {
 bool emit_ptx_from_il(const std::string& cil_path, const NvptxOptions& opts, std::string* ptx_out,
                       std::string* err_out);
 
+// 把 EDG 二进制 IL（.cil）翻译为 LLVM IR 文本（不继续降级到 PTX）。
+//
+// M4.2 起提供：属性降级（noalias 等）在 IR 层可见，PTX 层不可见，
+// 故 golden 校验需要 IR 层输出。emit_ptx_from_il 内部复用同一条翻译路径。
+//
+// 成功返回 true 并写入 *ir_out；失败返回 false 并写入 *err_out。
+bool emit_ir_from_il(const std::string& cil_path, std::string* ir_out, std::string* err_out);
+
 }  // namespace hacc::device
 
 #endif  // HACC_DEVICE_IL_TO_LLVM_HPP

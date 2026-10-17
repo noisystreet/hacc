@@ -25,6 +25,7 @@ constexpr const char* kUsage =
     "用法: coolicc [选项] [input]\n"
     "  --emit=ptx      发射 PTX（M1.1；输入为 LLVM IR 文本）\n"
     "  --emit=il-list  读回 EDG 二进制 IL（.cil），列出 file scope 的 routine（M1.2.1）\n"
+    "  --emit=llvm-ir  --from-il 时输出 LLVM IR 文本而非 PTX（M4.2；用于属性降级的 IR 层校验）\n"
     "  --from-il       输入为 EDG 二进制 IL（.cil），先翻译为 LLVM IR 再发射（M1.2.2）\n"
     "  -arch=sm_XX     目标架构（默认 sm_80，见 B1）\n"
     "  -o <file>       输出文件（默认 stdout）\n"
@@ -66,9 +67,11 @@ bool handle_immediate_option(const char* a) {
 
 // 解析 --emit=<mode>。合法返回 true 并写 *emit_out；非法打印错误并返回 false。
 bool parse_emit_mode(const char* mode, std::string* emit_out) {
-    // 一期支持 ptx（M1.1）与 il-list（M1.2.1）；cubin 属后续阶段（M6）。
-    if (std::strcmp(mode, "ptx") != 0 && std::strcmp(mode, "il-list") != 0) {
-        std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx / il-list）\n", mode);
+    // 一期支持 ptx（M1.1）/ il-list（M1.2.1）/ llvm-ir（M4.2，IR 层校验）；cubin 属后续阶段（M6）。
+    if (std::strcmp(mode, "ptx") != 0 && std::strcmp(mode, "il-list") != 0 &&
+        std::strcmp(mode, "llvm-ir") != 0) {
+        std::fprintf(stderr, "coolicc: 暂不支持 --emit=%s（一期仅 ptx / il-list / llvm-ir）\n",
+                     mode);
         return false;
     }
     *emit_out = mode;
@@ -162,6 +165,21 @@ int run_from_il(const Options& o) {
     return write_output(ptx, o.output_path) ? 0 : 1;
 }
 
+// M4.2：--emit=llvm-ir --from-il 输出 LLVM IR 文本（属性降级在 IR 层可见）。
+int run_from_il_ir(const Options& o) {
+    if (o.input_path.empty()) {
+        std::fprintf(stderr, "coolicc: --emit=llvm-ir 需要 --from-il 与 .cil 输入\n");
+        return 2;
+    }
+    std::string ir;
+    std::string err;
+    if (!hacc::device::emit_ir_from_il(o.input_path, &ir, &err)) {
+        std::fprintf(stderr, "coolicc: IL → LLVM IR 失败: %s\n", err.c_str());
+        return 1;
+    }
+    return write_output(ir, o.output_path) ? 0 : 1;
+}
+
 // M1.1：从文件/stdin 读入 LLVM IR 文本并发射 PTX。
 int run_emit_ptx(const Options& o) {
     std::string ir;
@@ -196,6 +214,9 @@ int main(int argc, char** argv) {
 
     if (o.emit == "il-list") {
         return run_il_list(o);
+    }
+    if (o.emit == "llvm-ir") {
+        return run_from_il_ir(o);
     }
     if (o.from_il) {
         return run_from_il(o);

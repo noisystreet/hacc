@@ -333,6 +333,45 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_il_to_ptx_dev_global)
         endif()
 
+        # M4.2 golden：__restrict__ 指针形参 → LLVM noalias（IR 层校验；PTX 层不可见）。
+        # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_rs_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_restrict_param.cil")
+            set(_rs_ll "${CMAKE_CURRENT_BINARY_DIR}/e2e_restrict_param.ll")
+            set(_rs_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_restrict_param.ptx")
+            add_test(NAME golden_frontend_restrict_param
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_rs_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/restrict_param.cu")
+            # IR 层：两个指针形参都带 noalias（M4.2 的核心校验点）。
+            add_test(NAME golden_device_ir_restrict_param
+                COMMAND coolicc --from-il --emit=llvm-ir -o "${_rs_ll}" "${_rs_cil}")
+            set_tests_properties(golden_device_ir_restrict_param PROPERTIES
+                DEPENDS golden_frontend_restrict_param)
+            add_test(NAME golden_device_ir_restrict_param_noalias
+                COMMAND grep -qE "define ptx_kernel void @axpy\\(ptr noalias %[0-9]+, ptr noalias %[0-9]+\\)"
+                        "${_rs_ll}")
+            set_tests_properties(golden_device_ir_restrict_param_noalias PROPERTIES
+                DEPENDS golden_device_ir_restrict_param)
+            # PTX 层回归：__restrict__ 不改变 PTX 语义（仍应产出内核入口）。
+            add_test(NAME golden_device_il_to_ptx_restrict_param
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_rs_ptx}" "${_rs_cil}")
+            set_tests_properties(golden_device_il_to_ptx_restrict_param PROPERTIES
+                DEPENDS golden_frontend_restrict_param)
+            add_test(NAME golden_device_il_to_ptx_restrict_param_entry
+                COMMAND grep -qE "\\.visible \\.entry axpy" "${_rs_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_restrict_param_entry PROPERTIES
+                DEPENDS golden_device_il_to_ptx_restrict_param)
+            # 诊断：__restrict__ 用于非指针形参 → 报错且带源位置（第 7 行）。
+            add_test(NAME diag_restrict_non_pointer
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_position.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_restrict_non_pointer.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" "7")
+        endif()
+
         # M3.4 诊断质量：翻译错误消息带源位置（"文件:行: 成因"）。
         # 用脚本捕获 stderr 并校验 ":<行号>: " 前缀（错误在 stderr，PASS_REGULAR_EXPRESSION 只匹配 stdout）。
         if(HACC_COOLRUNTIME_INCLUDE)
@@ -440,6 +479,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_dev_global_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "devGlobal OK")
+
+        # M4.2 e2e：__restrict__ 指针形参编译 + 运行 + 结果校验（语义不变）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_rs_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_restrict_param_run")
+        add_test(NAME e2e_hacc_restrict_param_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/restrict_param.cu"
+                    -o "${_e2e_rs_run_exe}")
+        add_test(NAME e2e_hacc_restrict_param_run
+            COMMAND "${_e2e_rs_run_exe}")
+        set_tests_properties(e2e_hacc_restrict_param_run PROPERTIES
+            DEPENDS e2e_hacc_restrict_param_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "restrict OK")
 
         # 内建变量 + __syncthreads 的端到端（需 COOLRuntime 头）。
         if(HACC_COOLRUNTIME_INCLUDE)
