@@ -345,8 +345,13 @@ local 的指针区分与地址空间传播」。
 3. ~~**coolrt 侧内建声明由谁改**：`device_builtins.h` 新增原子/`__threadfence` 声明，
    属跨项目改动，需与 coolrt 维护者对齐。~~ **已完成**：`cool_restrict` / `__threadfence*` /
    原子内建三笔声明已在 coolruntime 落地并推送。
-4. **`__device__` 变量的主机侧访问**：是否需 `coolMemcpyFromSymbol` 类 API（类似 M3.2 的
-   `coolMemcpyToSymbol`）？一期是否延后？**（仍待定）**
+4. **`__device__` 变量的主机侧访问**：**coolrt 侧已就绪**——`coolMemcpyFromSymbol`
+   （对齐 `cudaMemcpyFromSymbol`）已加入 coolruntime，与 `coolMemcpyToSymbol` 对称。
+   剩余的活全在 **hacc 侧**：主机桩目前只给 `__constant__` 生成 `coolSymbolDesc`
+   （`stub_gen.cpp` 的 `constant_symbols`），`__device__` 变量没有描述符，且
+   `launch_rewrite.cpp` 未改写 `cudaMemcpyFromSymbol` / `cudaGetSymbolAddress`。
+   PTX 侧无阻塞：`__device__` 变量已是 `.visible .global`，运行时可按名取到。
+   **（待定：一期是否补 hacc 侧这条路径）**
 5. ~~**原子内建的类型覆盖范围**：一期覆盖哪些类型（`int` / `unsigned` / `float` / `unsigned long long`）？~~
    **已定**：一期覆盖 `int` / `unsigned int` / `float`（`atomicMin`/`atomicMax` 按符号重载区分）；
    `unsigned long long`、`double`、`atomicInc`/`atomicDec` 留待后续（后两者语义特殊，见 §3.5 注 2）。
