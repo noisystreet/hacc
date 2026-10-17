@@ -83,6 +83,8 @@ build/coolicc --emit=ptx -arch=sm_80 tests/golden/device/empty_kernel.ll
 | [ADR 0003](docs/adr/0003-host-stub-fatbin-registration.md) | 主机桩 + 内嵌映像注册，`<<<>>>` → `coolLaunchKernel` |
 | [ADR 0004](docs/adr/0004-cuda-cpp-subset-scope.md) | CUDA C++ 子集范围与分期 |
 | [ADR 0005](docs/adr/0005-licensing-and-edg-distribution.md) | 许可证与 EDG 分发策略 |
+| [ADR 0006](docs/adr/0006-il-to-llvm-translation-route.md) | IL → LLVM IR 的翻译路线：链接 EDG 库内存遍历 |
+| [ADR 0007](docs/adr/0007-module-granularity-per-tu.md) | 模块粒度为编译单元（修订 ADR 0003，修复设备全局不跨 kernel 共享） |
 
 ## 计划的目录结构
 

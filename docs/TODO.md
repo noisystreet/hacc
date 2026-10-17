@@ -185,6 +185,7 @@
       严重度**高**：跨 kernel 状态**静默失效**，不报错。M4.1 起存在，M4.4 e2e 发现。
       当前绕过：单 kernel 内完成，或状态改放设备内存。修复需把 module 从 kernel 粒度上移到
       编译单元粒度（连带简化 `haccMemcpyToSymbolAll` 的 fan-out、消除 PTX 映像重复 N 份）。
+      **决策见 [ADR 0007](adr/0007-module-granularity-per-tu.md)（Proposed，待批准）**；
       **建议优先于 M4.6**：用户一旦写多 kernel 程序即会撞上，且故障无提示。
 
 ---

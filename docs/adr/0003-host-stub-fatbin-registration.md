@@ -4,6 +4,13 @@
 
 Accepted（已拍板）
 
+> **部分修订**：[ADR 0007](0007-module-granularity-per-tu.md) 把「每个 `__global__` 各生成一份内嵌映像 +
+> 各自惰性 `coolModuleLoadData`」改为「模块粒度 = 编译单元，一次载入」。原因是原方案让每个内核持有
+> 独立的 module 实例，导致设备全局变量不跨内核共享（见 [known-issues KI-1](../known-issues.md)）。
+> **本文其余决策继续有效**：主机桩、惰性注册、`<<<>>>` 改写、零 coolrt 改动、保留纯编译模式。
+> 下文中「对每个 `__global__` 生成…内嵌映像字节数组 + 惰性解析（`coolModuleLoadData`）」一句，
+> 以 ADR 0007 为准。
+
 ## Context
 
 coolrt 的启动接口是 **Driver 风格**的：

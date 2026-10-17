@@ -87,6 +87,9 @@ M4.4 的 e2e（`tests/golden/e2e/atomics.cu`）即采用后者，并在文件头
 
 ### 修复方向（未实施，待排期）
 
+> **决策已记录**：[ADR 0007](adr/0007-module-granularity-per-tu.md)（Proposed）把模块粒度定为
+> 编译单元，一次载入。批准后按该 ADR 的「实施步骤」执行，本条即关闭。
+
 1. 把「模块」从 kernel 维度**上移到编译单元维度**：同一份 PTX 只载入一次，
    `KernelRegistration` 只保留 `name` + `kernel` 槽位，`module`/`once` 提到单元级。
 2. 首启时一次 `coolModuleLoadData`，随后对每个 kernel 只做 `coolModuleGetFunction`。
