@@ -491,6 +491,41 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             endforeach()
         endif()
 
+        # M4.4 golden：原子内建 → LLVM atomicrmw / cmpxchg → atom.global.*。
+        # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_at_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_atomics.cil")
+            set(_at_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_atomics.ptx")
+            add_test(NAME golden_frontend_atomics
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_at_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/atomics.cu")
+            add_test(NAME golden_device_il_to_ptx_atomics
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_at_ptx}" "${_at_cil}")
+            set_tests_properties(golden_device_il_to_ptx_atomics PROPERTIES
+                DEPENDS golden_frontend_atomics)
+            # 每条原子指令单独断言，避免「命中一个即通过」。
+            # 有符号/无符号 min/max 必须是不同的 PTX 类型，故 .s32 与 .u32 都查。
+            foreach(_at_pat
+                    "atom\\.global\\.add\\.u32"
+                    "atom\\.global\\.add\\.f32"
+                    "atom\\.global\\.exch\\.b32"
+                    "atom\\.global\\.min\\.s32"
+                    "atom\\.global\\.max\\.s32"
+                    "atom\\.global\\.min\\.u32"
+                    "atom\\.global\\.max\\.u32"
+                    "atom\\.global\\.cas\\.b32")
+                string(REPLACE "\\\\" "" _at_name "${_at_pat}")
+                string(REPLACE "." "_" _at_name "${_at_name}")
+                add_test(NAME golden_device_il_to_ptx_atomics_${_at_name}
+                    COMMAND grep -qE "${_at_pat}" "${_at_ptx}")
+                set_tests_properties(golden_device_il_to_ptx_atomics_${_at_name}
+                    PROPERTIES DEPENDS golden_device_il_to_ptx_atomics)
+            endforeach()
+        endif()
+
         # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_dg_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global_run")
@@ -516,6 +551,20 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_threadfence_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "threadfence OK")
+
+        # M4.4 e2e：原子内建编译 + 运行 + 竞争正确性校验。
+        # 128 线程并发打同一地址，断言累加值恰好等于线程数（非原子实现会丢更新）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_at_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_atomics_run")
+        add_test(NAME e2e_hacc_atomics_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/atomics.cu"
+                    -o "${_e2e_at_run_exe}")
+        add_test(NAME e2e_hacc_atomics_run
+            COMMAND "${_e2e_at_run_exe}")
+        set_tests_properties(e2e_hacc_atomics_run PROPERTIES
+            DEPENDS e2e_hacc_atomics_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "atomics OK")
 
         # M4.2 e2e：__restrict__ 指针形参编译 + 运行 + 结果校验（语义不变）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。

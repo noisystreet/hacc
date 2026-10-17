@@ -186,7 +186,21 @@ void __threadfence_system(void);
 > （三条独立断言，避免「命中一个即通过」）；e2e 在 RTX 4060 上跑通（`threadfence OK: out[0]=2`）。
 > 跨块可见性语义需多 block 竞争窗口，难以稳定复现，故强断言放在 PTX 层。`make check` 88/88 全绿。
 
+
 ### 3.5 M4.4 原子内建（跨项目）
+
+> **已完成（M4.4）**：coolrt `device_builtins.h`（`__COOLCC__` 下）声明 `atomicAdd/Sub/Exch/Min/Max/CAS`
+> 的 int / unsigned int / float 重载；`il_to_llvm.cpp` 新增 `try_translate_atomic_call`（表驱动
+> `kAtomicBuiltins`），映射到 LLVM 原生 `atomicrmw` / `cmpxchg`（monotonic）。顺带修了两个前置缺口：
+> ① `enk_constant` 的 `ck_address`（`&g`）此前不支持，现经 `translate_address_constant` 委托其
+> 表示表达式；② `translate_constant` 恒把整型常量当无符号转换，导致负字面量（`-5`）溢出报错，
+> 现按常量类型符号性传 `is_signed`。验证：golden 逐条断言 8 种 `atom.global.*`（含 `.s32` / `.u32`
+> 区分）；e2e 单块 128 线程并发打同一地址，`atomics OK: sum=128 min=-5 umax=7 fsum=192 cas=42 sub=97`。
+> `make check` 100/100 全绿。
+>
+> **实施中发现的既有缺陷（未修，非 M4.4 范围）**：host 桩按 kernel 各生成一份 module
+> （`stub_gen.cpp` 的 `__cool_module_<name>`），设备全局因此**每 kernel 一份副本**，跨 kernel
+> 不可见。e2e 因此改为单 kernel 完成；该限制应单独排期（见 §6）。
 
 **coolrt 侧**（`device_builtins.h`，仅 `__COOLCC__` 下）：声明原子内建（按 CUDA 签名，覆盖常用类型）：
 
@@ -202,24 +216,47 @@ int   atomicCAS(int* address, int compare, int val);
 /* …按需扩展 unsigned / unsigned long long / float 等重载 */
 ```
 
-**设备侧**（`il_to_llvm`）：`try_translate_builtin_call` 扩展名字映射到 NVVM atomic intrinsic：
+**设备侧**（`il_to_llvm`）：~~`try_translate_builtin_call` 扩展名字映射到 NVVM atomic intrinsic~~
 
-| 内建 | NVVM intrinsic（示意） |
-| --- | --- |
-| `atomicAdd` | `llvm.nvvm.atomic.add.*` |
-| `atomicSub` | `llvm.nvvm.atomic.sub.*` |
-| `atomicExch` | `llvm.nvvm.atomic.exch.*` |
-| `atomicMin` / `atomicMax` | `llvm.nvvm.atomic.min.*` / `.max.*` |
-| `atomicCAS` | `llvm.nvvm.atomic.cas.*` |
+> **⚠️ 实施前 spike 已推翻原方案（2026-10，以 `/usr/lib/llvm-19/bin/llc -mcpu=sm_80` 实测为准）。**
+>
+> **结论：全部走 LLVM 原生 `atomicrmw` / `cmpxchg`，不用 NVVM atomic intrinsic。**
+>
+> 理由：`IntrinsicsNVVM.td:1337-1345` 的 `PTXAtomicWithScope2/3` 只生成 `_cta` / `_sys`
+> **两种作用域，没有 `_gpu`**；而 CUDA `atomicAdd` 默认是 device scope（`.global`）。用 NVVM
+> intrinsic 只能选 cta（作用域过强）或 sys（过强且更慢），**表达不出正确语义**；原生
+> `atomicrmw` 用 `seq_cst` 就落到 `.global`，天然对应。
+>
+> 实测映射（IR → PTX）：
+>
+> | CUDA 内建 | LLVM IR | 生成 PTX |
+> | --- | --- | --- |
+> | `atomicAdd(int*, int)` | `atomicrmw add` on `ptr addrspace(1)` | `atom.global.add.u32` |
+> | `atomicAdd(float*, float)` | `atomicrmw fadd` | `atom.global.add.f32` |
+> | `atomicSub` | `atomicrmw sub` | `atom.global.add.u32`（取负） |
+> | `atomicExch` | `atomicrmw xchg` | `atom.global.exch.b32` |
+> | `atomicMin/Max`（有符号） | `atomicrmw min/max` | `.min.s32` / `.max.s32` |
+> | `atomicMin/Max`（无符号） | `atomicrmw umin/umax` | `.min.u32` / `.max.u32` |
+> | `atomicCAS` | `cmpxchg` | `atom.global.cas.b32` |
+>
+> **附带结论（解除 M4.5 依赖）**：hacc 目前把 `tk_pointer` 一律映射到 generic
+> `addrspace(0)`（`il_to_llvm.cpp:326`）。实测 generic 指针上的原子仍可合法降级为无状态空间
+> 的 `atom.add.u32`（语义正确，运行时按通用地址解析 global/shared）。故 **M4.4 不阻塞于 M4.5**；
+> M4.5 落地后可把 atomic 收紧为 `.global` / `.shared` 以获取更优代码——那是优化，非正确性。
+>
+> **两个需单独对待的点**：
+> 1. `cmpxchg` 返回 `{T, i1}`，而 CUDA `atomicCAS` 只返回旧值 → 取 `extractvalue 0`。
+> 2. `atomicInc` / `atomicDec` **无法用 `atomicrmw` 表达**（CUDA 语义是 `old >= val ? 0 : old+1`
+>    的环形计数，不是减法），需专用 `llvm.nvvm.atomic.load.inc.32` / `.dec.32`
+>    （`IntrinsicsNVVM.td:1320-1324`，PTX `atom.global.inc.u32`）。本期内建清单未列 inc/dec，
+>    **M4.4 一期不做**，需要时单独加。
 
-> **注意**：NVVM atomic intrinsic 的**具体名字与签名**需以 LLVM 19 的 NVPTX 后端为准
-> （`llvm.nvvm.atomic.*` 系列，含地址空间/类型后缀）。**M4.4 开工前需 spike 确认**
-> （见 §6 待确认 1）。
 
 **验证**：golden PTX 校验 `atom.global.add.*` 等；e2e 用 `atomicAdd` 做直方图/归约。
 
-**风险**：原子 intrinsic 的**类型/地址空间后缀**较多，映射表需逐类型核对；建议先做 `int` / `float`
-的 `atomicAdd`，再扩展。
+**风险**：~~原子 intrinsic 的**类型/地址空间后缀**较多，映射表需逐类型核对~~ —— 改走 `atomicrmw` 后
+该风险消失（无 intrinsic 后缀问题）；真实风险转为**类型分派**：有符号/无符号 `min/max` 必须选对
+`min`/`max` vs `umin`/`umax`，否则语义错（会静默产生错误结果，故 e2e 必须覆盖负值场景）。
 
 ### 3.6 M4.5 指针地址空间传播（依赖 M4.1）
 

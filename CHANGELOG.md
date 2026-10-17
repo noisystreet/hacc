@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **M4.4 原子内建**：`atomicAdd` / `atomicSub` / `atomicExch` / `atomicMin` / `atomicMax` / `atomicCAS`
+  （int / unsigned int / float 重载，coolrt `device_builtins.h` 在 `__COOLCC__` 下声明）映射到
+  LLVM 原生 `atomicrmw` / `cmpxchg`，落到 PTX `atom.global.<op>.<type>`。
+  **不用** `llvm.nvvm.atomic.*`：那套只有 `.cta` / `.sys` 作用域，表达不出 CUDA 默认的 device
+  scope（实测见 `docs/m4-subset-s1-plan.md` §3.5）。有符号/无符号 min/max 分别落 `.s32` / `.u32`。
+  新增 golden 测试（逐条断言 8 种 `atom.global.*`）与 e2e（128 线程竞争同一地址，
+  `atomics OK: sum=128 ...`）。
+
 ### Changed
 
 - **`coolfe++` 不再默认产出文本 IL**（`*.il.txt`）。此前 `resolve_outputs` 无条件把 `want_text`
