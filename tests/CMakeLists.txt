@@ -226,6 +226,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_il_to_ptx_vector_type)
         endif()
 
+        # __device__ 变量主机侧访问 e2e：cudaMemcpyFromSymbol 读回 / GetSymbolAddress 取址 /
+        # cudaMemcpyToSymbol 写回。无可用 CUDA 设备时样例返回 77，按 SKIP 处理。
+        set(_e2e_dsr_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_device_symbol_readback_run")
+        add_test(NAME e2e_hacc_device_symbol_readback_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/device_symbol_readback.cu"
+                    -o "${_e2e_dsr_exe}")
+        add_test(NAME e2e_hacc_device_symbol_readback
+            COMMAND "${_e2e_dsr_exe}")
+        set_tests_properties(e2e_hacc_device_symbol_readback PROPERTIES
+            DEPENDS e2e_hacc_device_symbol_readback_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "deviceSymbolReadback OK")
+
         # M3.0 e2e：向量类型（float4）编译 + 运行 + 结果校验（out == 110）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_vt_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_vector_type_run")

@@ -32,3 +32,6 @@ compile_commands.json
 .vscode/
 *.swp
 .DS_Store
+
+# ctest 临时产物（勿提交）
+Testing/

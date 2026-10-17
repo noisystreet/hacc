@@ -345,13 +345,15 @@ local 的指针区分与地址空间传播」。
 3. ~~**coolrt 侧内建声明由谁改**：`device_builtins.h` 新增原子/`__threadfence` 声明，
    属跨项目改动，需与 coolrt 维护者对齐。~~ **已完成**：`cool_restrict` / `__threadfence*` /
    原子内建三笔声明已在 coolruntime 落地并推送。
-4. **`__device__` 变量的主机侧访问**：**coolrt 侧已就绪**——`coolMemcpyFromSymbol`
-   （对齐 `cudaMemcpyFromSymbol`）已加入 coolruntime，与 `coolMemcpyToSymbol` 对称。
-   剩余的活全在 **hacc 侧**：主机桩目前只给 `__constant__` 生成 `coolSymbolDesc`
-   （`stub_gen.cpp` 的 `constant_symbols`），`__device__` 变量没有描述符，且
-   `launch_rewrite.cpp` 未改写 `cudaMemcpyFromSymbol` / `cudaGetSymbolAddress`。
-   PTX 侧无阻塞：`__device__` 变量已是 `.visible .global`，运行时可按名取到。
-   **（待定：一期是否补 hacc 侧这条路径）**
+4. ~~**`__device__` 变量的主机侧访问**~~ **已完成**：coolrt 侧 `coolMemcpyFromSymbol`
+   （对齐 `cudaMemcpyFromSymbol`）已加入 coolruntime；hacc 侧已闭环——
+   - 预扫描同时收集 `__device__` 变量（`__device__` 函数被排除，避免误当符号）；
+   - 主机桩为每个 `__device__` 变量生成 `coolSymbolDesc` + To/From/取址三个包装；
+   - `launch_rewrite` 改写 `cudaMemcpyToSymbol` / `cudaMemcpyFromSymbol` /
+     `cudaGetSymbolAddress` 为对应包装调用，未知符号保持原样；
+   - device 源里这些调用替换为 `coolSuccess`（有返回值，可出现在表达式位置）。
+   回归：`tests/golden/e2e/device_symbol_readback.cu`（真机）+
+   `test_launch_rewrite` 用例 19–23 + `test_stub_gen` 用例 3c。
 5. ~~**原子内建的类型覆盖范围**：一期覆盖哪些类型（`int` / `unsigned` / `float` / `unsigned long long`）？~~
    **已定**：一期覆盖 `int` / `unsigned int` / `float`（`atomicMin`/`atomicMax` 按符号重载区分）；
    `unsigned long long`、`double`、`atomicInc`/`atomicDec` 留待后续（后两者语义特殊，见 §3.5 注 2）。

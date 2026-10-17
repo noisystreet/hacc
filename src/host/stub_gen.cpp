@@ -29,7 +29,8 @@ std::string render_byte_array(const std::string& bytes) {
 
 std::string generate_stubs(const std::vector<std::string>& kernel_names,
                            const std::string& ptx_text,
-                           const std::vector<ConstantSymbol>& constant_symbols) {
+                           const std::vector<SymbolSpec>& constant_symbols,
+                           const std::vector<SymbolSpec>& device_symbols) {
     if (kernel_names.empty()) {
         return std::string();
     }
@@ -61,13 +62,35 @@ std::string generate_stubs(const std::vector<std::string>& kernel_names,
     out += "static const std::size_t __cool_all_mods_count = 1;\n";
     // M3.2：__constant__ 符号描述符 + 拷贝包装（module 由 haccMemcpyToSymbolAll 运行时填充）。
     // 包装函数遍历所有模块，确保每个模块里的该符号都被填充。
-    for (const ConstantSymbol& sym : constant_symbols) {
+    for (const SymbolSpec& sym : constant_symbols) {
         out += "static coolSymbolDesc __cool_sym_" + sym.name + " = {nullptr, \"" + sym.name +
                "\", " + std::to_string(sym.size) + "};\n";
         out += "static inline coolError_t __cool_memcpy_to_symbol_" + sym.name +
                "(const void* src, std::size_t count, std::size_t offset) {\n";
         out += "    return hacc::haccMemcpyToSymbolAll(__cool_all_mods, __cool_all_mods_count,\n";
         out += "        &__cool_sym_" + sym.name + ", src, count, offset);\n";
+        out += "}\n";
+    }
+    // __device__ 变量：主机侧可读可写（对齐 cudart 对 __device__ 符号的语义）。
+    // 描述符与 __constant__ 同构；size 由 coolrt 后端经 cuModuleGetGlobal 解析。
+    // 三个包装分别服务 cudaMemcpyToSymbol / cudaMemcpyFromSymbol / cudaGetSymbolAddress。
+    for (const SymbolSpec& sym : device_symbols) {
+        out += "static coolSymbolDesc __cool_sym_" + sym.name + " = {nullptr, \"" + sym.name +
+               "\", " + std::to_string(sym.size) + "};\n";
+        out += "static inline coolError_t __cool_memcpy_to_symbol_" + sym.name +
+               "(const void* src, std::size_t count, std::size_t offset) {\n";
+        out += "    return hacc::haccMemcpyToSymbolAll(__cool_all_mods, __cool_all_mods_count,\n";
+        out += "        &__cool_sym_" + sym.name + ", src, count, offset);\n";
+        out += "}\n";
+        out += "static inline coolError_t __cool_memcpy_from_symbol_" + sym.name +
+               "(void* dst, std::size_t count, std::size_t offset) {\n";
+        out += "    return hacc::haccMemcpyFromSymbolAll(__cool_all_mods, __cool_all_mods_count,\n";
+        out += "        &__cool_sym_" + sym.name + ", dst, count, offset);\n";
+        out += "}\n";
+        out += "static inline coolError_t __cool_get_symbol_address_" + sym.name +
+               "(void** devPtr) {\n";
+        out += "    return hacc::haccGetSymbolAddressAll(__cool_all_mods, __cool_all_mods_count,\n";
+        out += "        &__cool_sym_" + sym.name + ", devPtr);\n";
         out += "}\n";
     }
     return out;

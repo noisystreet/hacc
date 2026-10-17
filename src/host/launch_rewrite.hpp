@@ -35,6 +35,10 @@ struct RewriteResult {
     // 文件作用域 `__constant__` 变量名（去重、按首次出现顺序，M3.2）。
     // 供生成符号描述符与改写 cudaMemcpyToSymbol。
     std::vector<std::string> constant_names;
+    // 文件作用域 `__device__` 变量名（去重、按首次出现顺序）。
+    // 供生成符号描述符与改写 cudaMemcpyFromSymbol / cudaGetSymbolAddress。
+    // 注意：`__device__` 函数（`__device__ void f(...)`）不在此列。
+    std::vector<std::string> device_names;
 };
 
 // 对 CUDA C++ 子集源码做改写（`<<<>>>` → haccLaunch；按选项处理 `__global__` 函数体）。

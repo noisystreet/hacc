@@ -155,6 +155,84 @@ int main() {
         }
     }
 
+    // 19) 设备符号收集：__device__ 变量进 device_names，__device__ 函数不进。
+    {
+        const std::string src =
+            "__device__ int g_counter = 7;\n"
+            "__device__ int twice(int v) { return v * 2; }\n"
+            "__constant__ float c_scale = 2.0f;\n";
+        auto r = hacc::host::rewrite_source(src);
+        expect(r.ok, "符号收集 用例应成功");
+        expect(r.device_names.size() == 1, "device_names 应只含变量 g_counter");
+        if (r.device_names.size() == 1) {
+            expect_eq(r.device_names[0], "g_counter", "device_names[0]");
+        }
+        expect(r.constant_names.size() == 1, "constant_names 应含 c_scale");
+        if (r.constant_names.size() == 1) {
+            expect_eq(r.constant_names[0], "c_scale", "constant_names[0]");
+        }
+    }
+
+    // 20) cudaMemcpyFromSymbol / cudaGetSymbolAddress 改写为 hacc 包装调用。
+    {
+        const std::string src =
+            "__device__ int g_counter = 7;\n"
+            "void f() {\n"
+            "  int h = 0;\n"
+            "  void* p = 0;\n"
+            "  cudaMemcpyFromSymbol(&h, g_counter, sizeof(int), 0, coolMemcpyDeviceToHost);\n"
+            "  cudaGetSymbolAddress(&p, g_counter);\n"
+            "}\n";
+        std::string out = rewrite_ok(src, "From/取址 改写");
+        expect(out.find("__cool_memcpy_from_symbol_g_counter(&h, sizeof(int), 0)") !=
+                   std::string::npos,
+               "FromSymbol 应改写为包装调用（含 dst/count/offset）");
+        expect(out.find("__cool_get_symbol_address_g_counter(&p)") != std::string::npos,
+               "GetSymbolAddress 应改写为包装调用");
+        expect(out.find("cudaMemcpyFromSymbol") == std::string::npos,
+               "改写后不应残留 cudaMemcpyFromSymbol");
+        expect(out.find("cudaGetSymbolAddress") == std::string::npos,
+               "改写后不应残留 cudaGetSymbolAddress");
+    }
+
+    // 21) 未知符号不改写（避免误伤用户自定义同名 API 或外部符号）。
+    {
+        const std::string src =
+            "__device__ int g_counter = 7;\n"
+            "void f() { int h = 0; cudaMemcpyFromSymbol(&h, other_sym, 4, 0, "
+            "coolMemcpyDeviceToHost); }\n";
+        std::string out = rewrite_ok(src, "未知符号不改写");
+        expect(out.find("cudaMemcpyFromSymbol") != std::string::npos, "未知符号应保持原样");
+    }
+
+    // 22) device 源（keep_global_bodies）：符号 API 替换为 coolSuccess 以保表达式合法。
+    {
+        const std::string src =
+            "__device__ int g_counter = 7;\n"
+            "void f() {\n"
+            "  int h = 0;\n"
+            "  coolError_t a = cudaMemcpyFromSymbol(&h, g_counter, 4, 0, coolMemcpyDeviceToHost);\n"
+            "  coolError_t b = cudaMemcpyToSymbol(g_counter, &h, 4, 0, coolMemcpyHostToDevice);\n"
+            "}\n";
+        std::string out = rewrite_device_ok(src, "device 源符号 API");
+        expect(out.find("coolError_t a = coolSuccess") != std::string::npos,
+               "device 源 FromSymbol 应替换为 coolSuccess（可用作初值）");
+        expect(out.find("coolError_t b = coolSuccess") != std::string::npos,
+               "device 源 ToSymbol 应替换为 coolSuccess（可用作初值）");
+    }
+
+    // 23) __device__ 变量也可走 cudaMemcpyToSymbol（主机侧写入）。
+    {
+        const std::string src =
+            "__device__ int g_counter = 7;\n"
+            "void f() { int nv = 3; cudaMemcpyToSymbol(g_counter, &nv, sizeof(int), 0, "
+            "coolMemcpyHostToDevice); }\n";
+        std::string out = rewrite_ok(src, "device 变量 ToSymbol");
+        expect(
+            out.find("__cool_memcpy_to_symbol_g_counter(&nv, sizeof(int), 0)") != std::string::npos,
+            "__device__ 变量的 ToSymbol 也应改写为包装调用");
+    }
+
     if (g_failures == 0) {
         std::printf("test_launch_rewrite: OK\n");
         return 0;

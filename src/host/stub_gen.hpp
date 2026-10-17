@@ -26,21 +26,25 @@
 
 namespace hacc::host {
 
-// 文件作用域 __constant__ 符号（M3.2）：名字 + 字节数。
+// 文件作用域设备符号：名字 + 字节数。
 // 由 driver 从设备侧翻译结果收集，供生成 coolSymbolDesc。
-struct ConstantSymbol {
-    std::string name;  // 设备侧符号名（如 "c_scale"）
+// 既用于 __constant__（M3.2），也用于 __device__ 变量（主机侧读取）。
+struct SymbolSpec {
+    std::string name;  // 设备侧符号名（如 "c_scale" / "g_counter"）
     std::size_t size;  // 字节数
 };
 
 // 生成桩代码。kernel_names 为内核名（去重、按序）；ptx_text 为设备映像（PTX 文本）。
-// constant_symbols 为文件作用域 __constant__ 符号（名字 + 字节数，M3.2），
-// 为每个符号生成 coolSymbolDesc 定义（供 haccMemcpyToSymbol 使用）。
+// constant_symbols 为文件作用域 __constant__ 符号，生成 coolSymbolDesc + To 拷贝包装
+// （M3.2，供 cudaMemcpyToSymbol）。
+// device_symbols 为文件作用域 __device__ 变量，生成 coolSymbolDesc + To/From 拷贝包装
+// 与取址包装（供 cudaMemcpyToSymbol / cudaMemcpyFromSymbol / cudaGetSymbolAddress）。
 // 返回可直接拼入 host 源的 C++ 代码片段（含末尾换行）。
 // 空 kernel_names 返回空串（无内核则无桩）。
 std::string generate_stubs(const std::vector<std::string>& kernel_names,
                            const std::string& ptx_text,
-                           const std::vector<ConstantSymbol>& constant_symbols = {});
+                           const std::vector<SymbolSpec>& constant_symbols = {},
+                           const std::vector<SymbolSpec>& device_symbols = {});
 
 // 把任意字节串渲染为 C 字节数组字面量（`{ 0x.., ... }`，每行 12 字节）。
 // 供 generate_stubs 复用，也便于单测。

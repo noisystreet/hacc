@@ -115,6 +115,64 @@ inline coolError_t haccMemcpyToSymbolAll(const ModuleRegistration* const* mods, 
     return first_err;
 }
 
+// 设备符号 → 主机/设备（__device__ 变量主机侧读取）。
+// 与 haccMemcpyToSymbolAll 对称：同样的 fan-out 语义，方向固定 D2H。
+inline coolError_t haccMemcpyFromSymbolAll(const ModuleRegistration* const* mods, std::size_t count,
+                                           coolSymbolDesc* desc, void* dst, std::size_t bytes,
+                                           std::size_t offset) {
+    if (desc == nullptr) {
+        return coolErrorInvalidValue;
+    }
+    coolError_t first_err = coolSuccess;
+    for (std::size_t i = 0; i < count; ++i) {
+        const ModuleRegistration* mod = mods[i];
+        if (mod == nullptr) {
+            continue;
+        }
+        const coolModule_t module = resolve_module(*mod);  // 确保模块已载入
+        if (module == nullptr) {
+            continue;  // 该模块未成功载入：跳过
+        }
+        desc->module = module;
+        // 注意参数顺序与 ToSymbol 相反：FromSymbol 是 (dst, symbol, ...)。
+        const coolError_t err =
+            coolMemcpyFromSymbol(dst, desc, bytes, offset, coolMemcpyDeviceToHost);
+        if (err != coolSuccess && first_err == coolSuccess) {
+            first_err = err;
+        }
+    }
+    return first_err;
+}
+
+// 取设备符号地址（__device__ / __constant__ 均可）：先确保模块载入，再取地址。
+// 与上面两个包装一致地遍历模块注册表；成功时写入 *devPtr。
+inline coolError_t haccGetSymbolAddressAll(const ModuleRegistration* const* mods, std::size_t count,
+                                           coolSymbolDesc* desc, void** devPtr) {
+    if (desc == nullptr || devPtr == nullptr) {
+        return coolErrorInvalidValue;
+    }
+    coolError_t first_err = coolSuccess;
+    for (std::size_t i = 0; i < count; ++i) {
+        const ModuleRegistration* mod = mods[i];
+        if (mod == nullptr) {
+            continue;
+        }
+        const coolModule_t module = resolve_module(*mod);
+        if (module == nullptr) {
+            continue;
+        }
+        desc->module = module;
+        const coolError_t err = coolGetSymbolAddress(devPtr, desc);
+        if (err == coolSuccess) {
+            return coolSuccess;
+        }
+        if (first_err == coolSuccess) {
+            first_err = err;
+        }
+    }
+    return first_err;
+}
+
 // grid/block 归一化为 dim3：接受 int（如 (n+255)/256）或 dim3。
 inline dim3 to_dim3(unsigned int v) {
     return dim3{v, 1, 1};

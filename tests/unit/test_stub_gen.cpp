@@ -102,7 +102,7 @@ int main() {
 
     // 3b) M3.2：__constant__ 符号描述符 + 拷贝包装。
     {
-        std::vector<hacc::host::ConstantSymbol> syms = {{"c_scale", 4}};
+        std::vector<hacc::host::SymbolSpec> syms = {{"c_scale", 4}};
         std::string s = generate_stubs({"foo"}, "PTX", syms);
         expect_contains(s, "static coolSymbolDesc __cool_sym_c_scale = {nullptr, \"c_scale\", 4};",
                         "常量符号 描述符");
@@ -111,6 +111,30 @@ int main() {
         expect_contains(s, "hacc::haccMemcpyToSymbolAll(__cool_all_mods, __cool_all_mods_count,",
                         "常量符号 遍历注册表");
         expect_contains(s, "&__cool_sym_c_scale, src, count, offset);", "常量符号 传描述符");
+        // __constant__ 只出 To 方向的包装；From/取址仅对 __device__ 生成。
+        expect_count(s, "__cool_memcpy_from_symbol_c_scale", 0, "常量符号 不应有 From 包装");
+        expect_count(s, "__cool_get_symbol_address_c_scale", 0, "常量符号 不应有取址包装");
+    }
+
+    // 3c) __device__ 变量：描述符 + To/From/取址三件套包装。
+    {
+        std::vector<hacc::host::SymbolSpec> devs = {{"g_counter", 4}};
+        std::string s = generate_stubs({"foo"}, "PTX", {}, devs);
+        expect_contains(s,
+                        "static coolSymbolDesc __cool_sym_g_counter = {nullptr, \"g_counter\", 4};",
+                        "设备变量 描述符");
+        expect_contains(s, "static inline coolError_t __cool_memcpy_to_symbol_g_counter(",
+                        "设备变量 To 包装");
+        expect_contains(s, "static inline coolError_t __cool_memcpy_from_symbol_g_counter(",
+                        "设备变量 From 包装");
+        expect_contains(s, "static inline coolError_t __cool_get_symbol_address_g_counter(",
+                        "设备变量 取址包装");
+        expect_contains(s, "hacc::haccMemcpyFromSymbolAll(__cool_all_mods, __cool_all_mods_count,",
+                        "设备变量 From 遍历注册表");
+        expect_contains(s, "hacc::haccGetSymbolAddressAll(__cool_all_mods, __cool_all_mods_count,",
+                        "设备变量 取址遍历注册表");
+        expect_contains(s, "&__cool_sym_g_counter, dst, count, offset);", "设备变量 From 传描述符");
+        expect_contains(s, "&__cool_sym_g_counter, devPtr);", "设备变量 取址传描述符");
     }
 
     // 4) 多内核：各自独立命名，互不串扰；且**共用**一份映像与模块（ADR 0007）。
