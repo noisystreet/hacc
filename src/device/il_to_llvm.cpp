@@ -636,11 +636,10 @@ llvm::Value* translate_compare(an_expr_operator_kind op, an_expr_node_ptr expr, 
     return emit_compare(op, is_fp, is_unsigned, va, vb, kc);
 }
 
-// 标量间转换：整型↔整型、整型↔浮点、浮点↔浮点。
-llvm::Value* translate_cast(an_expr_node_ptr expr, KernelContext& kc) {
-    an_expr_node_ptr operand = expr->variant.operation.operands;
-    llvm::Value* v = translate_expr(operand, kc);
-    llvm::Type* dst = map_type(expr->type, kc.ctx);
+// 标量转换的指令选择：整↔整、整↔浮、浮↔浮。
+// 与 translate_cast 的「是否真需要转换」判断分开，避免策略与指令选择堆在一个函数里。
+llvm::Value* emit_scalar_cast(llvm::Value* v, llvm::Type* dst, bool src_unsigned, bool dst_unsigned,
+                              KernelContext& kc) {
     llvm::Type* src = v->getType();
     if (src == dst) {
         return v;
@@ -651,14 +650,30 @@ llvm::Value* translate_cast(an_expr_node_ptr expr, KernelContext& kc) {
         return kc.builder.CreateFPCast(v, dst);
     }
     if (!src_fp && !dst_fp) {
-        return kc.builder.CreateIntCast(v, dst, /*isSigned=*/!is_unsigned_integer(operand->type));
+        return kc.builder.CreateIntCast(v, dst, /*isSigned=*/!src_unsigned);
     }
     if (!src_fp && dst_fp) {
-        return is_unsigned_integer(operand->type) ? kc.builder.CreateUIToFP(v, dst)
-                                                  : kc.builder.CreateSIToFP(v, dst);
+        return src_unsigned ? kc.builder.CreateUIToFP(v, dst) : kc.builder.CreateSIToFP(v, dst);
     }
-    return is_unsigned_integer(expr->type) ? kc.builder.CreateFPToUI(v, dst)
-                                           : kc.builder.CreateFPToSI(v, dst);
+    return dst_unsigned ? kc.builder.CreateFPToUI(v, dst) : kc.builder.CreateFPToSI(v, dst);
+}
+
+// 标量间转换入口。
+llvm::Value* translate_cast(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr operand = expr->variant.operation.operands;
+    llvm::Value* v = translate_expr(operand, kc);
+    llvm::Type* dst = map_type(expr->type, kc.ctx);
+    // `(void)expr`：C++ 的「丢弃值」转换，不是真正的类型转换。
+    // 没有任何 LLVM 指令能表达「转成 void」（`trunc i32 %x to void` 不是合法 IR），
+    // 其语义只是**求值操作数并丢弃结果**——操作数的副作用（函数调用、原子操作）
+    // 必须保留，这一点已由上面的 translate_expr 完成。因此这里不生成任何指令，
+    // 直接返回操作数的值：void 表达式的值不可能被使用（不能赋值、不能作实参），
+    // 唯一去处是被丢弃的表达式语句（见 translate_statement 的 stmk_expr）。
+    if (dst->isVoidTy()) {
+        return v;
+    }
+    return emit_scalar_cast(v, dst, is_unsigned_integer(operand->type),
+                            is_unsigned_integer(expr->type), kc);
 }
 
 // 一元运算：取负 / 取反 / 取址 / 解引用。

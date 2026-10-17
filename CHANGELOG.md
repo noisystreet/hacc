@@ -16,6 +16,13 @@
 
 ### Changed
 
+- **`(void)expr` 不再导致编译失败**：此前设备端 `translate_cast` 把「转成 void」当成真实类型转换，
+  生成非法 IR（`trunc i32 %2 to void` / `sext ptr %2 to void`），LLVM 报
+  "void type only allowed for function results"。现按 C++ 语义处理为「丢弃值、保留副作用」：
+  不生成任何转换指令，操作数照常求值（`(void)atomicAdd(&g, 1)` 的原子操作仍会执行）。
+  `(void)x;` 是抑制未使用变量警告的常见写法，修复前用户很容易撞上。
+  新增 e2e 回归（`tests/golden/e2e/void_cast.cu`，同时断言值不被破坏与副作用不丢失）。
+
 - **`coolfe++` 不再默认产出文本 IL**（`*.il.txt`）。此前 `resolve_outputs` 无条件把 `want_text`
   置为 true，且默认名经 `stem_of()` 丢掉了输入文件的目录前缀——结果是**每次**编译都往调用者
   当前目录丢一个 0.5–1.6 MB 的 IL 文本（`hacc` 驱动每次编译都会调 `coolfe++`，仓库根目录曾因此

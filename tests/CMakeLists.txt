@@ -580,6 +580,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "devGlobalShared OK")
 
+        # `(void)expr`（丢弃值转换）：回归用例。曾生成非法 IR（`... to void`）导致编译失败。
+        # 断言同时覆盖「值不被破坏」与「副作用不丢失」（(void)atomicAdd 必须真的执行）。
+        set(_e2e_vc_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_void_cast_run")
+        add_test(NAME e2e_hacc_void_cast_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/void_cast.cu"
+                    -o "${_e2e_vc_run_exe}")
+        add_test(NAME e2e_hacc_void_cast_run
+            COMMAND "${_e2e_vc_run_exe}")
+        set_tests_properties(e2e_hacc_void_cast_run PROPERTIES
+            DEPENDS e2e_hacc_void_cast_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "voidCast OK")
+
         # M4.2 e2e：__restrict__ 指针形参编译 + 运行 + 结果校验（语义不变）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_rs_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_restrict_param_run")

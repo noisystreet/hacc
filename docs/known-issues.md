@@ -107,3 +107,63 @@ M4.4 的 e2e（`tests/golden/e2e/atomics.cu`）即采用后者，并在文件头
 1. 新增 e2e：`writer`（128 线程 `atomicAdd`）→ `reader`（拷出），断言 `out[0] == 128`。
 2. 新增 e2e：两个 kernel 各自写**不同**的设备全局，交叉读取，断言互不覆盖、互不丢失。
 3. 回归：既有 `make check` 全绿；顺带确认生成的主机桩中 PTX 只出现一次（体积不再随 kernel 数膨胀）。
+
+---
+
+## KI-2 `(void)expr` 生成非法 IR，编译直接失败
+
+- **状态**：✅ **已修**（设备端 `translate_cast` 按「丢弃值」语义处理）
+- **发现于**：写 KI-1 的回归测试时，用 `(void)out;` 抑制未使用参数
+- **影响面**：设备侧所有 `(void)expr` 表达式语句；与主机路径无关
+- **严重度**：中（编译期**失败**，非静默错误；但 `(void)x;` 是极常见的抑制警告写法，
+  用户很容易撞上，且报错信息是 LLVM 的 verifier 文案，看不出是哪种写法不被支持）
+
+### 症状
+
+```cuda
+__global__ void k(int* out) {
+    int v = 1;
+    (void)v;        // 或 (void)out;
+    out[0] = v;
+}
+```
+
+编译失败：
+
+```text
+coolicc: <hacc-ir>:12:19: error: void type only allowed for function results
+  trunc i32 %2 to void          // 操作数为指针时是 `sext ptr %2 to void`
+```
+
+### 根因
+
+`src/device/il_to_llvm.cpp` 的 `translate_cast` 把 `(void)e` 当成**真实类型转换**处理：
+取 `map_type(expr->type)` 得到 `void` 类型，再走标量转换分支 `CreateIntCast(v, dst)`，
+于是生成「转成 void 的转换指令」——而 LLVM IR 中不存在这种指令。
+
+C++ 语义上 `(void)e` 根本不是转换，而是**丢弃值**：求值 `e`、保留其副作用、丢弃结果。
+
+### 修复
+
+`translate_cast` 在算出目标类型后先判 `dst->isVoidTy()`：命中则不生成任何指令，
+直接返回操作数的值。操作数已由前面的 `translate_expr` 求值，故副作用（函数调用、
+原子操作）完整保留；而 void 表达式的值不可能被使用（不能赋值、不能作实参），
+唯一去处是被丢弃的表达式语句（`translate_statement` 的 `stmk_expr`）。
+
+### 验收
+
+`tests/golden/e2e/void_cast.cu`（`e2e_hacc_void_cast_run`），三条断言：
+
+1. 指针 → void（原 `sext ptr` 形态）可编译；
+2. 整型 → void 后值不被破坏（`out[0] == 7`）；
+3. **`(void)atomicAdd(&g_n, 3)` 的副作用必须保留**（`g_n == 3`）——这条专门防「整条语句
+   被忽略」式的错误修复。
+
+实测：撤掉修复重新构建 → 用例在构建阶段失败于 `sext ptr %2 to void`；
+恢复修复 → `voidCast OK: v=7 g_n=3`。
+
+### 备注（未覆盖）
+
+`(void)` 只覆盖「显式转 void 的表达式语句」。同类但未处理的情况：`(void)0;` 这类
+纯字面量（应由同一路径覆盖，未单独测试）、以及放弃返回值直接用语句调用（`f();`，
+本就合法，未受影响）。
