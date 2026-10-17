@@ -200,7 +200,7 @@ void __threadfence_system(void);
 >
 > **实施中发现的既有缺陷（未修，非 M4.4 范围）**：host 桩按 kernel 各生成一份 module
 > （`stub_gen.cpp` 的 `__cool_module_<name>`），设备全局因此**每 kernel 一份副本**，跨 kernel
-> 不可见。e2e 因此改为单 kernel 完成；该限制应单独排期（见 §6）。
+> 不可见。e2e 因此改为单 kernel 完成。详见 [known-issues.md](known-issues.md) **KI-1**。
 
 **coolrt 侧**（`device_builtins.h`，仅 `__COOLCC__` 下）：声明原子内建（按 CUDA 签名，覆盖常用类型）：
 
@@ -300,7 +300,8 @@ local 的指针区分与地址空间传播」。
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
 | **coolrt 无原子 / `__threadfence` 声明** | 高（M4.3/M4.4 阻塞） | 跨项目对齐（TODO B4 同类）；先做无依赖项 |
-| **NVVM atomic intrinsic 名字/签名不确定** | 高（M4.4 核心） | 开工前 spike（手写 IR + `coolicc --emit=ptx` 验证） |
+| ~~**NVVM atomic intrinsic 名字/签名不确定**~~ | ~~高（M4.4 核心）~~ | **已消解**：spike 后改走原生 `atomicrmw`/`cmpxchg`，不存在 intrinsic 后缀问题（§3.5） |
+| **设备全局不跨 kernel 共享**（每 kernel 一份 module 实例） | 高（跨 kernel 状态静默失效） | 见 [known-issues.md](known-issues.md) KI-1；当前以单 kernel / 设备内存绕过，待排期修复 |
 | `__device__` 变量主机侧可见性 | 中 | 一期只做设备侧；主机侧符号访问延后 |
 | 指针地址空间传播范围不清 | 中 | 先做最小可用（M4.1），完整传播按需 |
 | `noalias` 误标引入错误优化 | 中 | 严格限定仅指针参数 |
@@ -308,13 +309,19 @@ local 的指针区分与地址空间传播」。
 
 ## 6. 待确认（实施前）
 
-1. **NVVM atomic intrinsic 的具体名字与签名**（LLVM 19 NVPTX）——需 spike 确认（M4.4 前置）。
+1. ~~**NVVM atomic intrinsic 的具体名字与签名**（LLVM 19 NVPTX）——需 spike 确认（M4.4 前置）。~~
+   **已闭环**：spike 结论是该路线不成立（只有 `.cta`/`.sys`，无 `.gpu`），M4.4 改走原生
+   `atomicrmw`/`cmpxchg`。实测映射见 §3.5。
 2. **指针地址空间传播的范围**：一期是否需完整区分 global/shared/local 指针，还是仅 M4.1 的最小可用？
 3. **coolrt 侧内建声明由谁改**：`device_builtins.h` 新增原子/`__threadfence` 声明，
    属跨项目改动，需与 coolrt 维护者对齐。（`__restrict__` 宏已由 M4.0 补齐，不再待确认。）
 4. **`__device__` 变量的主机侧访问**：是否需 `coolMemcpyFromSymbol` 类 API（类似 M3.2 的
    `coolMemcpyToSymbol`）？一期是否延后？
-5. **原子内建的类型覆盖范围**：一期覆盖哪些类型（`int` / `unsigned` / `float` / `unsigned long long`）？
+5. ~~**原子内建的类型覆盖范围**：一期覆盖哪些类型（`int` / `unsigned` / `float` / `unsigned long long`）？~~
+   **已定**：一期覆盖 `int` / `unsigned int` / `float`（`atomicMin`/`atomicMax` 按符号重载区分）；
+   `unsigned long long`、`double`、`atomicInc`/`atomicDec` 留待后续（后两者语义特殊，见 §3.5 注 2）。
+6. **设备全局跨 kernel 共享**尚未实现（每 kernel 一份 module 实例）——既定缺陷，需单独排期；
+   详见 [known-issues.md](known-issues.md) KI-1。
 
 ## 7. 与 M3 / S0 的衔接
 

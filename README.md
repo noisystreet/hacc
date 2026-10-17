@@ -77,6 +77,7 @@ build/coolicc --emit=ptx -arch=sm_80 tests/golden/device/empty_kernel.ll
 | [m2-host-path-plan.md](docs/m2-host-path-plan.md) | M2 方案：主机路径（桩 + 内嵌映像 + `<<<>>>` 改写） |
 | [m3-subset-s0-plan.md](docs/m3-subset-s0-plan.md) | M3 方案：子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`） |
 | [edg-il-reference.md](docs/edg-il-reference.md) | EDG IL 表项速查（字段级参考，依据 `il_def.h`） |
+| [known-issues.md](docs/known-issues.md) | **已知缺陷登记**（症状 / 复现 / 根因 / 绕过 / 修复方向），当前含跨 kernel 设备全局失效 |
 | [ADR 0001](docs/adr/0001-edg-cpp-frontend.md) | 前端采用开源 EDG C++ 前端 |
 | [ADR 0002](docs/adr/0002-llvm-nvptx-device-backend.md) | 设备端走 LLVM IR → NVPTX → PTX |
 | [ADR 0003](docs/adr/0003-host-stub-fatbin-registration.md) | 主机桩 + 内嵌映像注册，`<<<>>>` → `coolLaunchKernel` |
