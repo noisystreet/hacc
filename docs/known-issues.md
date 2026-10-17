@@ -10,10 +10,11 @@
 
 ## KI-1 设备全局变量不跨 kernel 共享（每个 kernel 各载入一份 module）
 
-- **状态**：未修（Open）
+- **状态**：✅ **已修**（ADR 0007，模块粒度改为编译单元）
 - **发现于**：M4.4 原子内建 e2e（提交 `699083f` 之前的一次中间版本）
 - **影响面**：M4.1 起的所有设备全局变量（`__device__`），与原子/栅栏无关
 - **严重度**：高（跨 kernel 的设备全局状态**静默失效**，不报错、不崩溃）
+- **回归测试**：`tests/golden/e2e/dev_global_shared.cu`（`e2e_hacc_dev_global_shared_run`）
 
 ### 症状
 
@@ -85,10 +86,11 @@ std::call_once(*reg.once, [&reg] {
 或把逻辑收进单个 kernel，用块内 `__syncthreads()` 同步。
 M4.4 的 e2e（`tests/golden/e2e/atomics.cu`）即采用后者，并在文件头注明了原因。
 
-### 修复方向（未实施，待排期）
+### 修复方向（已实施）
 
-> **决策已记录**：[ADR 0007](adr/0007-module-granularity-per-tu.md)（Proposed）把模块粒度定为
-> 编译单元，一次载入。批准后按该 ADR 的「实施步骤」执行，本条即关闭。
+> **已按 [ADR 0007](adr/0007-module-granularity-per-tu.md) 实施**：`ModuleRegistration`（每 TU 一个）
+> 持有映像/模块/once，`KernelRegistration` 只留 `name` + `owner` + 槽位 + 取函数 once；
+> PTX 只渲染一份。`haccMemcpyToSymbolAll` 的 fan-out 基数由「内核数」降为「TU 数」。
 
 1. 把「模块」从 kernel 维度**上移到编译单元维度**：同一份 PTX 只载入一次，
    `KernelRegistration` 只保留 `name` + `kernel` 槽位，`module`/`once` 提到单元级。

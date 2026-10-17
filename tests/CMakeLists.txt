@@ -566,6 +566,20 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "atomics OK")
 
+        # KI-1 / ADR 0007 e2e：设备全局**跨 kernel 共享**（模块粒度 = 编译单元）。
+        # 修复前必然失败：每个 kernel 各载入一份 module，.global 各一份副本，
+        # 后一个 kernel 读到模块初值。无可用 CUDA 设备时返回 77，按 SKIP 处理。
+        set(_e2e_dgs_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global_shared_run")
+        add_test(NAME e2e_hacc_dev_global_shared_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/dev_global_shared.cu"
+                    -o "${_e2e_dgs_run_exe}")
+        add_test(NAME e2e_hacc_dev_global_shared_run
+            COMMAND "${_e2e_dgs_run_exe}")
+        set_tests_properties(e2e_hacc_dev_global_shared_run PROPERTIES
+            DEPENDS e2e_hacc_dev_global_shared_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "devGlobalShared OK")
+
         # M4.2 e2e：__restrict__ 指针形参编译 + 运行 + 结果校验（语义不变）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_rs_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_restrict_param_run")

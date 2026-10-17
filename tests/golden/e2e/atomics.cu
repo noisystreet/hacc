@@ -12,9 +12,10 @@
 //     跨块同步不是（PTX 无 grid 级 barrier）。
 //   - 单线程确定性算子（exch/sub）用 `if (t == 0)` 隔开，避免顺序不定使断言失效。
 //
-// 注意：**不**用「前一个 kernel 写、后一个 kernel 读设备全局」的写法。当前 host
-// 桩为每个 kernel 各生成一份 module（stub_gen.cpp 的 __cool_module_<name>），
-// 设备全局因此每 kernel 一份副本，跨 kernel 不可见——这是既有实现限制，与原子无关。
+// 注意：本用例**不**依赖「前一个 kernel 写、后一个 kernel 读设备全局」。
+// 该写法原先不可用（每个 kernel 各载入一份 module，设备全局各一份副本），现已由
+// ADR 0007 修复（模块粒度 = 编译单元）；跨 kernel 共享由 dev_global_shared.cu 专门覆盖，
+// 本文件仍把竞争集中在单 kernel 内，以便断言只反映原子语义、不与共享语义纠缠。
 #include <cool/cool_runtime.h>
 
 #include <stdio.h>

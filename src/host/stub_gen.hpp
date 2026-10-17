@@ -1,15 +1,20 @@
 // M2.2b：主机桩生成器（纯文本变换，无 EDG/LLVM/GPU 依赖）。
 //
-// 为每个 `__global__` 内核生成「内嵌设备映像 + 注册描述」的 C++ 定义，
-// 供 host 源（同一 TU）引用（见 docs/m2-host-path-plan.md §3.3 / §8.3）。
+// 为**整个编译单元**生成「内嵌设备映像 + 模块注册 + 内核注册描述」的 C++ 定义，
+// 供 host 源（同一 TU）引用（见 docs/m2-host-path-plan.md §3.3 / §8.3、
+// docs/adr/0007-module-granularity-per-tu.md）。
 //
-// 生成内容（对内核 `foo`）：
-//   static const unsigned char __cool_image_foo[] = { ... };   // PTX 文本字节
+// 生成内容（ADR 0007：模块粒度 = 编译单元，PTX 只渲染/载入一次）：
+//   static const unsigned char __cool_image[] = { ... };        // PTX 文本字节（仅一份）
+//   static coolModule_t __cool_module = nullptr;
+//   static std::once_flag __cool_once_module;
+//   static const hacc::ModuleRegistration __cool_mod_reg = { ... };
+//
+// 以及每个内核 `foo` 一份（只负责取函数，不再各持一份映像/模块）：
 //   static coolKernel_t __cool_kernel_foo = nullptr;
 //   static std::once_flag __cool_once_foo;
 //   static const hacc::KernelRegistration __cool_reg_foo = {
-//       "foo", __cool_image_foo, sizeof(__cool_image_foo),
-//       &__cool_kernel_foo, &__cool_once_foo };
+//       "foo", &__cool_mod_reg, &__cool_kernel_foo, &__cool_once_foo };
 //
 // 设计为**纯函数**：输入（内核名列表 + PTX 文本）→ 输出桩代码字符串，便于独立单测。
 // 命名规则确定性：`foo` → `__cool_reg_foo`（与改写器 §3.2 一致）。

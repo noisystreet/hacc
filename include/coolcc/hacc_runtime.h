@@ -31,46 +31,65 @@
 
 namespace hacc {
 
-// 内核注册描述：名字 + 内嵌设备映像（PTX 文本字节）+ 句柄槽位。
-// 由 hacc driver 为每个 `__global__` 函数生成一个 static 实例（与 host 源同 TU）。
-struct KernelRegistration {
-    const char* name;       // 内核符号名（coolModuleGetFunction 按名取）
+// 模块注册描述：每个**编译单元**（= 一份设备映像）一个（ADR 0007）。
+// 同一份 PTX 只载入一次，故同一 TU 内所有内核共享同一个 module 实例——
+// 设备全局变量（`__device__`）因此对 TU 内所有内核可见。
+struct ModuleRegistration {
+    const char* name;       // 诊断用（产物 / TU 名）
     const void* image;      // 内嵌设备映像（PTX 文本字节）
     std::size_t imageSize;  // 映像字节数
-    coolKernel_t* slot;     // 句柄槽位（惰性解析后缓存）
-    std::once_flag* once;   // 一次性注册保护（每个注册描述一个）
-    coolModule_t* module;   // 模块句柄槽位（M3.2：__constant__ 符号解析需要）
+    coolModule_t* module;   // 模块句柄槽位（惰性载入后缓存）
+    std::once_flag* once;   // 一次性载入保护（每模块一个）
 };
 
-// 惰性解析：首次调用时 coolModuleLoadData + coolModuleGetFunction，缓存到 *slot。
+// 内核注册描述：每个 `__global__` 函数一个，指向所属编译单元的模块。
+// 由 hacc driver 为每个 `__global__` 函数生成一个 static 实例（与 host 源同 TU）。
+struct KernelRegistration {
+    const char* name;                 // 内核符号名（coolModuleGetFunction 按名取）
+    const ModuleRegistration* owner;  // 所属编译单元的模块
+    coolKernel_t* slot;               // 句柄槽位（惰性解析后缓存）
+    std::once_flag* once;             // 仅保护 GetFunction 一步（模块载入由 owner 的 once 保护）
+};
+
+// 惰性载入模块：首次调用时 coolModuleLoadData，缓存到 *module。
 // 失败返回 nullptr（不抛异常）。线程安全（once 保护）。
 //
 // 实现放头文件（inline）：本头随**生成的 host 源**一起编译，由最终 g++ 链接 coolrt；
 // hacc 自身工具链（hacc/coolfe++/coolicc）不链接 coolrt，故不能把实现放进 hacc_support。
+inline coolModule_t resolve_module(const ModuleRegistration& mod) {
+    std::call_once(*mod.once, [&mod] {
+        coolModule_t module = nullptr;
+        if (coolModuleLoadData(&module, mod.image) != coolSuccess) {
+            return;  // 载入失败：*mod.module 保持 nullptr
+        }
+        *mod.module = module;
+    });
+    return *mod.module;
+}
+
+// 惰性解析内核：先确保所属模块已载入，再 coolModuleGetFunction（缓存到 *slot）。
+// 失败返回 nullptr（不抛异常）。两层 once 使用**不同**标志，嵌套调用不会死锁。
 inline coolKernel_t resolve(const KernelRegistration& reg) {
     std::call_once(*reg.once, [&reg] {
-        coolModule_t module = nullptr;
-        if (coolModuleLoadData(&module, reg.image) != coolSuccess) {
-            return;  // 载入失败：*reg.slot 保持 nullptr
+        const coolModule_t module = resolve_module(*reg.owner);
+        if (module == nullptr) {
+            return;  // 模块未载入：*reg.slot 保持 nullptr
         }
         coolKernel_t kernel = nullptr;
         if (coolModuleGetFunction(&kernel, module, reg.name) != coolSuccess) {
             return;  // 取函数失败：*reg.slot 保持 nullptr
         }
         *reg.slot = kernel;
-        if (reg.module != nullptr) {
-            *reg.module = module;  // M3.2：保存模块句柄，供 __constant__ 符号解析
-        }
     });
     return *reg.slot;
 }
 
 // M3.2：把主机数据拷入设备符号（__constant__）。
-// 由于每个内核是独立模块（各自载入 PTX），同一 __constant__ 符号在每个模块里
-// 各有一份；故需遍历**所有**内核注册，对每个模块都做拷贝，确保任一内核读到新值。
-// regs/count 为 hacc 生成的全局注册表；desc 为符号描述符。
+// ADR 0007 之后模块粒度 = 编译单元：单 TU 只有一份模块，退化为**一次** coolMemcpyToSymbol；
+// 若将来一次链接包含多个 TU（各自 module），仍需遍历——但基数由「内核数」降为「TU 数」，
+// 不再随内核数量膨胀。mods/count 为 hacc 生成的模块注册表；desc 为符号描述符。
 // 返回首个非成功错误码（全部成功返回 coolSuccess）。
-inline coolError_t haccMemcpyToSymbolAll(const KernelRegistration* const* regs, std::size_t count,
+inline coolError_t haccMemcpyToSymbolAll(const ModuleRegistration* const* mods, std::size_t count,
                                          coolSymbolDesc* desc, const void* src, std::size_t bytes,
                                          std::size_t offset) {
     if (desc == nullptr) {
@@ -78,15 +97,15 @@ inline coolError_t haccMemcpyToSymbolAll(const KernelRegistration* const* regs, 
     }
     coolError_t first_err = coolSuccess;
     for (std::size_t i = 0; i < count; ++i) {
-        const KernelRegistration* reg = regs[i];
-        if (reg == nullptr) {
+        const ModuleRegistration* mod = mods[i];
+        if (mod == nullptr) {
             continue;
         }
-        (void)resolve(*reg);  // 确保模块已载入并填充 reg->module
-        if (reg->module == nullptr || *reg->module == nullptr) {
+        const coolModule_t module = resolve_module(*mod);  // 确保模块已载入
+        if (module == nullptr) {
             continue;  // 该模块未成功载入：跳过
         }
-        desc->module = *reg->module;
+        desc->module = module;
         const coolError_t err =
             coolMemcpyToSymbol(desc, src, bytes, offset, coolMemcpyHostToDevice);
         if (err != coolSuccess && first_err == coolSuccess) {

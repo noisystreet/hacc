@@ -181,7 +181,8 @@
 > 详细记录（症状 / 复现 / 根因 / 绕过 / 修复方向 / 验收）在
 > [known-issues.md](known-issues.md)。本处只列编号与排期诉求。
 
-- [ ] **KI-1 设备全局变量不跨 kernel 共享**（每个 kernel 各载入一份 module，`.global` 因此一份副本）。
+- [x] **KI-1 设备全局变量不跨 kernel 共享** —— ✅ 已修（[ADR 0007](adr/0007-module-granularity-per-tu.md)：
+      模块粒度改为编译单元；回归测试 `tests/golden/e2e/dev_global_shared.cu`）。
       严重度**高**：跨 kernel 状态**静默失效**，不报错。M4.1 起存在，M4.4 e2e 发现。
       当前绕过：单 kernel 内完成，或状态改放设备内存。修复需把 module 从 kernel 粒度上移到
       编译单元粒度（连带简化 `haccMemcpyToSymbolAll` 的 fan-out、消除 PTX 映像重复 N 份）。

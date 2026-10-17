@@ -36,6 +36,21 @@ void expect_contains(const std::string& hay, const std::string& needle, const ch
     }
 }
 
+// 子串出现次数断言（用于「只渲染一份」这类结构性质）。
+void expect_count(const std::string& hay, const std::string& needle, std::size_t want,
+                  const char* what) {
+    std::size_t n = 0;
+    for (std::size_t pos = hay.find(needle); pos != std::string::npos;
+         pos = hay.find(needle, pos + needle.size())) {
+        ++n;
+    }
+    if (n != want) {
+        std::fprintf(stderr, "FAIL: %s\n  期望出现 %zu 次，实际 %zu 次: [%s]\n", what, want, n,
+                     needle.c_str());
+        ++g_failures;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -58,25 +73,30 @@ int main() {
     // 2) 空内核列表 → 空串。
     expect_eq(generate_stubs({}, "ptx"), "", "空内核列表");
 
-    // 3) 单内核：命名规则 + 各字段。
+    // 3) 单内核：命名规则 + 各字段（ADR 0007：模块粒度 = 编译单元）。
     {
-        std::string s = generate_stubs({"foo"}, "PTX");
+        const std::string s = generate_stubs({"foo"}, "PTX");
         expect_contains(s, "#include <coolcc/hacc_runtime.h>", "单内核 include");
-        expect_contains(s, "static const unsigned char __cool_image_foo[] = {", "单内核 image");
+        // 模块级（每 TU 一份）：映像 / 模块句柄 / once / ModuleRegistration。
+        expect_contains(s, "static const unsigned char __cool_image[] = {", "模块 映像");
+        expect_contains(s, "static coolModule_t __cool_module = nullptr;", "模块 句柄");
+        expect_contains(s, "static std::once_flag __cool_once_module;", "模块 once");
+        expect_contains(s, "static const hacc::ModuleRegistration __cool_mod_reg = {", "模块 注册");
+        expect_contains(s, "&__cool_module, &__cool_once_module};", "模块 注册指针");
+        // 内核级：只留句柄槽位 + owner 指针，不再各持映像/模块。
         expect_contains(s, "static coolKernel_t __cool_kernel_foo = nullptr;", "单内核 slot");
         expect_contains(s, "static std::once_flag __cool_once_foo;", "单内核 once");
         expect_contains(s, "static const hacc::KernelRegistration __cool_reg_foo = {",
                         "单内核 reg");
-        expect_contains(s, "\"foo\", __cool_image_foo, sizeof(__cool_image_foo),", "单内核 name");
-        expect_contains(s, "&__cool_kernel_foo, &__cool_once_foo, &__cool_module_foo};",
-                        "单内核 指针");
+        expect_contains(s, "\"foo\", &__cool_mod_reg, &__cool_kernel_foo, &__cool_once_foo};",
+                        "单内核 指向模块");
         // PTX 文本字节（'P'=0x50, 'T'=0x54, 'X'=0x58）。
         expect_contains(s, "0x50,0x54,0x58,0x00", "单内核 PTX 字节");
-        // M3.2：全局注册表。
-        expect_contains(s, "static const hacc::KernelRegistration* const __cool_all_regs[] = {",
+        // M3.2：模块注册表。
+        expect_contains(s, "static const hacc::ModuleRegistration* const __cool_all_mods[] = {",
                         "单内核 注册表");
-        expect_contains(s, "&__cool_reg_foo,", "单内核 注册表项");
-        expect_contains(s, "static const std::size_t __cool_all_regs_count = 1;",
+        expect_contains(s, "&__cool_mod_reg,", "单内核 注册表项");
+        expect_contains(s, "static const std::size_t __cool_all_mods_count = 1;",
                         "单内核 注册表计数");
     }
 
@@ -88,18 +108,23 @@ int main() {
                         "常量符号 描述符");
         expect_contains(s, "static inline coolError_t __cool_memcpy_to_symbol_c_scale(",
                         "常量符号 包装");
-        expect_contains(s, "hacc::haccMemcpyToSymbolAll(__cool_all_regs, __cool_all_regs_count,",
+        expect_contains(s, "hacc::haccMemcpyToSymbolAll(__cool_all_mods, __cool_all_mods_count,",
                         "常量符号 遍历注册表");
         expect_contains(s, "&__cool_sym_c_scale, src, count, offset);", "常量符号 传描述符");
     }
 
-    // 4) 多内核：各自独立命名，互不串扰。
+    // 4) 多内核：各自独立命名，互不串扰；且**共用**一份映像与模块（ADR 0007）。
     {
         std::string s = generate_stubs({"a", "b"}, "P");
         expect_contains(s, "__cool_reg_a", "多内核 a");
         expect_contains(s, "__cool_reg_b", "多内核 b");
-        expect_contains(s, "\"a\", __cool_image_a", "多内核 a name");
-        expect_contains(s, "\"b\", __cool_image_b", "多内核 b name");
+        expect_contains(s, "\"a\", &__cool_mod_reg", "多内核 a owner");
+        expect_contains(s, "\"b\", &__cool_mod_reg", "多内核 b owner");
+        // 关键回归：内嵌映像只渲染一份（修复前每个内核各一份，体积随内核数膨胀）。
+        expect_count(s, "static const unsigned char __cool_image[]", 1, "多内核 映像只一份");
+        expect_count(s, "static const hacc::ModuleRegistration __cool_mod_reg", 1,
+                     "多内核 模块只一个");
+        expect_count(s, "static coolModule_t __cool_module", 1, "多内核 模块句柄只一个");
     }
 
     if (g_failures == 0) {

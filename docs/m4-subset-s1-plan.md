@@ -198,9 +198,10 @@ void __threadfence_system(void);
 > 区分）；e2e 单块 128 线程并发打同一地址，`atomics OK: sum=128 min=-5 umax=7 fsum=192 cas=42 sub=97`。
 > `make check` 100/100 全绿。
 >
-> **实施中发现的既有缺陷（未修，非 M4.4 范围）**：host 桩按 kernel 各生成一份 module
+> **实施中发现的既有缺陷（已修）**：host 桩曾按 kernel 各生成一份 module
 > （`stub_gen.cpp` 的 `__cool_module_<name>`），设备全局因此**每 kernel 一份副本**，跨 kernel
-> 不可见。e2e 因此改为单 kernel 完成。详见 [known-issues.md](known-issues.md) **KI-1**。
+> 不可见。已按 [ADR 0007](adr/0007-module-granularity-per-tu.md) 修复（模块粒度 = 编译单元），
+> 回归测试见 `tests/golden/e2e/dev_global_shared.cu`；详见 [known-issues.md](known-issues.md) **KI-1**。
 
 **coolrt 侧**（`device_builtins.h`，仅 `__COOLCC__` 下）：声明原子内建（按 CUDA 签名，覆盖常用类型）：
 

@@ -2,13 +2,12 @@
 
 ## Status
 
-Proposed（待批准，2026-10）
+Accepted（已拍板，2026-10）
 
 > 本条**修订** [ADR 0003](0003-host-stub-fatbin-registration.md) 中「对每个 `__global__` 生成内嵌映像 +
 > 各自惰性 `coolModuleLoadData`」的部分。ADR 0003 的其余决策（主机桩 + 惰性注册 + `<<<>>>` 改写 +
 > 零 coolrt 改动 + 保留纯编译模式）**全部继续有效**。
-> 批准后本条转 `Accepted`，并按下文「实施步骤」修复
-> [known-issues KI-1](../known-issues.md)。
+> 按下方「实施步骤」修复 [known-issues KI-1](../known-issues.md)。
 
 ## Context
 
@@ -131,6 +130,13 @@ Negative / trade-offs:
 4. 回归：`make check` 全绿（含 M3.2 `__constant__` 符号 e2e、M2 的 `<<<>>>` 改写用例）；
    确认生成主机桩中 PTX 只出现一次。
 5. 关闭 [known-issues KI-1](../known-issues.md)，在其条目注明修复提交。
+
+> **实施状态：已完成。** 步骤 1–5 全部落地；回归测试为
+> `tests/golden/e2e/dev_global_shared.cu`（`e2e_hacc_dev_global_shared_run`），
+> 修复前该用例三项断言全为「读到模块初值」（0），修复后为 `counter=128 a=11 b=22`。
+> 实施中一处对本文结构的细化：`KernelRegistration` 保留了一个 per-kernel `once_flag`，
+> 仅用于保护 `coolModuleGetFunction` 这一步（模块载入由 owner 的 once 保护），
+> 避免两线程首次启动同一内核时并发写句柄槽位。
 
 ## References
 
