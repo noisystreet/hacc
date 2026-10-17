@@ -36,7 +36,7 @@
 
 | CUDA 概念 | 属性名 | 签名 | 语义 / 下游消费 |
 | --- | --- | --- | --- |
-| 显式地址空间 | `cool_address_space(n)` | `(ci)` 整数常量 | 直接指定 LLVM 地址空间号；`n ∈ {0,1,3,4,5}`（param/global/shared/constant/local） |
+| 显式地址空间 | `cool_address_space(n)` | `(ci)` 整数常量 | 直接指定 LLVM 地址空间号；`n ∈ {0,1,3,4,5}`（param/global/shared/constant/local）；**M4.5 已消费** |
 
 > 与 §2 的关系：`cool_shared`/`cool_constant`/`cool_device` 是**语义化**写法，
 > `cool_address_space(n)` 是**底层**写法；二者可互相推导，`coolicc` 优先取语义化属性。

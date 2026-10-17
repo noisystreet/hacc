@@ -456,6 +456,48 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             endforeach()
         endif()
 
+        # M4.5 指针地址空间传播：cool_address_space(3) 标注的指针，其访存应落 .shared
+        # （未标注时是 generic ld/st——该用例正是锁住「标注后地址空间真的传播下去了」）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_pas_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_pointer_address_space.ptx")
+            add_test(NAME golden_pointer_address_space
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/pointer_address_space.cu"
+                        --emit=ptx -o "${_pas_ptx}" -I "${HACC_COOLRUNTIME_INCLUDE}")
+            add_test(NAME golden_pointer_address_space_shared_store
+                COMMAND grep -qE "st\\.shared\\.u32" "${_pas_ptx}")
+            set_tests_properties(golden_pointer_address_space_shared_store PROPERTIES
+                DEPENDS golden_pointer_address_space)
+            add_test(NAME golden_pointer_address_space_shared_load
+                COMMAND grep -qE "ld\\.shared\\.u32" "${_pas_ptx}")
+            set_tests_properties(golden_pointer_address_space_shared_load PROPERTIES
+                DEPENDS golden_pointer_address_space)
+            # 内核参数仍是 generic（未标注），其写应经 cvta 落成 .global——防止改动
+            # 误把「未标注」也升格成某个地址空间。
+            add_test(NAME golden_pointer_address_space_global_store
+                COMMAND grep -qE "cvta\\.to\\.global" "${_pas_ptx}")
+            set_tests_properties(golden_pointer_address_space_global_store PROPERTIES
+                DEPENDS golden_pointer_address_space)
+
+            # 运行校验：结果正确性（无设备时 SDK 约定返回 77 → SKIP）。
+            set(_pas_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_pointer_address_space_run")
+            add_test(NAME e2e_pointer_address_space_run_build
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/pointer_address_space.cu"
+                        -o "${_pas_exe}" -I "${HACC_COOLRUNTIME_INCLUDE}")
+            add_test(NAME e2e_pointer_address_space_run
+                COMMAND "${_pas_exe}")
+            set_tests_properties(e2e_pointer_address_space_run PROPERTIES
+                DEPENDS e2e_pointer_address_space_run_build
+                SKIP_RETURN_CODE 77
+                PASS_REGULAR_EXPRESSION "pointerAddressSpace OK")
+
+            # 边界用例：cool_address_space 取值非法 → fail loud（不是静默当 generic）。
+            add_test(NAME diag_address_space_invalid
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_address_space_invalid.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" "cool_address_space 取值非法")
+        endif()
+
         # M3.1 e2e：__shared__ 共享内存编译 + 运行 + 结果校验（out[i] == N-1-i）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_sr_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_shared_reduce_run")

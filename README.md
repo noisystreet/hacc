@@ -32,15 +32,15 @@ hacc 是 [coolrt](../coolruntime) 的**编译前端**，用于补上 coolrt 架�
 
 ## 状态
 
-**子集 S1 主体已落地（M4.0–M4.4、M4.6）**：设备后端（LLVM IR → PTX，M1.1）、前端
+**子集 S1 已完成（M4.0–M4.6）**：设备后端（LLVM IR → PTX，M1.1）、前端
 （`.cu` → EDG IL → LLVM IR → PTX，M1.2）、主机路径（M2：`<<<>>>` 改写、主机桩 + 内嵌 PTX
 映像 + 惰性注册、driver 编排主机编译链接，**`.cu` 一步到可执行文件**）、子集 S0（M3：
 `__shared__` / `__constant__` / 向量类型 / `dim3`）与子集 S1（M4：`__device__` 设备全局 /
-`__restrict__` / `__threadfence*` / 原子内建 / samples 与边界用例）均已打通。
+`__restrict__` / `__threadfence*` / 原子内建 / 指针地址空间传播 / samples 与边界用例）均已打通。
 真 kernel 已在本机 GPU 上跑通并校验结果。
 
-> M4.5（指针地址空间传播）**待拍板**：一期论证为可先不做（原子改走原生 `atomicrmw` 后不再
-> 依赖地址空间区分，现有 e2e 在 generic 指针下全部跑通），见
+> 指针地址空间按 `cool_address_space(n)`（0/1/3/4/5）**显式标注**传播；未标注一律 generic，
+> 不猜、不静默升格，非法取值编译期报错。见
 > [m4-subset-s1-plan.md](docs/m4-subset-s1-plan.md) §3.6。
 
 ```sh

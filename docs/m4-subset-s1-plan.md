@@ -270,9 +270,25 @@ local 的指针区分与地址空间传播」。
    GEP / load / store 自然带 `addrspace(1)`（LLVM 不透明指针下，地址空间由**指针类型**承载）。
 2. **完整传播**：若需区分「指向 shared 的指针」等，需在 `map_type` 的 `tk_pointer` 分支读取
    `cool_address_space(n)` 属性（或从被指类型推导），返回对应地址空间的 `PointerType`。
-   **一期可先不做**，视 M4.1/M4.4 的实际需要决定（见 §6 待确认 2）。
 
-**验证**：golden PTX 校验 `ld.global` / `st.global`（addrspace 1）与 `ld.shared`（addrspace 3）区分。
+**实施结果（已落地）**：
+
+- `map_type` 的 `tk_pointer` 改为 `PointerType::get(ctx, pointer_address_space(t))`。
+- `pointer_address_space(t)` 沿**被指类型**的 typeref 链找 `cool_address_space(n)`，取值
+  0/1/3/4/5 直接采用，其余 `fail loud`；未标注 → 0（generic，保持原行为）。
+- **关键实现细节（实测得出，非推测）**：`cool_address_space` 对 EDG 属**未识别属性**，其实参
+  以 `aak_raw_token` 传递（token 是字面文本 `"3"`），没有常量节点可读，故解析方式为
+  「读 token 文本 + `strtol`」。属性挂在 pointee 的 `tk_typeref(for_type_attributes)` 包装上，
+  与 clang 的 `address_space` 类型属性语义一致。
+- **与预设验证目标的偏差**：方案原写「校验 `ld.global` 与 `ld.shared` 区分」。实测发现
+  **内核指针参数（未标注）本就会被 NVPTX 后端推断**（`cvta.to.global` + `st.global`），
+  故 M4.5 的真实增量只在「**显式标注**的指针」与「**指向 shared 的指针变量**」上：
+  未做 M4.5 前，`int* p = sdata;` 经 `p` 的读写落成 generic `ld` / `st`（需运行时地址判断），
+  做后落成 `ld.shared` / `st.shared`。
+
+**验证**：`tests/golden/e2e/pointer_address_space.cu`（golden 断言 `st.shared` / `ld.shared` /
+未标注参数的 `cvta.to.global`，e2e 真机校验结果）+ `diag_address_space_invalid.cu`
+（取值 2 → `cool_address_space 取值非法`）。`make check` 119/119。
 
 ### 3.7 M4.6 samples + 边界用例
 
@@ -300,7 +316,7 @@ local 的指针区分与地址空间传播」。
 | **M4.2** | `__restrict__` → `noalias` | 无 | golden / IR 单测 | 低 |
 | **M4.3** | `__threadfence*` → `llvm.nvvm.membar.*` | **coolrt 声明** | golden | 低 |
 | **M4.4** | 原子内建 → NVVM atomic | **coolrt 声明** | golden + e2e | 高 | ✅ **已完成** |
-| **M4.5** | 指针地址空间传播（**建议不做**，见 §3.6） | M4.1 | golden | 中 | ⏸ **暂不做** |
+| **M4.5** | 指针地址空间传播（`cool_address_space(n)` → 指针类型地址空间） | M4.1 | golden + e2e + 诊断 | 中 | ✅ **已完成** |
 | **M4.6** | samples + 边界用例 | 上述 | samples 全绿 | 低 | ✅ **已完成** |
 
 > **推荐顺序**：先做**无 coolrt 依赖**的 M4.0 / M4.1 / M4.2（可立即交付），
@@ -323,16 +339,20 @@ local 的指针区分与地址空间传播」。
 1. ~~**NVVM atomic intrinsic 的具体名字与签名**（LLVM 19 NVPTX）——需 spike 确认（M4.4 前置）。~~
    **已闭环**：spike 结论是该路线不成立（只有 `.cta`/`.sys`，无 `.gpu`），M4.4 改走原生
    `atomicrmw`/`cmpxchg`。实测映射见 §3.5。
-2. **指针地址空间传播的范围**：一期是否需完整区分 global/shared/local 指针，还是仅 M4.1 的最小可用？
-3. **coolrt 侧内建声明由谁改**：`device_builtins.h` 新增原子/`__threadfence` 声明，
-   属跨项目改动，需与 coolrt 维护者对齐。（`__restrict__` 宏已由 M4.0 补齐，不再待确认。）
+2. ~~**指针地址空间传播的范围**：一期是否需完整区分 global/shared/local 指针，还是仅 M4.1 的最小可用？~~
+   **已定**：按 `cool_address_space(n)` **显式标注**传播（0/1/3/4/5），未标注一律保持
+   generic（不猜、不静默升格）；非法的 n 直接 fail loud。见 §3.6 实施结果。
+3. ~~**coolrt 侧内建声明由谁改**：`device_builtins.h` 新增原子/`__threadfence` 声明，
+   属跨项目改动，需与 coolrt 维护者对齐。~~ **已完成**：`cool_restrict` / `__threadfence*` /
+   原子内建三笔声明已在 coolruntime 落地并推送。
 4. **`__device__` 变量的主机侧访问**：是否需 `coolMemcpyFromSymbol` 类 API（类似 M3.2 的
-   `coolMemcpyToSymbol`）？一期是否延后？
+   `coolMemcpyToSymbol`）？一期是否延后？**（仍待定）**
 5. ~~**原子内建的类型覆盖范围**：一期覆盖哪些类型（`int` / `unsigned` / `float` / `unsigned long long`）？~~
    **已定**：一期覆盖 `int` / `unsigned int` / `float`（`atomicMin`/`atomicMax` 按符号重载区分）；
    `unsigned long long`、`double`、`atomicInc`/`atomicDec` 留待后续（后两者语义特殊，见 §3.5 注 2）。
-6. **设备全局跨 kernel 共享**尚未实现（每 kernel 一份 module 实例）——既定缺陷，需单独排期；
-   详见 [known-issues.md](known-issues.md) KI-1。
+6. ~~**设备全局跨 kernel 共享**尚未实现（每 kernel 一份 module 实例）。~~
+   **已修**：ADR 0007 把模块粒度改为编译单元，跨 kernel 共享成立；回归见
+   [known-issues.md](known-issues.md) KI-1 与 `samples/device_global.cu`。
 
 ## 7. 与 M3 / S0 的衔接
 

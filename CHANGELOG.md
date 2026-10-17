@@ -15,6 +15,15 @@
   `atomics OK: sum=128 ...`）。
 
 
+- **M4.5 指针地址空间传播**：`map_type` 的 `tk_pointer` 不再一律 `addrspace(0)`，改为读取
+  被指类型上的 `cool_address_space(n)` 属性（NVPTX 0/1/3/4/5）。带标注的指针变量，其
+  GEP / load / store 带上目标地址空间，PTX 直接落 `ld.shared` / `st.shared` 等专用指令；
+  未标注仍为 generic（**不猜、不静默升格**），非法取值 fail loud。
+  实测增量：`int* p = sdata;` 经 `p` 的读写此前是 generic `ld`/`st`，现在是 `ld.shared`/`st.shared`。
+  新增 `pointer_address_space`（golden 三条 PTX 断言 + 真机 e2e）与 `diag_address_space_invalid`。
+  实现细节：`cool_address_space` 对 EDG 是未识别属性，实参以 `aak_raw_token`（字面文本）传递，
+  故按 token 解析而非读常量节点。
+
 - **M4.6 samples 与边界用例**（收尾 S1）。新增三个面向用户的示例：
   `atomic_reduce.cu`（`atomicAdd` 并发归约，演示「为什么必须用原子」）、
   `device_global.cu`（`__device__` 全局 + 跨 kernel 共享，依赖 ADR 0007）、

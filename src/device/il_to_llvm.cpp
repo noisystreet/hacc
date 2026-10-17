@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -64,6 +65,9 @@ constexpr const char* kCoolDeviceAttributeName = "cool_device";
 
 // __restrict__ 指针参数属性名（M4.2；契约见 cuda-attributes.md §3，→ LLVM noalias）。
 constexpr const char* kCoolRestrictAttributeName = "cool_restrict";
+
+// 显式地址空间指针属性名（M4.5；契约见 cuda-attributes.md §3，→ 指针类型的目标地址空间）。
+constexpr const char* kCoolAddressSpaceAttributeName = "cool_address_space";
 
 // 翻译失败时抛出，由顶层 emit_ptx_from_il 捕获并转成 err_out。
 // 用异常而非错误码，避免在深层递归里层层传递错误状态（clean-code：失败显式）。
@@ -122,6 +126,70 @@ bool has_attribute(an_attribute_ptr attrs, const char* wanted) {
         }
     }
     return false;
+}
+
+// M4.5：取 name 属性的**首个整型实参**，成功返回 true 并写 *out。
+//
+// 为什么不读 `variant.constant`：`cool_address_space` 对 EDG 是**未识别**属性，
+// 未识别属性的实参统一以 raw token 形式传递（kind = aak_raw_token，token 为字面文本，
+// 例如 "3"），没有常量节点可读。实测 IL 形态见 cuda-attributes.md §3 的探针。
+// 参数非法一律 fail loud：地址空间写错会静默改变访存语义，不能猜。
+// 把一个 raw token 实参解析为整数；不是整数则 fail loud（地址空间写错会静默改变语义）。
+int parse_int_token_arg(an_attribute_arg_ptr arg, const char* attr_name) {
+    char* end = nullptr;
+    const long value = std::strtol(arg->variant.token, &end, 10);
+    if (end == arg->variant.token || (end != nullptr && *end != '\0')) {
+        fail(std::string("属性 ") + attr_name + " 的参数不是整数: " + arg->variant.token);
+    }
+    return static_cast<int>(value);
+}
+
+bool find_int_attribute_arg(an_attribute_ptr attrs, const char* wanted, int* out) {
+    for (an_attribute_ptr a = attrs; a != nullptr; a = a->next) {
+        if (a->name == nullptr || std::strcmp(a->name, wanted) != 0) {
+            continue;
+        }
+        for (an_attribute_arg_ptr arg = a->arguments; arg != nullptr; arg = arg->next) {
+            if ((arg->kind == aak_raw_token || arg->kind == aak_token) &&
+                arg->variant.token != nullptr) {
+                *out = parse_int_token_arg(arg, wanted);
+                return true;
+            }
+        }
+        fail(std::string("属性 ") + wanted + " 缺少整数参数");
+    }
+    return false;
+}
+
+// M4.5：指针类型 → NVPTX 地址空间（0 generic / 1 global / 3 shared / 4 constant / 5 local）。
+//
+// 地址空间由**被指类型**上的 cool_address_space(n) 属性承载：EDG 把该属性挂在 pointee 的
+// tk_typeref(for_type_attributes) 包装上，与 clang 的 address_space 类型属性语义一致。
+// 未标注 → 0（generic），即完全保持 M4.5 之前的行为。
+unsigned pointer_address_space(a_type_ptr pointer_ty) {
+    a_type_ptr t = pointer_ty->variant.pointer.type;
+    while (t != nullptr) {
+        int space = 0;
+        if (find_int_attribute_arg(t->source_corresp.attributes, kCoolAddressSpaceAttributeName,
+                                   &space)) {
+            switch (space) {
+                case 0:
+                case 1:
+                case 3:
+                case 4:
+                case 5:
+                    return static_cast<unsigned>(space);
+                default:
+                    fail("cool_address_space 取值非法：" + std::to_string(space) +
+                         "（允许 0/1/3/4/5）");
+            }
+        }
+        if (t->kind != tk_typeref) {
+            break;
+        }
+        t = t->variant.typeref.type;
+    }
+    return 0;
 }
 
 // 读回 .cil 的 file scope。成功返回 file scope 指针；失败返回 nullptr 并写 *err_out。
@@ -323,7 +391,9 @@ llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx) {
             return map_float_type(t, ctx);
         case tk_pointer:
             // 统一用不透明指针（LLVM 15+ 默认），指向类型不参与 IR 文本。
-            return llvm::PointerType::get(ctx, 0);
+            // 地址空间由指针类型承载（M4.5）：带 cool_address_space(n) 标注时为 n，
+            // 否则为 0（generic，即 M4.5 之前的行为）。
+            return llvm::PointerType::get(ctx, pointer_address_space(t));
         case tk_typeref:
             // typedef / 限定符：解引用到目标类型。
             return map_type(t->variant.typeref.type, ctx);

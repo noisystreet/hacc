@@ -141,13 +141,13 @@
       `coolMemcpyToSymbol`~~（已定：**已有**，M3.2 按完整方案落地）；③ ~~聚合参数 PTX ABI~~（已定：byval，spike 确认）；④ ~~`dim3` 与 `uint3` 关系~~
       （已定：3 分量统一映射为 struct `{T,T,T}`，2/4 分量才走向量 `<N x T>`；见 M3.3）；
       ⑤ ~~诊断格式（C6）~~（已定：`<文件:行>: <成因>`，见 M3.4）。
-- [ ] **M4 子集 S1（原子 / `__threadfence` / 设备全局 `__device__` / `__restrict__`）**：**M4.0–M4.4 / M4.6 已完成；M4.5 待拍板**——见
+- [x] **M4 子集 S1（原子 / `__threadfence` / 设备全局 `__device__` / `__restrict__`）**：**M4.0–M4.6 全部完成**——见
       [m4-subset-s1-plan.md](m4-subset-s1-plan.md)。目标：补齐 S1 子集（[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) §S1）。
       分步：**M4.0 属性契约扩展（`cool_restrict` / `cool_device` 变量 + 探针）（✅ 已完成：`verify_attrs.sh` 实测 exit 0）**
       → **M4.1 设备全局 `__device__` 变量（addrspace(1)）（✅ 已完成：golden + e2e 通过，`make check` 73/73）** → **M4.2 `__restrict__`（→ `noalias`）（✅ 已完成：IR 层 golden + e2e 通过，`make check` 81/81）** → **M4.3 `__threadfence*`（→ `llvm.nvvm.membar.*`）（✅ 已完成：PTX golden + e2e 通过，`make check` 88/88）**
-      → **M4.4 原子内建（`atomicAdd` 等 → LLVM `atomicrmw`/`cmpxchg`）（✅ 已完成：8 条 PTX golden + 128 线程竞争 e2e，`make check` 100/100）** → **M4.5 指针地址空间传播（⏸ 待拍板：建议一期不做，见下述②）** → **M4.6 samples + 边界用例（✅ 已完成：`atomic_reduce` / `device_global` / `threadfence` 三个示例 + `diag_device_var_in_kernel` / `diag_atomic_type_unsupported` 两个 fail-loud 用例，`make check` 112/112）**。
+      → **M4.4 原子内建（`atomicAdd` 等 → LLVM `atomicrmw`/`cmpxchg`）（✅ 已完成：8 条 PTX golden + 128 线程竞争 e2e，`make check` 100/100）** → **M4.5 指针地址空间传播（`cool_address_space(n)` → 指针类型地址空间）（✅ 已完成：golden 断言 `st.shared`/`ld.shared` + 未标注参数仍走 `cvta.to.global`，e2e 真机通过，`diag_address_space_invalid` 锁住非法取值，`make check` 119/119）** → **M4.6 samples + 边界用例（✅ 已完成：`atomic_reduce` / `device_global` / `threadfence` 三个示例 + `diag_device_var_in_kernel` / `diag_atomic_type_unsupported` 两个 fail-loud 用例，`make check` 112/112）**。
       **推荐顺序**：先做无 coolrt 依赖的 M4.0/M4.1/M4.2，再跨项目做 M4.3/M4.4。
-      **待确认**：① ~~NVVM atomic intrinsic 的具体名字/签名（LLVM 19 NVPTX，需 spike）~~（已决：**改走原生 `atomicrmw`/`cmpxchg`，不用 NVVM atomic intrinsic**——后者只有 `.cta`/`.sys` 两种作用域、无 `.gpu`，表达不出 CUDA 默认的 device scope；实测映射见 [m4-subset-s1-plan.md](m4-subset-s1-plan.md) §3.5）；② **指针地址空间传播范围（待拍板）**：是否需在一期完整区分 global/shared/local。hacc 侧建议**一期不做**（§3.6：原子已不依赖它，现有 e2e 在 generic 指针下全通）；若 S1 验收要求区分，则需补做；
+      **待确认**：① ~~NVVM atomic intrinsic 的具体名字/签名（LLVM 19 NVPTX，需 spike）~~（已决：**改走原生 `atomicrmw`/`cmpxchg`，不用 NVVM atomic intrinsic**——后者只有 `.cta`/`.sys` 两种作用域、无 `.gpu`，表达不出 CUDA 默认的 device scope；实测映射见 [m4-subset-s1-plan.md](m4-subset-s1-plan.md) §3.5）；② ~~**指针地址空间传播范围**：是否需在一期完整区分 global/shared/local。~~（已定：**M4.5 已实现**——按 `cool_address_space(n)` 显式标注传播 0/1/3/4/5，未标注保持 generic，非法值 fail loud；见 [m4-subset-s1-plan.md](m4-subset-s1-plan.md) §3.6）；
       ③ ~~coolrt 侧内建声明（原子/`__threadfence`/`__restrict__`）由谁改~~（已定：**已由 coolruntime 完成**，`cool_restrict` / `__threadfence*` / 原子内建三笔声明已提交并推送）；④ `__device__` 变量主机侧访问是否需 `coolMemcpyFromSymbol` 类 API（一期是否延后）；
       ⑤ ~~原子内建一期覆盖的类型范围~~（已定：**int / unsigned int / float**；其余类型无重载、编译期报错，由 `diag_atomic_type_unsupported` 锁住，防止类型被悄悄泛化）。
 
