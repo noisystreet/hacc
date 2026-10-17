@@ -14,6 +14,14 @@
   新增 golden 测试（逐条断言 8 种 `atom.global.*`）与 e2e（128 线程竞争同一地址，
   `atomics OK: sum=128 ...`）。
 
+
+- **M4.6 samples 与边界用例**（收尾 S1）。新增三个面向用户的示例：
+  `atomic_reduce.cu`（`atomicAdd` 并发归约，演示「为什么必须用原子」）、
+  `device_global.cu`（`__device__` 全局 + 跨 kernel 共享，依赖 ADR 0007）、
+  `threadfence.cu`（`__threadfence*` 三种作用域，说明「栅栏保顺序、不提供同步」）。
+  新增两个 fail-loud 边界用例：`__device__` 声明在函数内、`atomicAdd(double*)`
+  无匹配重载——后者锁住「原子类型不会被悄悄泛化」。
+
 ### Changed
 
 - **`(void)expr` 不再导致编译失败**：此前设备端 `translate_cast` 把「转成 void」当成真实类型转换，
@@ -182,6 +190,7 @@
   `diag_unsupported_switch`（子集未覆盖构造）、`diag_type_mismatch`（前端类型错误）、
   `golden_device_local_array_index`（局部数组动态下标正向回归）。本机 RTX 4060 上 5 个示例
   真跑通过；`make check` 68/68 全绿。
+
 
 
 ### Changed

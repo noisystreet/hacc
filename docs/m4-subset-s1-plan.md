@@ -276,10 +276,20 @@ local 的指针区分与地址空间传播」。
 
 ### 3.7 M4.6 samples + 边界用例
 
-- `samples/`：新增 `atomic_reduce.cu`（`atomicAdd` 归约）、`device_global.cu`（`__device__` 变量）、
-  `threadfence.cu`（`__threadfence`，可选）。
-- 边界用例（fail loud）：内核内 `__device__` 变量、非指针 `__restrict__`、未覆盖的原子类型。
-- `tests/CMakeLists.txt` 为每个示例加 `sample_<name>_build` / `_run`（无设备按 77 SKIP）。
+**samples/**（面向用户，含「不腐化」回归 `sample_<name>_build` / `_run`）：
+
+- `atomic_reduce.cu`：`atomicAdd` 并发归约（0+1+…+127 = 8128），演示「为什么必须用原子」。
+- `device_global.cu`：`__device__` 全局 + **跨 kernel 共享**（kernel A 写、kernel B 读）。
+- `threadfence.cu`：`__threadfence*` 三种作用域，并说明「栅栏保顺序、不提供同步」。
+
+**边界用例（fail loud）**，走 `scripts/check_diag_fail.sh`：
+
+- `diag_device_var_in_kernel.cu`：`__device__` 写在函数内 → `__device__ 变量不能声明在函数内`。
+- `diag_atomic_type_unsupported.cu`：`atomicAdd(double*)` → 前端无匹配重载（第 15 行）。
+  该用例锁住「原子类型不会被悄悄泛化」：若将来加了头文件声明却没补翻译，本用例会失败。
+- 非指针 `__restrict__` 已由 M4.2 的 `diag_restrict_non_pointer` 覆盖，不重复。
+
+> **状态：已完成。** `make check` 112/112 全绿（新增 3 个 sample × build/run + 2 个诊断用例）。
 
 ## 4. 分步实施（建议）
 
@@ -289,9 +299,9 @@ local 的指针区分与地址空间传播」。
 | **M4.1** | 设备全局 `__device__` 变量（addrspace 1） | 无 | golden + e2e | 中 |
 | **M4.2** | `__restrict__` → `noalias` | 无 | golden / IR 单测 | 低 |
 | **M4.3** | `__threadfence*` → `llvm.nvvm.membar.*` | **coolrt 声明** | golden | 低 |
-| **M4.4** | 原子内建 → NVVM atomic | **coolrt 声明** | golden + e2e | 高 |
-| **M4.5** | 指针地址空间传播（按需） | M4.1 | golden | 中 |
-| **M4.6** | samples + 边界用例 | 上述 | samples 全绿 | 低 |
+| **M4.4** | 原子内建 → NVVM atomic | **coolrt 声明** | golden + e2e | 高 | ✅ **已完成** |
+| **M4.5** | 指针地址空间传播（**建议不做**，见 §3.6） | M4.1 | golden | 中 | ⏸ **暂不做** |
+| **M4.6** | samples + 边界用例 | 上述 | samples 全绿 | 低 | ✅ **已完成** |
 
 > **推荐顺序**：先做**无 coolrt 依赖**的 M4.0 / M4.1 / M4.2（可立即交付），
 > 再与 coolrt 对齐后做 M4.3 / M4.4（跨项目）；M4.5 视需要；M4.6 收尾。

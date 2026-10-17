@@ -31,6 +31,9 @@ hacc vector_add.cu -o vector_add -I /path/to/coolruntime/include
 | [`shared_reduce.cu`](shared_reduce.cu) | `__shared__` 静态共享内存 + `__syncthreads()` | M3.1 |
 | [`constant_pi.cu`](constant_pi.cu) | `__constant__` 常量内存 + `coolMemcpyToSymbol` | M3.2 |
 | [`dim3_grid.cu`](dim3_grid.cu) | `dim3` 作为内核参数（3 分量聚合） | M3.3 |
+| [`atomic_reduce.cu`](atomic_reduce.cu) | `atomicAdd` 并发归约（为什么必须用原子） | M4.4 |
+| [`device_global.cu`](device_global.cu) | `__device__` 全局变量 + **跨 kernel 共享** | M4.1 / M4.6 |
+| [`threadfence.cu`](threadfence.cu) | `__threadfence*` 三种作用域栅栏（顺序 ≠ 同步） | M4.3 |
 
 ## 子集约束（S0）
 
@@ -39,5 +42,7 @@ hacc vector_add.cu -o vector_add -I /path/to/coolruntime/include
 - 内核参数为标量或 POD 聚合（`float4` / `dim3` 等），无引用/模板参数。
 - 左值仅支持变量与 `*p`，故用 `*(p + i)` 而非 `p[i]`（数组下标 `a[i]` 亦支持）。
 - `__shared__` 仅内核内、静态数组；`__constant__` 仅文件作用域。
+- `__device__` 变量仅文件作用域（写在函数内会**报错**，不会静默降级为局部变量）。
+- 原子操作仅 int / unsigned int / float（`double` 等无重载，编译期报错）。
 - 未覆盖的构造（如 `while` / `switch`）会 **fail loud**（编译失败并给出源位置），
   不会静默产出错误代码。

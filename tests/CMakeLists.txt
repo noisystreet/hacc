@@ -402,6 +402,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                         "$<TARGET_FILE:hacc>"
                         "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_unsupported_switch.cu"
                         "${HACC_COOLRUNTIME_INCLUDE}" ":6: 不支持的语句 kind")
+            # M4.6：__device__ 变量声明在函数内（子集只允许文件作用域）→ fail loud。
+            add_test(NAME diag_device_var_in_kernel
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_device_var_in_kernel.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" "__device__ 变量不能声明在函数内")
+            # M4.6：未覆盖的原子类型（double）→ 前端无匹配重载，fail loud。
+            # 锁住原子类型不会被悄悄泛化：加了头文件声明却没补翻译时必须让测试失败。
+            add_test(NAME diag_atomic_type_unsupported
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
+                        "$<TARGET_FILE:hacc>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_atomic_type_unsupported.cu"
+                        "${HACC_COOLRUNTIME_INCLUDE}" "line 15: error: no instance")
             # 类型不匹配（指针赋整型）→ 前端 cpfe 报错（第 8 行）。
             add_test(NAME diag_type_mismatch
                 COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
@@ -426,8 +439,10 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         # M3.5 samples：samples/ 下的示例应始终可编译 + 可运行（结果自校验）。
         # 无可用 CUDA 设备时示例返回 77，测试框架按 SKIP 处理。
         # 与 golden/e2e 的区别：samples 是面向用户的示例，此处仅做「示例不腐化」回归。
+        # M4.6 samples：新增原子归约 / 设备全局 / 栅栏三个示例（同受「示例不腐化」回归保护）。
         if(HACC_COOLRUNTIME_INCLUDE)
-            foreach(_sample vector_add vector_type shared_reduce constant_pi dim3_grid)
+            foreach(_sample vector_add vector_type shared_reduce constant_pi dim3_grid
+                            atomic_reduce device_global threadfence)
                 set(_sample_exe "${CMAKE_CURRENT_BINARY_DIR}/sample_${_sample}")
                 add_test(NAME sample_${_sample}_build
                     COMMAND hacc "${CMAKE_SOURCE_DIR}/samples/${_sample}.cu"
