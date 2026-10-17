@@ -863,7 +863,45 @@ llvm::Value* translate_subscript(an_expr_node_ptr expr, KernelContext& kc) {
     return kc.builder.CreateGEP(elem_ty, base_ptr, idx);
 }
 
-// 翻译内建函数调用（__syncthreads 等）。
+// 无参内建函数 → NVVM intrinsic 名（签名统一为 void()）。
+// M1.2.4：__syncthreads → llvm.nvvm.barrier0。
+// M4.3：__threadfence{,_block,_system} → llvm.nvvm.membar.{gl,cta,sys}。
+struct NoArgBuiltinMapping {
+    const char* builtin_name;
+    const char* intrinsic_name;
+};
+
+constexpr NoArgBuiltinMapping kNoArgBuiltins[] = {
+    {"__syncthreads", "llvm.nvvm.barrier0"},
+    {"__threadfence", "llvm.nvvm.membar.gl"},
+    {"__threadfence_block", "llvm.nvvm.membar.cta"},
+    {"__threadfence_system", "llvm.nvvm.membar.sys"},
+};
+
+// 按名字查无参内建映射；未命中返回 nullptr。
+const NoArgBuiltinMapping* find_no_arg_builtin(const char* name) {
+    for (const NoArgBuiltinMapping& m : kNoArgBuiltins) {
+        if (std::strcmp(name, m.builtin_name) == 0) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+// 翻译无参内建调用：取/建 void() intrinsic 声明并发射 call。
+llvm::Value* translate_no_arg_builtin(const NoArgBuiltinMapping& m, KernelContext& kc) {
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    llvm::Function* fn = module->getFunction(m.intrinsic_name);
+    if (fn == nullptr) {
+        llvm::FunctionType* fn_ty =
+            llvm::FunctionType::get(llvm::Type::getVoidTy(kc.ctx), /*isVarArg=*/false);
+        fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, m.intrinsic_name,
+                                    module);
+    }
+    return kc.builder.CreateCall(fn);
+}
+
+// 翻译内建函数调用（__syncthreads / __threadfence* 等）。
 // 返回 nullptr 表示「不是内建函数调用」，交由调用方走普通路径。
 llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc) {
     an_expr_node_ptr callee = expr->variant.operation.operands;
@@ -872,22 +910,18 @@ llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc
     }
     a_routine_ptr r = callee->variant.routine.ptr;
     const char* name = (r != nullptr) ? r->source_corresp.name : nullptr;
-    if (name == nullptr || std::strcmp(name, "__syncthreads") != 0) {
+    if (name == nullptr) {
         return nullptr;
     }
-    // __syncthreads() 无参；映射到 llvm.nvvm.barrier0（void()）。
+    const NoArgBuiltinMapping* mapping = find_no_arg_builtin(name);
+    if (mapping == nullptr) {
+        return nullptr;
+    }
+    // 表内均为无参内建；带参即报错（不静默丢弃实参）。
     if (callee->next != nullptr) {
-        fail("__syncthreads 不接受参数（M1.2.4）");
+        fail(std::string(name) + " 不接受参数", expr->position);
     }
-    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
-    llvm::Function* fn = module->getFunction("llvm.nvvm.barrier0");
-    if (fn == nullptr) {
-        llvm::FunctionType* fn_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(kc.ctx),
-                                                            /*isVarArg=*/false);
-        fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, "llvm.nvvm.barrier0",
-                                    module);
-    }
-    return kc.builder.CreateCall(fn);
+    return translate_no_arg_builtin(*mapping, kc);
 }
 
 // 运算符类别（用于把多 case 的 dispatch 收敛为少量分支）。

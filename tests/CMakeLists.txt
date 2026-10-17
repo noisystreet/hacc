@@ -467,6 +467,30 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "constMem OK")
 
+        # M4.3 golden：__threadfence{,_block,_system} → NVVM membar.{gl,cta,sys}。
+        # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_tf_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_threadfence.cil")
+            set(_tf_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_threadfence.ptx")
+            add_test(NAME golden_frontend_threadfence
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_tf_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/threadfence.cu")
+            add_test(NAME golden_device_il_to_ptx_threadfence
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_tf_ptx}" "${_tf_cil}")
+            set_tests_properties(golden_device_il_to_ptx_threadfence PROPERTIES
+                DEPENDS golden_frontend_threadfence)
+            # 三种栅栏必须各自落到对应作用域的 membar 指令（逐个断言，避免「命中一个即通过」）。
+            foreach(_tf_scope gl cta sys)
+                add_test(NAME golden_device_il_to_ptx_threadfence_membar_${_tf_scope}
+                    COMMAND grep -qE "membar\\.${_tf_scope}" "${_tf_ptx}")
+                set_tests_properties(golden_device_il_to_ptx_threadfence_membar_${_tf_scope}
+                    PROPERTIES DEPENDS golden_device_il_to_ptx_threadfence)
+            endforeach()
+        endif()
+
         # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_dg_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global_run")
@@ -479,6 +503,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_dev_global_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "devGlobal OK")
+
+        # M4.3 e2e：__threadfence* 编译 + 运行 + 结果校验（栅栏不改变单线程语义）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_tf_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_threadfence_run")
+        add_test(NAME e2e_hacc_threadfence_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/threadfence.cu"
+                    -o "${_e2e_tf_run_exe}")
+        add_test(NAME e2e_hacc_threadfence_run
+            COMMAND "${_e2e_tf_run_exe}")
+        set_tests_properties(e2e_hacc_threadfence_run PROPERTIES
+            DEPENDS e2e_hacc_threadfence_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "threadfence OK")
 
         # M4.2 e2e：__restrict__ 指针形参编译 + 运行 + 结果校验（语义不变）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。

@@ -1,6 +1,6 @@
 # M4 方案：子集 S1（原子 / `__threadfence` / 设备全局 `__device__` / `__restrict__`）
 
-> 状态：**进行中**（2026-10）。M4.0 / M4.1 / M4.2 已完成；M4.3–M4.6 规划中。本文为 M4 的**实施方案**，落地后逐节回写「已完成」。
+> 状态：**进行中**（2026-10）。M4.0 / M4.1 / M4.2 / M4.3 已完成；M4.4–M4.6 规划中。本文为 M4 的**实施方案**，落地后逐节回写「已完成」。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围 S1）、§10（里程碑 M4）。
 > 前置：M3 已完成（子集 S0 全部落地，见 [m3-subset-s0-plan.md](m3-subset-s0-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围 S1）、
@@ -158,7 +158,7 @@ OK   IL contains 'kind: unrecognized' entries
 **风险**：`noalias` 是**优化提示**，不影响正确性；但若前端误判（如把非指针标 `noalias`）可能引入
 错误优化——故**严格限定仅指针参数**。
 
-### 3.4 M4.3 `__threadfence*`（跨项目）
+### 3.4 M4.3 `__threadfence*`（跨项目）——✅ 已完成
 
 **coolrt 侧**（`device_builtins.h`，仅 `__COOLCC__` 下）：
 
@@ -178,6 +178,13 @@ void __threadfence_system(void);
 
 **验证**：golden PTX 校验 `membar.gl` / `membar.cta` / `membar.sys`；e2e 用 `__threadfence` 做
 跨块可见性（可选，较难稳定验证，可只做 golden）。
+
+> **已完成（M4.3）**：coolrt `device_builtins.h`（`__COOLCC__` 下）已声明三个无参内建；
+> `il_to_llvm.cpp` 的 `try_translate_builtin_call` 改为**表驱动**（`kNoArgBuiltins`
+> 映射 `__syncthreads` / 三个 fence → `void()` NVVM intrinsic），新增名字只需加一行。
+> 验证：`tests/golden/e2e/threadfence.cu` → PTX 依次含 `membar.gl` / `membar.cta` / `membar.sys`
+> （三条独立断言，避免「命中一个即通过」）；e2e 在 RTX 4060 上跑通（`threadfence OK: out[0]=2`）。
+> 跨块可见性语义需多 block 竞争窗口，难以稳定复现，故强断言放在 PTX 层。`make check` 88/88 全绿。
 
 ### 3.5 M4.4 原子内建（跨项目）
 
