@@ -30,7 +30,7 @@
 | `__constant__` | `cool_constant` | 无参 | 变量 | 常量内存；LLVM 地址空间 **4** |
 | `__device__`（变量） | `cool_device` | 无参 | 变量 | 设备全局；LLVM 地址空间 **1** |
 | `__managed__` | — | — | — | **明确排除**（方案 §9） |
-| `__restrict__` | `cool_restrict` | 无参 | 指针参数 | **S1**；别名提示（可映射 LLVM `noalias`） |
+| `__restrict__` | `cool_restrict` | 无参 | 指针参数 | **S1（M4.2）**；别名提示（映射 LLVM `noalias`） |
 
 ## 3. 地址空间（显式）
 
@@ -59,7 +59,8 @@
 | `dim3` | **类型** | 随编译器头提供，非属性 |
 | `float2/3/4`、`int2/3/4`、`double2`… | **内建向量类型** | 映射 LLVM 向量/结构（方案 §6.1），非属性 |
 | `__syncthreads()` | **内建函数调用** | IL 中即 routine 调用；`coolicc` 映射 `llvm.nvvm.barrier0`（方案 §6.1）。**如需在 IL 中显式标记同步点，另议**（当前不引入属性） |
-| `__threadfence*()` | **内建函数调用** | S1；映射 `llvm.nvvm.membar.*` |
+| `__threadfence*()` | **内建函数调用** | S1（M4.3）；映射 `llvm.nvvm.membar.*`（`gl`/`cta`/`sys`） |
+| `atomicAdd` 等原子内建 | **内建函数调用** | S1（M4.4）；映射 `llvm.nvvm.atomic.*`（按类型/地址空间后缀） |
 
 ## 6. 与验证脚本的对应
 
@@ -71,7 +72,7 @@
 | `cool_global` / `cool_device` / `cool_host` | ✅ |
 | `cool_shared` / `cool_constant` | ✅ |
 | `cool_address_space(n)` | 以 EDG 已知 `address_space(3)` 代替（验证带参未知属性传递） |
-| `cool_restrict` / `cool_launch_bounds` / `cool_forceinline` / `cool_noinline` | ⬜ 后续（S1/S2） |
+| `cool_restrict` / `cool_launch_bounds` / `cool_forceinline` / `cool_noinline` | `cool_restrict` ✅（M4.0）；其余 ⬜ 后续（S2） |
 
 ## 7. 变更规则
 

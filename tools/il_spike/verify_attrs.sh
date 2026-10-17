@@ -14,7 +14,7 @@ SRC=${1:-"$HERE/inputs/kernel_probe_attr2.cpp"}
 
 # 期望出现在 IL 中的属性名（CUDA 存储/执行限定符 + 地址空间）。
 # 与 README「CUDA 属性清单」对齐；探针 inputs/kernel_probe_attr2.cpp 需覆盖这些名字。
-EXPECTED=(cool_shared cool_global cool_device cool_host cool_constant address_space)
+EXPECTED=(cool_shared cool_global cool_device cool_host cool_constant cool_restrict address_space)
 
 # 前置检查：给出清晰报错，而非静默 MISS。
 if [ ! -x "$CPFE" ]; then

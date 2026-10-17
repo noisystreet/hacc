@@ -359,7 +359,7 @@ CUDA 库、多 GPU/Peer/Graph 编程。
 | M1 设备路径 | 最小内核（无参/标量参）→ PTX；内嵌 NVVM 维度变量与 `__syncthreads` | golden PTX；`ptxas` 可汇编性校验（仅校验，不产出 cubin） |
 | M2 主机路径 | 主机桩 + 惰性注册 + `<<<>>>` 改写；端到端 `<<<>>>` 启动 | e2e：vectorAdd 在 coolrt 上跑通并校验结果（PTX 经驱动 JIT 载入） |
 | M3 子集 S0 完成 | `__shared__`/`__constant__`/向量类型/dim3；诊断质量 | samples 全绿；边界用例 |
-| M4 子集 S1 | 原子/`__threadfence`/设备全局/`__restrict__` | 新增 e2e 与 golden |
+| M4 子集 S1 | 原子/`__threadfence`/设备全局/`__restrict__`（方案见 [m4-subset-s1-plan.md](m4-subset-s1-plan.md)） | 新增 e2e 与 golden |
 | M5 稳定 | 诊断、`--emit`/`-keep` 观测输出、CI、文档 | CI 全绿；黄金文件回归 |
 | M6（后续）cubin | `--emit=cubin`：**直接调用 `ptxas` 子进程**（PTX → cubin），设备后端不改动 | cubin 载入 e2e；与 PTX 产物对照 |
 

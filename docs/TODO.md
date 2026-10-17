@@ -141,6 +141,16 @@
       `coolMemcpyToSymbol`~~（已定：**已有**，M3.2 按完整方案落地）；③ ~~聚合参数 PTX ABI~~（已定：byval，spike 确认）；④ ~~`dim3` 与 `uint3` 关系~~
       （已定：3 分量统一映射为 struct `{T,T,T}`，2/4 分量才走向量 `<N x T>`；见 M3.3）；
       ⑤ ~~诊断格式（C6）~~（已定：`<文件:行>: <成因>`，见 M3.4）。
+- [ ] **M4 子集 S1（原子 / `__threadfence` / 设备全局 `__device__` / `__restrict__`）**：**进行中（M4.0 已完成）**——见
+      [m4-subset-s1-plan.md](m4-subset-s1-plan.md)。目标：补齐 S1 子集（[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) §S1）。
+      分步：**M4.0 属性契约扩展（`cool_restrict` / `cool_device` 变量 + 探针）（✅ 已完成：`verify_attrs.sh` 实测 exit 0）**
+      → **M4.1 设备全局 `__device__` 变量（addrspace(1)）** → **M4.2 `__restrict__`（→ `noalias`）** → **M4.3 `__threadfence*`（→ `llvm.nvvm.membar.*`）**
+      → **M4.4 原子内建（`atomicAdd` 等 → NVVM atomic）** → **M4.5 指针地址空间传播（按需）** → **M4.6 samples + 边界用例**。
+      **推荐顺序**：先做无 coolrt 依赖的 M4.0/M4.1/M4.2，再跨项目做 M4.3/M4.4。
+      **待确认**：① NVVM atomic intrinsic 的具体名字/签名（LLVM 19 NVPTX，需 spike）；② 指针地址空间传播范围
+      （一期是否需完整区分 global/shared/local）；③ coolrt 侧内建声明（原子/`__threadfence`/`__restrict__`）由谁改
+      （跨项目，对齐 TODO B4）；④ `__device__` 变量主机侧访问是否需 `coolMemcpyFromSymbol` 类 API（一期是否延后）；
+      ⑤ 原子内建一期覆盖的类型范围。
 
 ## C. 工程 / 流程
 

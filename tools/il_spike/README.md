@@ -198,7 +198,8 @@ cpfe --edg_base_dir <bases/docker/dev-env/gcc> --g++ -N --il_display <input.cpp>
 - **（已实现）(a)**：`fetch_edg.sh` 注入 `RECORD_UNRECOGNIZED_ATTRIBUTES=1`（`CMAKE_CXX_FLAGS`），
   `verify_attrs.sh` 实测通过。
 - **（已细化）CUDA 属性清单**：见 [cuda-attributes.md](cuda-attributes.md)（`coolfe++` ↔ `coolicc` 契约）；
-  后续按 S1/S2 补 `cool_restrict`/`cool_launch_bounds`/`cool_forceinline`/`cool_noinline`。
+  **S1/M4.0 已补 `cool_restrict`**（探针 + `EXPECTED` 已覆盖，实测通过）；
+  后续按 S2 补 `cool_launch_bounds`/`cool_forceinline`/`cool_noinline`。
 - **（已查清）二进制 IL 往返**：`cdisp` 取**位置参数**（`cdisp <il-file>`；依据源码
   `il_display.c:8920` `file_name = argv[optind]`），二进制 IL 由 `cpfe ... -o <file>` 产出
   （文件头 `EDG IL file (v7.0)`）。
