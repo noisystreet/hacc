@@ -15,7 +15,8 @@
 //     - 参数：tk_routine 的 param_type_list → LLVM 参数（标量 int/float/pointer）。
 //     - 语句：stmk_expr / stmk_if / stmk_block / stmk_return / stmk_decl / stmk_init /
 //       stmk_while / stmk_for / stmk_end_test_while（M5.1 补循环）/
-//       stmk_goto / stmk_label（M5.2 补 break、continue）。
+//       stmk_goto / stmk_label（M5.2 补 break、continue）/
+//       stmk_switch / stmk_switch_case（M5.3 补 switch）。
 //     - 表达式：enk_variable / enk_constant / enk_operation（算术/比较/赋值/取址/解引用）。
 //     - 类型：tk_integer（i8..i64）/ tk_float（float/double）/ tk_pointer（ptr）。
 //   未覆盖的构造一律报错（fail loud），不静默产出错误 IR。
@@ -456,6 +457,10 @@ struct KernelContext {
     // 按需创建：goto 与 label 谁先出现谁建块，另一边查同一张表，故前向跳转（break 跳到循环
     // 之后的 label）与后向跳转都成立。
     std::unordered_map<a_label_ptr, llvm::BasicBlock*> labels;
+
+    // switch 的 case 入口 → 基本块（M5.3）。key 是 case-entry 实体：stmk_switch 预建块，
+    // stmk_switch_case 按同一 entry 取块，避免顺序/指针错配。
+    std::unordered_map<a_switch_case_entry_ptr, llvm::BasicBlock*> case_blocks;
 
     KernelContext(llvm::LLVMContext& c, llvm::Module& m) : ctx(c), module(m), builder(c) {}
 };
@@ -1453,6 +1458,88 @@ void translate_label(a_statement_ptr stmt, KernelContext& kc) {
     kc.builder.SetInsertPoint(target);
 }
 
+// switch 的 case 入口指令：把插入点切到该 case 的块。
+// EDG 把 case 标签表示成 stmk_switch_case 语句，其后同链的语句即该 case 的 body，
+// 因此「顺序执行」天然就是 C 的 fallthrough 语义（不再需要单独处理）。
+void translate_switch_case(a_statement_ptr stmt, KernelContext& kc) {
+    a_switch_case_entry_ptr entry = stmt->variant.switch_case.extra_info;
+    auto it = kc.case_blocks.find(entry);
+    if (it == kc.case_blocks.end()) {
+        fail("switch 的 case 找不到对应基本块（内部状态不一致）", stmt->position);
+    }
+    llvm::BasicBlock* target = it->second;
+    // 上一个 case 没有 break 时就是 fallthrough：直接落到本块。
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(target);
+    }
+    kc.builder.SetInsertPoint(target);
+}
+
+// 生成 switch 的比较链：选择表达式依次与各 case 值比较，命中就跳对应块，
+// 全部落空则跳 fallback（有 default 就是 default 块，否则 end）。
+void emit_switch_dispatch(a_statement_ptr stmt, a_switch_stmt_descr_ptr descr,
+                          llvm::BasicBlock* fallback, KernelContext& kc) {
+    // default 的 case_value 为 NULL，不参与比较；保持源序。
+    std::vector<a_switch_case_entry_ptr> value_cases;
+    for (a_switch_case_entry_ptr c = descr->cases; c != nullptr; c = c->next) {
+        if (c->case_value != nullptr) {
+            value_cases.push_back(c);
+        }
+    }
+
+    llvm::Value* sel = translate_expr(stmt->expr, kc);
+    if (value_cases.empty()) {
+        // 只有 default（或空 switch）：无条件进入 fallback。
+        kc.builder.CreateBr(fallback);
+        return;
+    }
+
+    for (size_t i = 0; i < value_cases.size(); ++i) {
+        a_switch_case_entry_ptr c = value_cases[i];
+        const bool is_last = (i + 1 == value_cases.size());
+        llvm::BasicBlock* miss =
+            is_last ? fallback
+                    : llvm::BasicBlock::Create(kc.ctx, "switch.next",
+                                               kc.builder.GetInsertBlock()->getParent());
+        llvm::Constant* cv = translate_constant(c->case_value, kc.ctx);
+        // case 值类型应与选择表达式一致；不一致时报错而不是生成非法 IR。
+        if (cv->getType() != sel->getType()) {
+            fail("switch 的 case 值与选择表达式类型不一致（暂不支持隐式转换）", stmt->position);
+        }
+        llvm::Value* eq = kc.builder.CreateICmpEQ(sel, cv);
+        kc.builder.CreateCondBr(eq, kc.case_blocks[c], miss);
+        if (!is_last) {
+            kc.builder.SetInsertPoint(miss);
+        }
+    }
+}
+
+// switch：先为每个 case 预建块，再生成比较链，最后翻译 body（由 case 语句切块）。
+void translate_switch(a_statement_ptr stmt, KernelContext& kc) {
+    a_switch_stmt_descr_ptr descr = stmt->variant.switch_stmt.extra_info;
+    if (descr == nullptr) {
+        fail("switch 缺少 extra_info（case 描述）", stmt->position);
+    }
+    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock* end_bb = llvm::BasicBlock::Create(kc.ctx, "switch.end", fn);
+
+    // 预建每个 case 的入口块：比较链与 body 通过 case-entry 指针找到同一块。
+    for (a_switch_case_entry_ptr c = descr->cases; c != nullptr; c = c->next) {
+        kc.case_blocks[c] = llvm::BasicBlock::Create(kc.ctx, "switch.case", fn);
+    }
+
+    llvm::BasicBlock* fallback =
+        descr->default_case != nullptr ? kc.case_blocks[descr->default_case] : end_bb;
+    emit_switch_dispatch(stmt, descr, fallback, kc);
+
+    // body 里的 stmk_switch_case 会把插入点切到各自块；最后一个 case 之后顺序落到 end。
+    translate_statement(stmt->variant.switch_stmt.body_statement, kc);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(end_bb);
+    }
+    kc.builder.SetInsertPoint(end_bb);
+}
+
 // if 语句：条件转 i1，建 then/else/end 三块并递归翻译分支。
 void translate_if(a_statement_ptr stmt, KernelContext& kc) {
     llvm::Value* cond = to_i1(translate_expr(stmt->expr, kc), kc);
@@ -1610,6 +1697,13 @@ void stmt_label(a_statement_ptr stmt, KernelContext& kc) {
     translate_label(stmt, kc);
 }
 
+void stmt_switch_case(a_statement_ptr stmt, KernelContext& kc) {
+    translate_switch_case(stmt, kc);
+}
+void stmt_switch(a_statement_ptr stmt, KernelContext& kc) {
+    translate_switch(stmt, kc);
+}
+
 struct StmtEntry {
     a_statement_kind kind;
     StmtHandler handler;
@@ -1630,6 +1724,9 @@ constexpr StmtEntry kStmtTable[] = {
 
     {stmk_goto, stmt_goto},
     {stmk_label, stmt_label},
+
+    {stmk_switch, stmt_switch},
+    {stmk_switch_case, stmt_switch_case},
 };
 
 // 语句翻译。
@@ -1644,8 +1741,8 @@ void translate_statement(a_statement_ptr stmt, KernelContext& kc) {
         }
     }
     fail(
-        "不支持的语句 kind（M5.2 覆盖 block/expr/decl/init/if/return/empty/while/for/"
-        "do-while/goto/label；switch、range-for、asm、coroutine 暂不支持）");
+        "不支持的语句 kind（M5.3 覆盖 block/expr/decl/init/if/return/empty/while/for/"
+        "do-while/goto/label/switch/switch_case；range-for、asm、coroutine 暂不支持）");
 }
 
 // 取函数体 scope：用 EDG 的 scope_for_routine（il.h:3992）。

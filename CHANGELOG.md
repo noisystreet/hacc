@@ -6,6 +6,20 @@
 
 ### Added
 
+- **M5.3 内核 `switch`**：case 标签在 EDG IL 里是 `stmk_switch_case` 语句（其后同链语句即该 case 的 body），
+  所以「顺序执行」天然就是 C 的 fallthrough 语义，不需要单独处理。实现分三步：
+  ① `translate_switch` 为 `descr->cases` 里每个 entry 预建基本块（`KernelContext::case_blocks`，
+  key 是 case-entry 实体指针，保证比较链与 body 找到同一块）；
+  ② `emit_switch_dispatch` 生成比较链（`icmp eq` 依次比较，最后一跳落到 default 块或 end）；
+  ③ 翻译 body，`translate_switch_case` 把插入点切到对应块。
+  无 default 时 fallback 直接落 end；`case_value` 与选择表达式类型不一致时 fail loud（不做隐式转换）。
+  比较链拆成独立函数是为了守住 CCN 门禁（`translate_switch` 保持 ≤10）。
+  测试：`golden_frontend_switch_dispatch` + `golden_device_il_to_ptx_switch_dispatch{_basic,_fallthrough,_no_default,_cmp}`
+  + `e2e_hacc_switch_runtime_run`（真机：case 1/2 共用 body 都得 20、case 3 故意不 break 得 3+40=43、
+  `i >= 5` 落 default 得 99，输出 `switchDispatch OK`）。`make check` **160/160**、零 SKIP。
+  **边界前移**：`diag_unsupported_switch` 随实现删除 —— 至此再无「语句种类」层面的负向用例
+  （剩余 range-for / asm / coroutine 属罕见构造，见 `docs/TODO.md` C9）。
+
 - **M5.2 内核 `break` / `continue`**：EDG 把它们降成 `stmk_goto` + `stmk_label` 一对语句（实测：
   `k_for_break` 的 IL 里两者通过 `label` 实体指针互指），因此新增 `KernelContext::labels`
   （label 实体 → LLVM `BasicBlock`）按需建块 —— 谁先出现谁建、另一边查同一张表，

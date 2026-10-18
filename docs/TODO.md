@@ -215,12 +215,16 @@
       **关键验证**：`continue` 必须跳 increment 块而非循环头（否则 `i` 不增 → 死循环），
       PTX 实测 `bra $L__BB1_4` 且 `BB1_4` 即 `add.s32 %r6, %r6, %r5`；真机 e2e `loopCtrl OK`。
       `make check` **153/153**。负向用例 `diag_unsupported_break` 随实现删除。
-- [ ] **C9 剩余表达力边界：`switch` 与自定义 `__device__` 函数调用**：
-      `switch` 需 `stmk_switch`（body 在 `variant.switch_stmt.body_statement`）+ `stmk_switch_case`
-      （`variant.switch_case.switch_statement` / `extra_info`）的 case 分派，由
-      `diag_unsupported_switch` 钉住；自定义 `__device__` 函数调用仍报「不支持的函数调用」
-      （m4-handoff §6.1），需要先决定「内联展开」还是「发射独立设备函数」。
-      另：`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 也在 Non-Goal 或未覆盖之列。
+- [x] **C9 `switch` → 已完成（M5.3）**：case 标签在 EDG IL 里是 `stmk_switch_case` 语句，其后同链语句
+      即该 case 的 body —— 「顺序执行」天然就是 fallthrough。实现：`KernelContext::case_blocks`
+      （case-entry 实体 → BasicBlock）由 `stmk_switch` 预建，`emit_switch_dispatch` 生成比较链，
+      `stmk_switch_case` 切插入点。真机 e2e 已验证 case 合并 / fallthrough / default 三种形态。
+      `make check` **160/160**。负向用例 `diag_unsupported_switch` 随实现删除。
+- [ ] **C10 剩余表达力边界：自定义 `__device__` 函数调用**：目前内核体内调用自定义设备函数会报
+      「不支持的函数调用」（m4-handoff §6.1）。需要先决策：**内联展开**（简单，但递归/大函数会膨胀）
+      还是**发射独立设备函数**（需要调用约定、可能还要处理 `__forceinline__`）。
+      这是当前「能不能写真实程序」的最大剩余障碍 —— 循环和分支都有了，但公共逻辑仍无法抽函数。
+      另：`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 未覆盖（罕见构造，非阻塞）。
 
 ---
 

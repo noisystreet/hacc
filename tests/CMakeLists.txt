@@ -408,12 +408,6 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         # M3.5 边界用例：非法/未覆盖构造应 fail loud（编译失败 + 诊断匹配）。
         # 用脚本捕获 stderr 并校验诊断正则（错误在 stderr，PASS_REGULAR_EXPRESSION 只匹配 stdout）。
         if(HACC_COOLRUNTIME_INCLUDE)
-            # switch 语句（子集未覆盖）→ 翻译失败，诊断带源位置（第 6 行）。
-            add_test(NAME diag_unsupported_switch
-                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
-                        "$<TARGET_FILE:hacc>"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_unsupported_switch.cu"
-                        "${HACC_COOLRUNTIME_INCLUDE}" ":6: 不支持的语句 kind")
             # M4.6：__device__ 变量声明在函数内（子集只允许文件作用域）→ fail loud。
             add_test(NAME diag_device_var_in_kernel
                 COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
@@ -619,6 +613,49 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_loop_break_continue_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "loopCtrl OK")
+
+        # M5.3 golden：switch → 比较链 + case 块（case 合并 / fallthrough / default）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_sw_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_switch_dispatch.cil")
+            set(_sw_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_switch_dispatch.ptx")
+            add_test(NAME golden_frontend_switch_dispatch
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_sw_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/switch_dispatch.cu")
+            add_test(NAME golden_device_il_to_ptx_switch_dispatch
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_sw_ptx}" "${_sw_cil}")
+            set_tests_properties(golden_device_il_to_ptx_switch_dispatch PROPERTIES
+                DEPENDS golden_frontend_switch_dispatch)
+            # 三个内核入口各自存在（basic / fallthrough / no_default）。
+            add_test(NAME golden_device_il_to_ptx_switch_dispatch_basic
+                COMMAND grep -qE "entry switch_basic" "${_sw_ptx}")
+            add_test(NAME golden_device_il_to_ptx_switch_dispatch_fallthrough
+                COMMAND grep -qE "entry switch_fallthrough" "${_sw_ptx}")
+            add_test(NAME golden_device_il_to_ptx_switch_dispatch_no_default
+                COMMAND grep -qE "entry switch_no_default" "${_sw_ptx}")
+            # 比较链：case 值比较用 setp.eq。
+            add_test(NAME golden_device_il_to_ptx_switch_dispatch_cmp
+                COMMAND grep -qE "setp\\.eq\\.s32" "${_sw_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_switch_dispatch_basic
+                                 golden_device_il_to_ptx_switch_dispatch_fallthrough
+                                 golden_device_il_to_ptx_switch_dispatch_no_default
+                                 golden_device_il_to_ptx_switch_dispatch_cmp PROPERTIES
+                DEPENDS golden_device_il_to_ptx_switch_dispatch)
+        endif()
+
+        # M5.3 e2e：switch 真机语义（case 合并 / fallthrough / default）。
+        set(_e2e_sw_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_switch_runtime_run")
+        add_test(NAME e2e_hacc_switch_runtime_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/switch_runtime.cu"
+                    -o "${_e2e_sw_exe}")
+        add_test(NAME e2e_hacc_switch_runtime_run
+            COMMAND "${_e2e_sw_exe}")
+        set_tests_properties(e2e_hacc_switch_runtime_run PROPERTIES
+            DEPENDS e2e_hacc_switch_runtime_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "switchDispatch OK")
 
         # M4.3 golden：__threadfence{,_block,_system} → NVVM membar.{gl,cta,sys}。
         # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
