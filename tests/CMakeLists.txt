@@ -657,6 +657,50 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "switchDispatch OK")
 
+        # M5.4 golden：__device__ 函数 → PTX .func + call.uni（独立函数，非内联）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_dc_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_device_call.cil")
+            set(_dc_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_device_call.ptx")
+            add_test(NAME golden_frontend_device_call
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_dc_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/device_call.cu")
+            add_test(NAME golden_device_il_to_ptx_device_call
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_dc_ptx}" "${_dc_cil}")
+            set_tests_properties(golden_device_il_to_ptx_device_call PROPERTIES
+                DEPENDS golden_frontend_device_call)
+            # 有返回值的设备函数是独立 .func（不是内联进 entry）。
+            add_test(NAME golden_device_il_to_ptx_device_call_func
+                COMMAND grep -qE "^\\.visible \\.func.* add2\\(" "${_dc_ptx}")
+            # 前向引用：forward_use 的定义（带括号）必须在，且 user 能 call 到它。
+            add_test(NAME golden_device_il_to_ptx_device_call_forward
+                COMMAND grep -qE "^\\.visible \\.func.* forward_use\\(" "${_dc_ptx}")
+            add_test(NAME golden_device_il_to_ptx_device_call_callseq
+                COMMAND grep -qE "call\\.uni \\(retval0\\)" "${_dc_ptx}")
+            # void 设备函数的指针参数走 .param .b64（指针宽度）。
+            add_test(NAME golden_device_il_to_ptx_device_call_void_ptr
+                COMMAND grep -qE "\\.param \\.b64 setv_param_0" "${_dc_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_device_call_func
+                                 golden_device_il_to_ptx_device_call_forward
+                                 golden_device_il_to_ptx_device_call_callseq
+                                 golden_device_il_to_ptx_device_call_void_ptr PROPERTIES
+                DEPENDS golden_device_il_to_ptx_device_call)
+        endif()
+
+        # M5.4 e2e：__device__ 调用链 + 指针参数真机校验。
+        set(_e2e_dc_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_device_call_run")
+        add_test(NAME e2e_hacc_device_call_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/device_call_runtime.cu"
+                    -o "${_e2e_dc_exe}")
+        add_test(NAME e2e_hacc_device_call_run
+            COMMAND "${_e2e_dc_exe}")
+        set_tests_properties(e2e_hacc_device_call_run PROPERTIES
+            DEPENDS e2e_hacc_device_call_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "deviceCall OK")
+
         # M4.3 golden：__threadfence{,_block,_system} → NVVM membar.{gl,cta,sys}。
         # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
         if(HACC_COOLRUNTIME_INCLUDE)

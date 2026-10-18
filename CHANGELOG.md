@@ -6,6 +6,18 @@
 
 ### Added
 
+- **M5.4 自定义 `__device__` 函数调用**：内核里终于可以调用自己写的设备函数（此前一律 fail loud）。
+  路线选**发射独立设备函数**而非内联展开：`build_kernel` 拆成 `declare_routine`（只建 Function）+
+  `define_routine_body`（填 body），新增 `emit_all_routines` 分三遍 —— 先声明全部设备函数、
+  再逐个填 body、最后建内核。**分遍是必需的**：设备函数之间可能前向/相互调用
+  （golden 里 `user` 调用定义在其后的 `forward_use`），只有先有全部声明，`eok_call` 才解析得到目标。
+  PTX 产出标准 `.func` + `call.uni`（callseq 走 `.param` 空间，指针参数是 `.param .b64`）。
+  配套改动：`stmt_return` 支持返回值（此前只有 `CreateRetVoid`，非 void 设备函数会生成非法 IR）；
+  非 void 函数缺省 `return` 时补返回零值而不是崩溃。
+  测试：`golden_frontend_device_call` + `golden_device_il_to_ptx_device_call{_func,_forward,_callseq,_void_ptr}`
+  + `e2e_hacc_device_call_run`（真机：`add2→scale3` 链得 `(i+1)*3`、void 函数经指针参数写 777，
+  输出 `deviceCall OK`）。`make check` **168/168**、零 SKIP。
+
 - **M5.3 内核 `switch`**：case 标签在 EDG IL 里是 `stmk_switch_case` 语句（其后同链语句即该 case 的 body），
   所以「顺序执行」天然就是 C 的 fallthrough 语义，不需要单独处理。实现分三步：
   ① `translate_switch` 为 `descr->cases` 里每个 entry 预建基本块（`KernelContext::case_blocks`，

@@ -41,8 +41,10 @@ hacc 是 [coolrt](../coolruntime) 的**编译前端**，用于补上 coolrt 架�
 
 **M5.1 已支持内核内循环**（`while` / `for` / `do-while`），**M5.2 补上 `break` / `continue`**
 （EDG 把它们降为 `stmk_goto` + `stmk_label`），**M5.3 补上 `switch`**（比较链 + case 块，
-fallthrough 由顺序执行天然成立）——此前内核体里连循环都写不了，只能写「一线程一元素」的演示 kernel。
-剩余边界：自定义 `__device__` 函数调用，一律 fail loud（见 `docs/TODO.md` C10）。
+fallthrough 由顺序执行天然成立），**M5.4 补上自定义 `__device__` 函数调用**（发射独立设备函数，
+PTX 里是 `.func` + `call.uni`，前向/相互调用皆可）——此前内核体里连循环都写不了，
+只能写「一线程一元素」的演示 kernel。剩余边界见 `docs/TODO.md` C11（非阻塞：内联优化、
+range-for/asm/coroutine、递归设备函数需前端拦截）。
 
 主机编译默认调用 `g++`；可用 `--host-cxx <path>`（或 `$HACC_HOST_CXX`）切到 `clang++`
 （已验证可编）。**前端**系统头探测仍固定取 GCC 的头：EDG 按 GCC 语义解析，clang 的
@@ -75,9 +77,9 @@ build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
 | `<stem>.hacc.gen.cpp` | 桩 + host（主机编译的实际输入） | — |
 | `<stem>.ptx` | 设备映像 | `.ptx` |
 
-`make check`：**160/160 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
+`make check`：**168/168 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
 **fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `double` 等未覆盖的
-原子类型、函数内的 `__device__` 声明、自定义 `__device__` 函数调用；已确认的缺陷记录在
+原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
 [known-issues.md](docs/known-issues.md)。
 
 ## 构建与使用

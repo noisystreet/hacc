@@ -462,6 +462,10 @@ struct KernelContext {
     // stmk_switch_case 按同一 entry 取块，避免顺序/指针错配。
     std::unordered_map<a_switch_case_entry_ptr, llvm::BasicBlock*> case_blocks;
 
+    // 同模块自定义 __device__ 函数 → LLVM Function（M5.4），供 eok_call 解析。
+    // 由 define_routine_body 设置，指向 build_ir_from_il 里的那张表。
+    const std::unordered_map<a_routine_ptr, llvm::Function*>* device_functions = nullptr;
+
     KernelContext(llvm::LLVMContext& c, llvm::Module& m) : ctx(c), module(m), builder(c) {}
 };
 
@@ -1047,6 +1051,38 @@ llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc
     return translate_no_arg_builtin(*mapping, kc);
 }
 
+// 翻译对同模块自定义 __device__ 函数的调用（M5.4）。
+// 返回 nullptr 表示「不是设备函数调用」，交由调用方继续判定。
+llvm::Value* try_translate_device_call(an_expr_node_ptr expr, KernelContext& kc) {
+    if (kc.device_functions == nullptr) {
+        return nullptr;
+    }
+    an_expr_node_ptr callee = expr->variant.operation.operands;
+    if (callee == nullptr || callee->kind != enk_routine) {
+        return nullptr;
+    }
+    a_routine_ptr r = callee->variant.routine.ptr;
+    if (r == nullptr) {
+        return nullptr;
+    }
+    auto it = kc.device_functions->find(r);
+    if (it == kc.device_functions->end()) {
+        return nullptr;  // 不是本模块声明的设备函数
+    }
+    llvm::Function* fn = it->second;
+    std::vector<llvm::Value*> args;
+    for (an_expr_node_ptr a = callee->next; a != nullptr; a = a->next) {
+        args.push_back(translate_expr(a, kc));
+    }
+    // 先校验个数再 CreateCall：个数不符时 CreateCall 会直接断言崩，用户看不到诊断。
+    if (args.size() != fn->arg_size()) {
+        const char* callee_name =
+            r->source_corresp.name != nullptr ? r->source_corresp.name : "<unnamed>";
+        fail(std::string("调用设备函数 ") + callee_name + " 的实参个数不匹配", expr->position);
+    }
+    return kc.builder.CreateCall(fn, args);
+}
+
 // ------------------------------------------------------------------
 // 原子内建（M4.4）：映射到 LLVM 原生 atomicrmw / cmpxchg。
 //
@@ -1273,14 +1309,18 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             return v;
         }
         case OpClass::Call: {
-            // 先试原子内建（有实参/返回值），再试无参内建；都不是则报错
-            // （M1.2.4 不覆盖普通函数调用）。
+            // 依次尝试：原子内建 → 无参内建 → 自定义 __device__ 函数；都不是则报错。
             llvm::Value* v = try_translate_atomic_call(expr, kc);
             if (v == nullptr) {
                 v = try_translate_builtin_call(expr, kc);
             }
             if (v == nullptr) {
-                fail("不支持的函数调用（仅覆盖内建：__syncthreads / __threadfence* / atomic*）");
+                v = try_translate_device_call(expr, kc);
+            }
+            if (v == nullptr) {
+                fail(
+                    "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic* "
+                    "与同模块的 __device__ 函数）");
             }
             return v;
         }
@@ -1684,8 +1724,13 @@ void stmt_do_while(a_statement_ptr stmt, KernelContext& kc) {
 void stmt_for(a_statement_ptr stmt, KernelContext& kc) {
     translate_for(stmt, kc);
 }
-void stmt_return(a_statement_ptr /*stmt*/, KernelContext& kc) {
-    // 内核返回 void；M1.2.3 只处理无返回值内核。
+void stmt_return(a_statement_ptr stmt, KernelContext& kc) {
+    // 内核返回 void；设备函数可有返回值（M5.4）。
+    // stmk_return 的 expr 为「返回表达式或 NULL」（il_def.h 对应注释）。
+    if (stmt->expr != nullptr) {
+        kc.builder.CreateRet(translate_expr(stmt->expr, kc));
+        return;
+    }
     kc.builder.CreateRetVoid();
 }
 void stmt_empty(a_statement_ptr /*stmt*/, KernelContext& /*kc*/) {}
@@ -1873,34 +1918,46 @@ void seed_file_scope_globals(
     }
 }
 
-// 为内核建 Function：参数 + 函数体。
-llvm::Function* build_kernel(
-    a_routine_ptr r, llvm::Module& module,
-    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& constant_globals,
-    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& device_globals) {
+// 声明一个 routine 对应的 LLVM 函数（只建对象，不填 body）。
+// is_kernel=true 时加 NVPTX 内核注解（PTX .entry），否则是普通设备函数（PTX .func）。
+// 声明与填 body 分开（M5.4）：设备函数之间可能互相调用或被前向引用，
+// 先把全部声明建好，填 body 时才能解析到任意目标。
+// 注：make_kernel_function_type 现已是「routine 类型 → LLVM FunctionType」的通用转换，
+// 名字保留是为避免无行为收益的大范围重命名。
+llvm::Function* declare_routine(a_routine_ptr r, llvm::Module& module, bool is_kernel) {
     llvm::LLVMContext& ctx = module.getContext();
     const char* name = r->source_corresp.name;
     if (name == nullptr) {
-        fail("内核无源实体名，无法建具名函数");
+        fail(is_kernel ? "内核无源实体名，无法建具名函数" : "设备函数无源实体名，无法建具名函数");
     }
-
-    // 函数类型：从 routine 类型取返回类型与参数列表。
     a_type_ptr fn_type = r->type;
     if (fn_type == nullptr || fn_type->kind != tk_routine) {
-        fail("内核的 routine 类型无效");
+        fail(is_kernel ? "内核的 routine 类型无效" : "设备函数的 routine 类型无效");
     }
     llvm::FunctionType* llvm_fn_ty = make_kernel_function_type(fn_type, ctx);
     llvm::Function* fn =
         llvm::Function::Create(llvm_fn_ty, llvm::GlobalValue::ExternalLinkage, name, &module);
-    fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
-    fn->addFnAttr("nvptx-kernel");
+    if (is_kernel) {
+        fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
+        fn->addFnAttr("nvptx-kernel");
+    }
 
     // M4.2：__restrict__ 指针形参 → noalias。
     apply_param_noalias(fn, fn_type, r->source_corresp.decl_position);
+    return fn;
+}
 
-    // 函数体：entry block + 参数 alloca + 语句翻译。
+// 填 routine 的 body：entry block + 参数 alloca + 语句翻译。
+// 内核与设备函数共用此路径，差异只在 declare_routine 的 NVPTX 注解。
+void define_routine_body(
+    a_routine_ptr r, llvm::Function* fn, llvm::Module& module,
+    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& constant_globals,
+    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& device_globals,
+    const std::unordered_map<a_routine_ptr, llvm::Function*>& device_functions) {
+    llvm::LLVMContext& ctx = module.getContext();
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(ctx, "entry", fn);
     KernelContext kc(ctx, module);
+    kc.device_functions = &device_functions;
     seed_file_scope_globals(kc, constant_globals, device_globals);
     kc.builder.SetInsertPoint(entry);
 
@@ -1913,7 +1970,7 @@ llvm::Function* build_kernel(
     bind_parameters(fn, body_scope, kc);
 
     // 翻译函数体顶层 block。
-    // M3.4：语句级错误若未带位置，用内核声明位置兜底（表达式级已在 translate_expr 补过）。
+    // M3.4：语句级错误若未带位置，用函数声明位置兜底。
     if (body_scope != nullptr && body_scope->assoc_block != nullptr) {
         try {
             translate_statement(body_scope->assoc_block, kc);
@@ -1925,11 +1982,46 @@ llvm::Function* build_kernel(
         }
     }
 
-    // 若最后一条语句未终止（如无显式 return），补 ret void。
+    // 末尾兜底：void 函数补 ret void；有返回值的设备函数补返回零值
+    // （C 里「非 void 函数无 return」是 UB，这里给确定性行为而不是崩溃）。
     if (kc.builder.GetInsertBlock()->getTerminator() == nullptr) {
-        kc.builder.CreateRetVoid();
+        llvm::Type* ret_ty = fn->getReturnType();
+        if (ret_ty->isVoidTy()) {
+            kc.builder.CreateRetVoid();
+        } else {
+            kc.builder.CreateRet(llvm::Constant::getNullValue(ret_ty));
+        }
     }
-    return fn;
+}
+
+// 发射文件作用域里的全部 routine（M5.4）：设备函数先声明再填 body，最后建内核。
+// 分遍的原因：设备函数之间可能前向/相互调用，必须先有全部声明才能解析调用目标。
+void emit_all_routines(
+    a_scope_ptr file_scope, llvm::Module& module,
+    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& constant_globals,
+    const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& device_globals,
+    unsigned* kernel_count) {
+    std::unordered_map<a_routine_ptr, llvm::Function*> device_functions;
+    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
+        if (has_attribute(r->source_corresp.attributes, kCoolDeviceAttributeName)) {
+            device_functions[r] = declare_routine(r, module, /*is_kernel=*/false);
+        }
+    }
+    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
+        auto it = device_functions.find(r);
+        if (it != device_functions.end()) {
+            define_routine_body(r, it->second, module, constant_globals, device_globals,
+                                device_functions);
+        }
+    }
+    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
+        if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
+            continue;
+        }
+        llvm::Function* fn = declare_routine(r, module, /*is_kernel=*/true);
+        define_routine_body(r, fn, module, constant_globals, device_globals, device_functions);
+        ++(*kernel_count);
+    }
 }
 
 // M3.2：__constant__ 变量 → addrspace(4) 全局。
@@ -2020,13 +2112,7 @@ static bool build_ir_from_il(const std::string& cil_path, std::string* ir_out,
         std::unordered_map<a_variable_ptr, llvm::GlobalVariable*> constant_globals;
         std::unordered_map<a_variable_ptr, llvm::GlobalVariable*> device_globals;
         emit_file_scope_globals(file_scope, module, ctx, &constant_globals, &device_globals);
-        for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
-            if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
-                continue;  // 非内核（设备函数等）一期跳过。
-            }
-            build_kernel(r, module, constant_globals, device_globals);
-            ++kernel_count;
-        }
+        emit_all_routines(file_scope, module, constant_globals, device_globals, &kernel_count);
     } catch (const TranslateError& e) {
         std::fclose(il_file);
         if (err_out != nullptr) {

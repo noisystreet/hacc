@@ -220,11 +220,15 @@
       （case-entry 实体 → BasicBlock）由 `stmk_switch` 预建，`emit_switch_dispatch` 生成比较链，
       `stmk_switch_case` 切插入点。真机 e2e 已验证 case 合并 / fallthrough / default 三种形态。
       `make check` **160/160**。负向用例 `diag_unsupported_switch` 随实现删除。
-- [ ] **C10 剩余表达力边界：自定义 `__device__` 函数调用**：目前内核体内调用自定义设备函数会报
-      「不支持的函数调用」（m4-handoff §6.1）。需要先决策：**内联展开**（简单，但递归/大函数会膨胀）
-      还是**发射独立设备函数**（需要调用约定、可能还要处理 `__forceinline__`）。
-      这是当前「能不能写真实程序」的最大剩余障碍 —— 循环和分支都有了，但公共逻辑仍无法抽函数。
-      另：`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 未覆盖（罕见构造，非阻塞）。
+- [x] **C10 自定义 `__device__` 函数调用 → 已完成（M5.4）**：路线选「发射独立设备函数」而非内联展开。
+      `build_kernel` 拆成 `declare_routine` + `define_routine_body`，新增 `emit_all_routines` 分三遍
+      （先声明全部设备函数 → 再填 body → 最后建内核），以支持前向/相互调用。
+      PTX 产出 `.func` + `call.uni`（callseq 走 `.param` 空间）。`stmt_return` 同步支持返回值。
+      真机 e2e 已验证调用链与指针参数传参。`make check` **168/168**。
+- [ ] **C11 表达力补遗（非阻塞）**：`__device__` 函数内联优化（目前 `-O0` 下每次真 `call`，
+      NVPTX 的 call ABI 有寄存器保存开销，热路径可能需要 `alwaysinline`）；
+      `stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 仍未覆盖；
+      递归的设备函数会生成 PTX 但 `ptxas` 会拒绝（CUDA 不支持递归），可在前端提前报错。
 
 ---
 
