@@ -20,7 +20,8 @@ coolrt 的架构把「**不做 CUDA C++ 编译前端**」列为 Non-Goal：运�
 要让「**用 CUDA 的写法写的源码**」以接近 cudart 的语义在 coolrt 上运行，必须补上这一层：
 一个能把 `__global__` 函数编译成设备码、并生成**主机桩 + 注册代码**的前端。**hacc 就是这一层。**
 
-hacc 的产出 = 一份可被普通 C++ 编译器编译、并链接 `libcoolruntime` 的**主机目标文件** +
+hacc 的产出 = 一份可被普通 C++ 编译器编译、并链接 **`libcoolrt`**（静态 `libcoolrt_static.a` /
+共享 `libcoolrt.so`，即 `-lcoolrt`）的**主机目标文件** +
 内嵌的**设备映像**（PTX/cubin）。它是 coolrt 的**编译前端**，而非 cudart 的复刻。
 
 ## 2. 目标与非目标
@@ -94,10 +95,10 @@ hacc 的产出 = 一份可被普通 C++ 编译器编译、并链接 `libcoolrunt
          └───────┬────────┘   └──────┬───────────────────────┘
                  │ .ptx (cubin 后续)   │ 生成的 .cpp
                  └────────┬───────────┘
-                          │  主机编译器 (clang++/g++，非 nvcc)
+                          │  主机编译器 (g++ 默认 / --host-cxx 可切 clang++，非 nvcc)
                           │  + include/coolcc/hacc_runtime.h
                           v
-                    host.o  (含内嵌映像 + 注册)  ──链接──▶ libcoolruntime
+                    host.o  (含内嵌映像 + 注册)  ──链接──▶ libcoolrt
                           │
                           v
                      可执行文件
@@ -365,6 +366,9 @@ CUDA 库、多 GPU/Peer/Graph 编程。
 
 > **一期范围 = M0–M5**：设备产物为 **PTX**（主机桩/注册/`<<<>>>` 端到端同期交付，PTX 交驱动 PTX JIT 载入）；
 > 一期测试可调用 `ptxas` 仅作 golden 校验，**不产出、不内嵌 cubin**。**M6（后续）**才引入 `--emit=cubin`（直接调用 `ptxas`）。
+
+> **当前进度（2026-10）**：**M0–M4 已完成**（`make check` **126/126**，真机零 SKIP）；M5 里
+> 的 `--emit` / `-keep` 观测输出（原 TODO 的 B7）**尚未实现**，CI 形态（原 C5）仍待定。
 
 ## 11. 测试与验证策略
 

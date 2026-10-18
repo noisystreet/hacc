@@ -101,7 +101,8 @@ Positive:
 
 Negative / trade-offs:
 
-- **每次链接需带上 hacc 随附的运行时头**（`hacc_runtime.h`）与 `libcoolruntime`。
+- **每次链接需带上 hacc 随附的运行时头**（`hacc_runtime.h`）与 **`libcoolrt`**
+  （静态 `libcoolrt_static.a` / 共享 `libcoolrt.so`）。
 - **命名约束**：子集内内核名需在同一 TU 内唯一，以确定性方案生成 PTX 入口名与注册名。
   **已定（B2）**：`extern "C"` 内核直用原名；C++ 链接内核用 `_hacc_k_<Itanium-mangled>`（复用 Itanium ABI，
   不自造）。PTX `.entry` 名 = 主机注册名 = 主机桩引用名，三者同一来源（由 `coolfe++` 在 IL 中标注）。
