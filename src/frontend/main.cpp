@@ -34,6 +34,8 @@ constexpr const char* kUsage =
     "  --emit-host-only[=F] 仅产主机源，不调用 cpfe（纯文本，无需 EDG）\n"
     "  --cpfe <path>        cpfe 可执行路径（默认 $HACC_CPFE 或构建期默认）\n"
     "  --edg-base-dir <dir> EDG base 目录（默认 $HACC_EDG_BASE 或构建期默认）\n"
+    "  --host-cxx <path>    主机 C++ 编译器（用于探测系统头；\n"
+    "                       默认 $HACC_HOST_CXX > $HACC_GXX > g++）\n"
     "  -I <dir> / -D <macro>  透传给 cpfe\n"
     "  --version            打印版本\n"
     "  -h, --help           打印本帮助\n";
@@ -69,7 +71,7 @@ struct Options {
     bool host_only = false;   // --emit-host-only：仅产主机源，不调用 cpfe
 };
 
-// 处理需要单个值的选项（-o / --cpfe / --edg-base-dir）。
+// 处理需要单个值的选项（-o / --cpfe / --edg-base-dir / --host-cxx）。
 // 命中则消费下一个参数并返回 true；未命中返回 false。
 bool take_value_option(const char* a, int* i, int argc, char** argv, Options* out) {
     if (std::strcmp(a, "-o") == 0 && *i + 1 < argc) {
@@ -82,6 +84,14 @@ bool take_value_option(const char* a, int* i, int argc, char** argv, Options* ou
     }
     if (std::strcmp(a, "--edg-base-dir") == 0 && *i + 1 < argc) {
         out->edg.edg_base_dir = argv[++(*i)];
+        return true;
+    }
+    if (std::strncmp(a, "--host-cxx=", 11) == 0) {
+        out->edg.host_cxx = a + 11;
+        return true;
+    }
+    if (std::strcmp(a, "--host-cxx") == 0 && *i + 1 < argc) {
+        out->edg.host_cxx = argv[++(*i)];
         return true;
     }
     return false;

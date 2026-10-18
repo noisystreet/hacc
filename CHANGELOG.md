@@ -6,6 +6,20 @@
 
 ### Added
 
+- **B8 主机编译器可选（`--host-cxx`）**：主机编译阶段不再硬编码 `g++`。优先级为
+  `--host-cxx <path>` / `--host-cxx=<path>` > `$HACC_HOST_CXX` > `$HACC_GXX`（旧名，保留兼容）
+  > `g++`；解析收敛到 `src/support/toolchain.{hpp,cpp}` 单一实现，避免 driver 与前端两处
+  各自解析导致优先级漂移。实际使用的编译器打印到 stderr（`hacc: 主机编译器 = <path>`），
+  失败时阶段名也带编译器（`主机编译（clang++）失败: ...`）；显式空值（`--host-cxx=`）
+  直接报错而不静默回退。
+  **前端系统头探测仍固定优先 `g++`**，与主机编译器解耦：EDG 的 `--g++` 模式按 GCC 语义解析，
+  而 clang++ 的 resource-dir 内建头（`stddef.h` 等用 `__has_feature` / `__building_module`）
+  会让 EDG 成片报错（实测 55 个错误、`size_t` 直接 undefined）。`--host-cxx` 仅在 g++
+  缺失时充当探测回退。
+  新增 `unit_toolchain`（优先级 / 兼容名 / `basename_of`）、`e2e_hacc_host_cxx_missing` 与
+  `e2e_hacc_host_cxx_empty`（fail loud）、`e2e_hacc_host_cxx_clang_build` / `_clang_run`
+  （真用 clang++ 编一遍并在真机跑出 `vectorAdd OK`，验证主机桩与 coolrt 头在 clang 下也成立）。
+
 - **M4.4 原子内建**：`atomicAdd` / `atomicSub` / `atomicExch` / `atomicMin` / `atomicMax` / `atomicCAS`
   （int / unsigned int / float 重载，coolrt `device_builtins.h` 在 `__COOLCC__` 下声明）映射到
   LLVM 原生 `atomicrmw` / `cmpxchg`，落到 PTX `atom.global.<op>.<type>`。

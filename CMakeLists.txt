@@ -33,6 +33,7 @@ endif()
 add_library(hacc_support STATIC
     src/support/version.cpp
     src/support/process.cpp
+    src/support/toolchain.cpp
     src/host/launch_rewrite.cpp
     src/host/stub_gen.cpp
 )

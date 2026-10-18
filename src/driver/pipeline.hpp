@@ -9,7 +9,7 @@
 //   coolicc --from-il -arch=sm_XX -o <tmp>.ptx <tmp>.cil          # IL → PTX
 //   driver: rewrite_source(input.cu) → kernel_names               # 拿内核名
 //   driver: 读 <tmp>.ptx + generate_stubs → 拼到 host 源顶部       # 桩
-//   g++ <tmp>.hacc.cpp -I<coolrt> -lcoolrt -o <out>               # 主机编译
+//   <host-cxx> <tmp>.hacc.cpp -I<coolrt> -lcoolrt -o <out>         # 主机编译
 //
 // 两个子工具与 hacc 同目录（构建产物在一起）；可用环境变量覆盖（见 .cpp）。
 // 纯逻辑（参数拼装、路径推导）与执行分离，便于单测。
@@ -38,7 +38,7 @@ struct PipelineOptions {
     // 子工具路径（空则按同目录 / 环境变量推导）。
     std::string coolfe_path;
     std::string coolicc_path;
-    std::string gxx_path;  // 主机编译器（默认 $HACC_GXX 或 "g++"）
+    std::string host_cxx;  // 主机 C++ 编译器（显式 > $HACC_HOST_CXX > $HACC_GXX > "g++"）
     // COOLRuntime 头目录与库（主机编译用；空则按环境变量 / 默认推导）。
     std::string coolrt_include;  // -I<coolrt>/include
     std::string coolrt_lib;      // <coolrt>/build/libcoolruntime.a
@@ -58,8 +58,8 @@ std::string resolve_coolfe_path(const PipelineOptions& opts);
 // 推导 coolicc 路径：显式 > $HACC_COOLICC > self_path 同目录。
 std::string resolve_coolicc_path(const PipelineOptions& opts);
 
-// 推导主机编译器路径：显式 > $HACC_GXX > "g++"。
-std::string resolve_gxx_path(const PipelineOptions& opts);
+// 推导主机编译器路径：显式 > $HACC_HOST_CXX > $HACC_GXX（旧名兼容）> "g++"。
+std::string resolve_host_cxx_path(const PipelineOptions& opts);
 
 // 拼装 coolfe++ 参数（不含程序名）：<input.cu> -o <cil>。
 std::vector<std::string> build_coolfe_args(const PipelineOptions& opts,
@@ -74,9 +74,11 @@ std::vector<std::string> build_coolfe_host_args(const PipelineOptions& opts,
 std::vector<std::string> build_coolicc_args(const PipelineOptions& opts,
                                             const std::string& cil_path);
 
-// 拼装 g++ 参数（不含程序名）：<host.cpp> -I<coolrt>/include -o <out> <lib> -lcuda。
+// 拼装主机编译参数（不含程序名）：-std=c++20 <host.cpp> -I<coolrt>/include
+// -I<hacc>/include [-I <dir> ...] -o <out> <lib> -lcuda。
 // 注：-lcuda 由 coolrt 静态库的依赖决定（见 coolruntime/CMakeLists.txt）。
-std::vector<std::string> build_gxx_args(const PipelineOptions& opts, const std::string& host_path);
+std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
+                                                 const std::string& host_path);
 
 // 执行流水线。emit=Ptx 时 .cu → .cil → .ptx；emit=Exe 时再拼桩 + 主机编译。
 // 成功返回 ok=true。keep=false 时删除中间产物。

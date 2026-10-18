@@ -39,6 +39,10 @@ hacc 是 [coolrt](../coolruntime) 的**编译前端**，用于补上 coolrt 架�
 `__restrict__` / `__threadfence*` / 原子内建 / 指针地址空间传播 / samples 与边界用例）均已打通。
 真 kernel 已在本机 GPU 上跑通并校验结果。
 
+主机编译默认调用 `g++`；可用 `--host-cxx <path>`（或 `$HACC_HOST_CXX`）切到 `clang++`
+（已验证可编）。**前端**系统头探测仍固定取 GCC 的头：EDG 按 GCC 语义解析，clang 的
+resource-dir 内建头会让它成片报错，详见 [docs/TODO.md](docs/TODO.md) 的 B8。
+
 > 指针地址空间按 `cool_address_space(n)`（0/1/3/4/5）**显式标注**传播；未标注一律 generic，
 > 不猜、不静默升格，非法取值编译期报错。见
 > [m4-subset-s1-plan.md](docs/m4-subset-s1-plan.md) §3.6。

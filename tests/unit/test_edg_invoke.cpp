@@ -151,6 +151,35 @@ int main() {
         // 无 gcc 时不断言（探测返回空，属预期）。
     }
 
+    // 3e) 系统头探测优先 g++，与主机编译器解耦：host_cxx 指向不存在的编译器时，
+    //     只要 g++ 可用仍应有 --sys_include（保证「主机换 clang++」不把前端搞挂）。
+    //     无 g++ 的环境探测为空也算正确，故按探测结果决定是否断言。
+    {
+        EdgInvokeOptions o;
+        o.input_path = "k.cu";
+        o.host_cxx = "/nonexistent/hacc-no-such-cxx";
+        auto a = build_cpfe_args(o, /*for_text=*/false, "");
+        const bool prober_available = !hacc::frontend::probe_system_include_dirs("g++").empty();
+        if (prober_available) {
+            expect(has_flag(a, "--sys_include"), "host_cxx 不可用但 g++ 在 → 仍有 --sys_include");
+        }
+    }
+
+    // 3f) probe_system_include_dirs 对真实 g++ 应给出非空列表且含 /usr/include；
+    //     环境里没有 g++ 时跳过断言（探测为空属预期，不算失败）。
+    {
+        const std::vector<std::string> dirs = hacc::frontend::probe_system_include_dirs("g++");
+        if (!dirs.empty()) {
+            bool has_usr_include = false;
+            for (const auto& d : dirs) {
+                if (d == "/usr/include") {
+                    has_usr_include = true;
+                }
+            }
+            expect(has_usr_include, "g++ 的搜索列表含 /usr/include");
+        }
+    }
+
     // 4) 无 base：不产生 --edg_base_dir（由 cpfe 自行处理）。
     {
         EdgInvokeOptions o;

@@ -8,8 +8,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include "support/toolchain.hpp"
 
 namespace hacc::frontend {
 
@@ -21,47 +25,71 @@ std::string getenv_str(const char* name) {
     return (v != nullptr && v[0] != '\0') ? std::string(v) : std::string();
 }
 
-// 探测 C++ 系统头目录（供 cpfe 的 --sys_include）。
+// 把路径安全地嵌入 /bin/sh 命令行（单引号包裹，内部单引号按 '\'' 逃逸）。
+// 之所以需要：编译器路径或头目录可能含空格（如 "/opt/my tools/clang++"），
+// 而 popen 走的是 /bin/sh。
+std::string shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (const char c : s) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out += c;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+// 解析编译器 `-Wp,-v` 打到 stderr 的 include 搜索列表。
 //
 // 背景：cpfe 的 --g++ 模式**不自动**带系统 include 路径，故 .cu 一旦 #include
 // 标准头（如 <stddef.h> / <cstdio>）就会报「cannot open source file」。
-// 这里用 `g++ -x c++ -E -Wp,-v -` 打印的搜索列表补齐（与主机 C++ 编译器一致，
-// 含 C++ 头目录如 /usr/include/c++/N；用 gcc 则只有 C 头，<cstdio> 会找不到）。
-//
-// 返回目录列表；g++ 不可用或解析失败时返回空（此时 .cu 不应 include 标准头）。
-// 结果缓存，避免每次调用都起子进程。
-const std::vector<std::string>& system_include_dirs() {
-    static const std::vector<std::string> dirs = [] {
-        std::vector<std::string> result;
-        FILE* p = popen("g++ -x c++ -E -Wp,-v - 2>&1", "r");
-        if (p == nullptr) {
-            return result;
+// g++ 与 clang++ 的输出格式一致（"#include <...> search starts here:" 起、
+// "End of search list." 止，实测 GCC 14 / LLVM 19），故共用同一套解析。
+std::vector<std::string> parse_include_search_list(FILE* p) {
+    std::vector<std::string> result;
+    char line[4096];
+    bool in_list = false;
+    while (std::fgets(line, sizeof(line), p) != nullptr) {
+        std::string s(line);
+        if (s.find("#include <...> search starts here:") != std::string::npos) {
+            in_list = true;
+            continue;
         }
-        char line[4096];
-        bool in_list = false;
-        while (std::fgets(line, sizeof(line), p) != nullptr) {
-            std::string s(line);
-            if (s.find("#include <...> search starts here:") != std::string::npos) {
-                in_list = true;
-                continue;
-            }
-            if (s.find("End of search list.") != std::string::npos) {
-                break;
-            }
-            if (!in_list) {
-                continue;
-            }
-            // 去掉首尾空白（含换行）。
-            const size_t b = s.find_first_not_of(" \t\r\n");
-            const size_t e = s.find_last_not_of(" \t\r\n");
-            if (b != std::string::npos && e != std::string::npos) {
-                result.push_back(s.substr(b, e - b + 1));
-            }
+        if (s.find("End of search list.") != std::string::npos) {
+            break;
         }
+        if (!in_list) {
+            continue;
+        }
+        // 去掉首尾空白（含换行）。
+        const size_t b = s.find_first_not_of(" \t\r\n");
+        const size_t e = s.find_last_not_of(" \t\r\n");
+        if (b != std::string::npos && e != std::string::npos) {
+            result.push_back(s.substr(b, e - b + 1));
+        }
+    }
+    return result;
+}
+
+// 探测单个编译器（具体路径）的系统头目录，按路径缓存。
+// 单线程 CLI 使用，故不加锁；map 的元素引用在插入后保持稳定。
+const std::vector<std::string>& probe_one_cxx(const std::string& cxx) {
+    static std::map<std::string, std::vector<std::string>> cache;
+    const auto it = cache.find(cxx);
+    if (it != cache.end()) {
+        return it->second;
+    }
+    std::vector<std::string> dirs;
+    // 2>&1：搜索列表打在 stderr 上，与 stdout 合并后逐行解析。
+    const std::string cmd = shell_quote(cxx) + " -x c++ -E -Wp,-v - 2>&1";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (p != nullptr) {
+        dirs = parse_include_search_list(p);
         pclose(p);
-        return result;
-    }();
-    return dirs;
+    }
+    return cache.emplace(cxx, std::move(dirs)).first->second;
 }
 
 // 构建期默认值（由 CMake 注入；未注入则为空）。
@@ -96,6 +124,21 @@ std::string resolve_edg_base_dir(const std::string& explicit_dir) {
     return std::string(HACC_DEFAULT_EDG_BASE);
 }
 
+std::vector<std::string> probe_system_include_dirs(const std::string& host_cxx) {
+    // 优先用 g++：EDG 的 `--g++` 模式按 GCC 语义解析，而 clang++ 的 resource-dir
+    // 内建头（/usr/lib/llvm-19/lib/clang/19/include 下的 stddef.h 等）用了
+    // __has_feature / __building_module 等 clang 专有构造，EDG 会成片报错
+    // （实测 55 个错误，size_t 直接 undefined）。故主机侧可以切 clang++，
+    // 但**前端系统头必须取 GCC 的头**。
+    std::vector<std::string> dirs = probe_one_cxx("g++");
+    if (!dirs.empty()) {
+        return dirs;
+    }
+    // g++ 不可用：退回主机编译器（尽力而为）。clang++ 场景可能失败，此时诊断会
+    // 直接指向标准头解析错误，而不是静默产出坏 IL。
+    return probe_one_cxx(support::resolve_host_cxx(host_cxx));
+}
+
 // 构建单次 cpfe 调用的参数。
 //
 // 重要（实测 cpfe 7.0）：
@@ -128,7 +171,7 @@ std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts, bool for_
         args.push_back(a);
     }
     // 系统头目录：cpfe 的 --g++ 不自动带，需显式 --sys_include（否则 <stddef.h> 等找不到）。
-    for (const auto& dir : system_include_dirs()) {
+    for (const auto& dir : probe_system_include_dirs(opts.host_cxx)) {
         args.push_back("--sys_include");
         args.push_back(dir);
     }

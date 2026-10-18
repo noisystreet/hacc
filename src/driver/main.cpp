@@ -17,7 +17,8 @@ constexpr const char* kUsage =
     "\n"
     "选项:\n"
     "  -o <file>       输出文件（--emit=exe 时为可执行文件，--emit=ptx 时为 PTX）\n"
-    "  -I <dir>        头文件搜索目录（透传给 coolfe++ 与 g++）\n"
+    "  -I <dir>        头文件搜索目录（透传给 coolfe++ 与主机编译器）\n"
+    "  --host-cxx <p>  主机 C++ 编译器（默认 $HACC_HOST_CXX > $HACC_GXX > g++）\n"
     "  --emit=exe      可执行文件（默认，对齐 nvcc「一步到可执行」）\n"
     "  --emit=ptx      设备产物（止于 PTX）\n"
     "  -arch=sm_XX     目标架构（默认 sm_80）\n"
@@ -30,9 +31,10 @@ struct Options {
     hacc::driver::PipelineOptions pipeline;
     bool want_help = false;
     bool want_version = false;
+    bool host_cxx_given = false;  // 是否显式给了 --host-cxx
 };
 
-// 处理需要单个值的选项（-o / -I）。命中则消费下一个参数并返回 true。
+// 处理需要单个值的选项（-o / -I / --host-cxx）。命中则消费下一个参数并返回 true。
 bool take_value_option(const char* a, int* i, int argc, char** argv, Options* out) {
     if (std::strcmp(a, "-o") == 0 && *i + 1 < argc) {
         out->pipeline.output_path = argv[++(*i)];
@@ -40,6 +42,16 @@ bool take_value_option(const char* a, int* i, int argc, char** argv, Options* ou
     }
     if (std::strcmp(a, "-I") == 0 && *i + 1 < argc) {
         out->pipeline.include_dirs.push_back(argv[++(*i)]);
+        return true;
+    }
+    if (std::strncmp(a, "--host-cxx=", 11) == 0) {
+        out->pipeline.host_cxx = a + 11;
+        out->host_cxx_given = true;
+        return true;
+    }
+    if (std::strcmp(a, "--host-cxx") == 0 && *i + 1 < argc) {
+        out->pipeline.host_cxx = argv[++(*i)];
+        out->host_cxx_given = true;
         return true;
     }
     return false;
@@ -109,6 +121,11 @@ int main(int argc, char** argv) {
     }
     if (o.pipeline.output_path.empty()) {
         std::fprintf(stderr, "hacc: 缺少输出文件（-o）。用 -h 查看用法。\n");
+        return 2;
+    }
+    // 显式给空值视为错误：静默回退到 g++ 会让「我明明指定了 clang++」变成难查的谜团。
+    if (o.host_cxx_given && o.pipeline.host_cxx.empty()) {
+        std::fprintf(stderr, "hacc: --host-cxx 需要非空路径。用 -h 查看用法。\n");
         return 2;
     }
 

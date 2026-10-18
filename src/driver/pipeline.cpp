@@ -10,6 +10,7 @@
 #include "host/launch_rewrite.hpp"
 #include "host/stub_gen.hpp"
 #include "support/process.hpp"
+#include "support/toolchain.hpp"
 
 namespace hacc::driver {
 
@@ -159,12 +160,8 @@ std::string resolve_coolicc_path(const PipelineOptions& opts) {
     return resolve_tool(opts.coolicc_path, "HACC_COOLICC", opts.self_path, "coolicc");
 }
 
-std::string resolve_gxx_path(const PipelineOptions& opts) {
-    if (!opts.gxx_path.empty()) {
-        return opts.gxx_path;
-    }
-    std::string env = getenv_str("HACC_GXX");
-    return env.empty() ? std::string("g++") : env;
+std::string resolve_host_cxx_path(const PipelineOptions& opts) {
+    return support::resolve_host_cxx(opts.host_cxx);
 }
 
 std::vector<std::string> build_coolfe_args(const PipelineOptions& opts,
@@ -179,6 +176,10 @@ std::vector<std::string> build_coolfe_args(const PipelineOptions& opts,
         args.push_back("-I");
         args.push_back(dir);
     }
+    // 主机编译器透传：coolfe++ 仅在 g++ 不可用时用它做系统头探测回退
+    // （正常情况探测固定走 g++，见 frontend/edg_invoke.cpp 的说明）。
+    args.push_back("--host-cxx");
+    args.push_back(resolve_host_cxx_path(opts));
     args.push_back(opts.input_path);
     args.push_back("-o");
     args.push_back(cil_path);
@@ -196,6 +197,9 @@ std::vector<std::string> build_coolfe_host_args(const PipelineOptions& opts,
         args.push_back("-I");
         args.push_back(dir);
     }
+    // 同上：主机编译器透传给 coolfe++（供系统头探测的回退路径）。
+    args.push_back("--host-cxx");
+    args.push_back(resolve_host_cxx_path(opts));
     args.push_back(opts.input_path);
     args.push_back("--emit-host=" + host_path);
     args.push_back("-o");
@@ -209,8 +213,10 @@ std::vector<std::string> build_coolicc_args(const PipelineOptions& opts,
     return {"--from-il", "-arch=" + opts.arch, "-o", opts.output_path, cil_path};
 }
 
-std::vector<std::string> build_gxx_args(const PipelineOptions& opts, const std::string& host_path) {
-    // g++ <host.cpp> -I<coolrt>/include -I<hacc>/include [-I <dir> ...] -o <out> <lib> -lcuda
+std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
+                                                 const std::string& host_path) {
+    // <host-cxx> -std=c++20 <host.cpp> -I<coolrt>/include -I<hacc>/include
+    //            [-I <dir> ...] -o <out> <lib> -lcuda
     std::vector<std::string> args;
     args.push_back("-std=c++20");
     args.push_back(host_path);
@@ -281,11 +287,15 @@ bool run_host_stage(const PipelineOptions& opts, const std::string& host, const 
         result->error = err;
         return false;
     }
-    std::vector<std::string> argv = {resolve_gxx_path(opts)};
-    for (const auto& a : build_gxx_args(opts, host)) {
+    const std::string cxx = resolve_host_cxx_path(opts);
+    // 打印实际使用的主机编译器：这是「到底哪个编译器在编」的唯一凭据（可观测性 G5）。
+    std::fprintf(stderr, "hacc: 主机编译器 = %s\n", cxx.c_str());
+    std::vector<std::string> argv = {cxx};
+    for (const auto& a : build_host_compile_args(opts, host)) {
         argv.push_back(a);
     }
-    return run_stage(argv, "主机编译（g++）", result);
+    const std::string stage = "主机编译（" + support::basename_of(cxx) + "）";
+    return run_stage(argv, stage.c_str(), result);
 }
 
 // 清理中间产物（除非 -keep）。

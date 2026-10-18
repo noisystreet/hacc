@@ -13,6 +13,11 @@ add_executable(test_edg_invoke unit/test_edg_invoke.cpp
 target_link_libraries(test_edg_invoke PRIVATE hacc_support)
 add_test(NAME unit_edg_invoke COMMAND test_edg_invoke)
 
+# B8：主机 C++ 编译器解析（纯逻辑：显式 > $HACC_HOST_CXX > $HACC_GXX > g++）。
+add_executable(test_toolchain unit/test_toolchain.cpp)
+target_link_libraries(test_toolchain PRIVATE hacc_support)
+add_test(NAME unit_toolchain COMMAND test_toolchain)
+
 # M2.0：主机源码改写器（`<<<>>>` → haccLaunch + 剔除 `__global__` 函数体）。
 # 纯文本变换，无需 EDG/LLVM/GPU。
 add_executable(test_launch_rewrite unit/test_launch_rewrite.cpp)
@@ -699,6 +704,36 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS e2e_hacc_vector_add_exe)
             set_tests_properties(e2e_hacc_tid_kernel_ptx PROPERTIES
                 DEPENDS e2e_hacc_tid_kernel)
+        endif()
+
+        # B8 主机编译器选择（--host-cxx）。
+        # 1) 指定不存在的编译器 → 主机编译阶段失败（fail loud，不静默回退 g++）。
+        add_test(NAME e2e_hacc_host_cxx_missing
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu"
+                    -o "${CMAKE_CURRENT_BINARY_DIR}/e2e_host_cxx_missing"
+                    --host-cxx=/nonexistent/hacc-host-cxx)
+        set_tests_properties(e2e_hacc_host_cxx_missing PROPERTIES WILL_FAIL TRUE)
+
+        # 2) 显式空值 → 参数校验直接拒绝（不进入流水线）。
+        add_test(NAME e2e_hacc_host_cxx_empty
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu"
+                    -o "${CMAKE_CURRENT_BINARY_DIR}/e2e_host_cxx_empty" --host-cxx=)
+        set_tests_properties(e2e_hacc_host_cxx_empty PROPERTIES WILL_FAIL TRUE)
+
+        # 3) 真切到 clang++ 编一遍 + 运行（无 GPU 返回 77 → SKIP）。
+        #    这条同时验证「前端系统头探测跟随主机编译器」：clang++ 的搜索列表与 g++ 不同。
+        find_program(HACC_CLANGXX clang++)
+        if(HACC_CLANGXX)
+            set(_e2e_hcx_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_host_cxx_clang_run")
+            add_test(NAME e2e_hacc_host_cxx_clang_build
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/vector_add.cu"
+                        -o "${_e2e_hcx_exe}" --host-cxx=${HACC_CLANGXX})
+            add_test(NAME e2e_hacc_host_cxx_clang_run
+                COMMAND "${_e2e_hcx_exe}")
+            set_tests_properties(e2e_hacc_host_cxx_clang_run PROPERTIES
+                DEPENDS e2e_hacc_host_cxx_clang_build
+                SKIP_RETURN_CODE 77
+                PASS_REGULAR_EXPRESSION "vectorAdd OK")
         endif()
     endif()
 endif()

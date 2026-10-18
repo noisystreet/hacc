@@ -77,7 +77,17 @@
 - [ ] **B6 惰性注册的生命周期 / 回收**：模块何时 `coolModuleUnload`（`atexit`？全程不卸？）
       ——[ADR 0003](adr/0003-host-stub-fatbin-registration.md) 只讲「惰性加载」，未讲「卸载 / 释放」。
 - [ ] **B7 `--emit` / `-keep` 的产物集与命名**（对应可观测性目标 G5）。
-- [ ] **B8 主机编译器 / 链接器选择**：默认 `clang++` 还是 `g++`、可否配置（方案 §8 图写作 “clang++/g++”）。
+- [x] **B8 主机编译器 / 链接器选择**：**已定——默认 `g++`，可用 `--host-cxx <path>` / `--host-cxx=<path>` /
+      `$HACC_HOST_CXX` / `$HACC_GXX`（旧名兼容）覆盖；`clang++` 已验证可编**（`e2e_hacc_host_cxx_clang_build`）。
+      - 解析收敛到 `src/support/toolchain.cpp`（`resolve_host_cxx`），避免 driver 与前端两处各自
+        解析导致优先级漂移。
+      - **前端系统头探测固定优先 `g++`**，与主机编译器解耦：EDG 的 `--g++` 模式按 GCC 语义解析，
+        而 clang++ 的 resource-dir 内建头（`stddef.h` 等用 `__has_feature` / `__building_module`）
+        会让 EDG 成片报错（实测 55 个错误、`size_t` undefined）。宿主编译器仅作 g++ 缺失时的回退。
+      - 可观测性：stderr 打印 `hacc: 主机编译器 = <path>`；失败阶段名带编译器
+        （`主机编译（clang++）失败: ...`）；显式空值 fail loud。
+      - 验证：`unit_toolchain`、`e2e_hacc_host_cxx_missing` / `_empty`（WILL_FAIL）、
+        `e2e_hacc_host_cxx_clang_build` / `_clang_run`（真机 `vectorAdd OK`）；`make check` **126/126**。
 
 ## B'. 里程碑实施（M1）
 
