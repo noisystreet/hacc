@@ -1,6 +1,7 @@
 # M4 方案：子集 S1（原子 / `__threadfence` / 设备全局 `__device__` / `__restrict__`）
 
-> 状态：**进行中**（2026-10）。M4.0 / M4.1 / M4.2 / M4.3 已完成；M4.4–M4.6 规划中。本文为 M4 的**实施方案**，落地后逐节回写「已完成」。
+> 状态：**已完成**（2026-10）。M4.0–M4.7 全部落地：M4.7 补上了 §S1 最后一项
+> 「cool* 内存/流 API 混用」的验证（此前机制具备但无覆盖，见 `samples/stream_launch.cu`）。
 > 上游：[compiler-implementation-plan.md](compiler-implementation-plan.md) §9（子集范围 S1）、§10（里程碑 M4）。
 > 前置：M3 已完成（子集 S0 全部落地，见 [m3-subset-s0-plan.md](m3-subset-s0-plan.md)）。
 > 相关：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md)（子集范围 S1）、

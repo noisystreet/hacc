@@ -6,6 +6,15 @@
 
 ### Added
 
+- **M4.7 S1 收尾：`cool*` 内存/流 API 混用验证**：ADR 0004 §S1 最后一项「主机侧与 coolrt `cool*`
+  内存/流 API 混用」此前**只有机制、没有覆盖** —— `<<<grid, block, sharedMem, stream>>>` 的四参数
+  形式在 `launch_rewrite` 里早已支持（第 4 参缺省 `nullptr`），`haccLaunch` 也会透传给
+  `coolLaunchKernel(..., smem, stream)`，但 samples/e2e 里没有任何 stream 用例，属于「实现了但没人验证」。
+  新增 `samples/stream_launch.cu`：默认流与自定义流交替启动同一内核、`coolStreamSynchronize` 同步、
+  流句柄复用，并与 `coolMalloc` / `coolMemcpy`（同步拷贝）混用。纳入「示例不腐化」回归
+  （`sample_stream_launch_build` / `_run`）。`make check` **170/170**、零 SKIP。
+  至此 ADR 0004 §S1 的四项（fence / 原子 / `__restrict__` + 地址空间 / cool* 混用）全部有实现且有覆盖。
+
 - **M5.4 自定义 `__device__` 函数调用**：内核里终于可以调用自己写的设备函数（此前一律 fail loud）。
   路线选**发射独立设备函数**而非内联展开：`build_kernel` 拆成 `declare_routine`（只建 Function）+
   `define_routine_body`（填 body），新增 `emit_all_routines` 分三遍 —— 先声明全部设备函数、

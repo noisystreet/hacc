@@ -448,7 +448,7 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         # M4.6 samples：新增原子归约 / 设备全局 / 栅栏三个示例（同受「示例不腐化」回归保护）。
         if(HACC_COOLRUNTIME_INCLUDE)
             foreach(_sample vector_add vector_type shared_reduce constant_pi dim3_grid
-                            atomic_reduce device_global threadfence)
+                            atomic_reduce device_global threadfence stream_launch)
                 set(_sample_exe "${CMAKE_CURRENT_BINARY_DIR}/sample_${_sample}")
                 add_test(NAME sample_${_sample}_build
                     COMMAND hacc "${CMAKE_SOURCE_DIR}/samples/${_sample}.cu"
