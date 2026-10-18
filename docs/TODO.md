@@ -69,9 +69,8 @@
      （`float2/3/4` 等，提交 `f3cfbdd`）；② 向量类型映射为 LLVM `<N x T>`（PTX `ld.param.v4.f32`）；
      ③ 聚合参数 PTX ABI 经 spike 确认为 **byval**（NVPTX 自动发射，无需拆解）。e2e 真跑通过
      （`vectorType OK: 110.000000`）。
-- [ ] **B4【跨项目】默认流语义 × coolruntime `COOL_STRICT_DEFAULT_STREAM`**：该开关在
-      coolruntime `ARCHITECTURE.md` 仍为未决项（Owner: maintainers，Due: P2）；
-      它决定 hacc 生成 `<<<>>>`（`stream=NULL`）的行为是否符合预期。需与 coolrt 对齐。
+- [x] **B4【跨项目】默认流语义 × coolruntime `COOL_STRICT_DEFAULT_STREAM`**：**已定 —— `NULL` = CUDA legacy 默认流，不引入该开关**（coolruntime 的 ADR 0005 `docs/adr/0005-default-stream-semantics.md`：与所有 blocking 流隐式同步，不支持 per-thread 默认流，该开关自 P2 起从未存在，决定不引入）。
+      因此 hacc 生成 `<<<>>>`（`stream=NULL`）的行为**等同 nvcc 默认编译结果**，符合预期。
 - [x] **B5 `dim3` 等类型的来源**：**已定 —— `dim3` 由 coolrt 公开头（`cool_types.h`）唯一提供**。
       - hacc 的 `hacc_runtime.h` **只消费不定义**：显式 `#include <cool/cool_types.h>` 声明依赖，
         并加 `static_assert(std::is_trivially_copyable<dim3>)` 锁住「按值传 C ABI」的前提。
