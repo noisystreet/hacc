@@ -229,7 +229,8 @@ std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
     }
     args.push_back("-o");
     args.push_back(opts.output_path);
-    args.push_back(opts.coolrt_lib.empty() ? (root + "/build/libcoolruntime.a") : opts.coolrt_lib);
+    args.push_back(opts.coolrt_lib.empty() ? (root + "/build/libcoolrt_static.a")
+                                           : opts.coolrt_lib);
     args.push_back("-lcuda");
     return args;
 }

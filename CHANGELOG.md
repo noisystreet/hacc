@@ -47,6 +47,10 @@
 
 ### Changed
 
+- **默认链接的 coolrt 静态库名改为 `libcoolrt_static.a`**（coolruntime 侧同步改名，对齐 CUDA 的
+  `libcudart_static.a` 风格；另新增共享库 `libcoolrt.so`）。默认路径仍按 `<coolrt>/build/` 推导，
+  `--coolrt-lib` 显式指定不受影响。
+
 - **`(void)expr` 不再导致编译失败**：此前设备端 `translate_cast` 把「转成 void」当成真实类型转换，
   生成非法 IR（`trunc i32 %2 to void` / `sext ptr %2 to void`），LLVM 报
   "void type only allowed for function results"。现按 C++ 语义处理为「丢弃值、保留副作用」：

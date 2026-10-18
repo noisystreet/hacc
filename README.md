@@ -120,7 +120,7 @@ hacc/
 ## 与 coolrt 的关系
 
 ```text
-foo.cu ──hacc──▶ 设备映像(PTX/cubin) + 主机桩/注册 ──链接──▶ libcoolruntime ──▶ 运行
+foo.cu ──hacc──▶ 设备映像(PTX/cubin) + 主机桩/注册 ──链接──▶ libcoolrt_static ──▶ 运行
                      \__________________ coolModuleLoadData / coolModuleGetFunction / coolLaunchKernel
 ```
 

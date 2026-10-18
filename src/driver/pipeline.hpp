@@ -41,7 +41,7 @@ struct PipelineOptions {
     std::string host_cxx;  // 主机 C++ 编译器（显式 > $HACC_HOST_CXX > $HACC_GXX > "g++"）
     // COOLRuntime 头目录与库（主机编译用；空则按环境变量 / 默认推导）。
     std::string coolrt_include;  // -I<coolrt>/include
-    std::string coolrt_lib;      // <coolrt>/build/libcoolruntime.a
+    std::string coolrt_lib;      // <coolrt>/build/libcoolrt_static.a
     // hacc 自身路径（argv[0]），用于推导同目录子工具。
     std::string self_path;
 };
