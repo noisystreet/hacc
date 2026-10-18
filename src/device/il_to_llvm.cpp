@@ -472,6 +472,13 @@ struct KernelContext {
 // 前向声明（语句与表达式互相递归）。
 void translate_statement(a_statement_ptr stmt, KernelContext& kc);
 llvm::Value* translate_expr(an_expr_node_ptr expr, KernelContext& kc);
+// 真值归一（非零 → i1）。定义在语句翻译段，但 translate_unary 的 !/bool_cast 也要用。
+llvm::Value* to_i1(llvm::Value* cond, KernelContext& kc);
+// 复合赋值判据与「按基础算子发射二元运算」，定义在运算符分类段（那里才用到
+// is_bitwise_operator），但 translate_assign 更早，故先声明。
+bool compound_assign_base_op(an_expr_operator_kind op, an_expr_operator_kind& base);
+llvm::Value* emit_binop_by_base_op(an_expr_operator_kind base, a_type_ptr type, llvm::Value* va,
+                                   llvm::Value* vb, KernelContext& kc);
 
 // 取址常量（如 &g，M4.4 原子内建需要）：EDG 在 constant::expr 上给出「表示该常量的
 // 表达式」（通常为 eok_address_of），直接翻译它即可。
@@ -567,7 +574,18 @@ an_expr_node_ptr binary_operands(an_expr_node_ptr operands, const char* what) {
 }
 
 // 赋值：operands: [lhs, rhs]；lhs 是左值。
-llvm::Value* translate_assign(an_expr_node_ptr operands, KernelContext& kc) {
+//
+// 复合赋值（a op= b）也走这里：它等价于 a = a op b，但**左值地址只求值一次**
+// （a 若是 p[i++] 这类带副作用的表达式，改写成两条语句会算两次）。
+// EDG 不会把 `a += 1` 降级成 `a = a + 1` —— IL 里保留 eok_add_assign，
+// 所以必须显式处理，否则用户写 += 就撞「不支持的运算符」。
+llvm::Value* translate_assign(an_expr_operator_kind op, an_expr_node_ptr operands,
+                              KernelContext& kc) {
+    an_expr_operator_kind base = op;
+    const bool is_compound = compound_assign_base_op(op, base);
+    if (!is_compound && op != eok_assign) {
+        fail("内部错误：非赋值运算符被送进 translate_assign");
+    }
     an_expr_node_ptr lhs = operands;
     an_expr_node_ptr rhs = (lhs != nullptr) ? lhs->next : nullptr;
     if (lhs == nullptr || rhs == nullptr) {
@@ -575,6 +593,12 @@ llvm::Value* translate_assign(an_expr_node_ptr operands, KernelContext& kc) {
     }
     llvm::Value* addr = translate_expr_address(lhs, kc);
     llvm::Value* val = translate_expr(rhs, kc);
+    if (is_compound) {
+        // 读-改-写：旧值从刚算出的地址取，保证与 store 打的是同一处。
+        llvm::Type* ty = map_type(lhs->type, kc.ctx);
+        llvm::Value* old = kc.builder.CreateLoad(ty, addr);
+        val = emit_binop_by_base_op(base, lhs->type, old, val, kc);
+    }
     kc.builder.CreateStore(val, addr);
     return val;
 }
@@ -801,6 +825,25 @@ llvm::Value* translate_cast(an_expr_node_ptr expr, KernelContext& kc) {
                             is_unsigned_integer(expr->type), kc);
 }
 
+// !x 与 (bool)x 的公共实现：先做真值归一（非零 → 1），需要时再取反。
+//
+// 此前的实现是**错的**：eok_not 落到 translate_unary 的 default 分支走 CreateNot
+// （按位取反），于是 !0 得 -1、!1 得 -2 —— 对任意非零输入恒为「真」，与逻辑非相反。
+// 一直没暴露有两个原因：一是已有用例的 !x 都落在条件位置，二是 EDG 会先把操作数包
+// 一层 eok_bool_cast，而后者当时不被识别、直接撞「不支持的运算符」，压根走不到这。
+//
+// bool 在 IL 里是 int_kind=char + bool_type=TRUE（hacc 映射为 i8），
+// 所以取反后还要把 i1 扩回目标类型。
+llvm::Value* emit_logical_or_bool(an_expr_operator_kind op, an_expr_node_ptr expr,
+                                  KernelContext& kc) {
+    llvm::Value* truth = to_i1(translate_expr(expr->variant.operation.operands, kc), kc);
+    if (op == eok_not) {
+        truth = kc.builder.CreateNot(truth);
+    }
+    llvm::Type* dst = map_type(expr->type, kc.ctx);
+    return truth->getType() == dst ? truth : kc.builder.CreateZExt(truth, dst);
+}
+
 // 一元运算：取负 / 取反 / 取址 / 解引用。
 llvm::Value* translate_unary(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
     an_expr_node_ptr operand = expr->variant.operation.operands;
@@ -820,13 +863,15 @@ llvm::Value* translate_unary(an_expr_operator_kind op, an_expr_node_ptr expr, Ke
         }
         case eok_complement:
             // ~x：按位取反，结果类型与操作数一致（CreateNot 即 xor -1）。
-            // 与 eok_not（逻辑非，结果为 bool）是两回事 —— 后者目前落到下面的
-            // default 分支，也用 CreateNot，语义存疑，见 TODO B9-2。
+            // 与下面的 eok_not 严格区分：对 0/1 值前者得 -1/-2，后者得 1/0。
             return kc.builder.CreateNot(translate_expr(operand, kc));
-        default: {
-            llvm::Value* v = translate_expr(operand, kc);
-            return kc.builder.CreateNot(v);
-        }
+        case eok_not:
+        case eok_bool_cast:
+            return emit_logical_or_bool(op, expr, kc);
+        default:
+            // classify_operator 已把 Unary 类的算子全部列在 is_unary_operator 里，
+            // 能走到这里说明两者不同步。
+            fail("内部错误：translate_unary 收到未覆盖的一元运算符", expr->position);
     }
 }
 
@@ -1332,7 +1377,7 @@ bool is_bitwise_operator(an_expr_operator_kind op) {
     }
 }
 
-// 是否为一元运算符（* & - ! ~）。
+// 是否为一元运算符（* & - ! ~ 以及 (bool)）。
 //
 // 单独抽成函数是为了让 classify_operator 保持低复杂度 —— 原先这里是一串
 // `||` 条件，每加一个运算符都会把主分派函数的圈复杂度顶上去。
@@ -1343,15 +1388,95 @@ bool is_unary_operator(an_expr_operator_kind op) {
         case eok_negate:
         case eok_not:
         case eok_complement:
+        // (bool)x：EDG 用它把任意标量规整为布尔，`!x` / `if (x)` / `a && b`
+        // 都会先套一层，所以它不是可选的语法糖。
+        case eok_bool_cast:
             return true;
         default:
             return false;
     }
 }
 
+// 算术类复合赋值（+= -= *= /= %=）→ 对应的二元算子。
+//
+// 拆成算术/位运算两个小函数而不是一个大 switch：合起来 10 个 case + default
+// 会把圈复杂度顶到 11，超过门限 10。
+bool arith_assign_base_op(an_expr_operator_kind op, an_expr_operator_kind& base) {
+    switch (op) {
+        case eok_add_assign:
+            base = eok_add;
+            return true;
+        case eok_subtract_assign:
+            base = eok_subtract;
+            return true;
+        case eok_multiply_assign:
+            base = eok_multiply;
+            return true;
+        case eok_divide_assign:
+            base = eok_divide;
+            return true;
+        case eok_remainder_assign:
+            base = eok_remainder;
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 位运算类复合赋值（<<= >>= &= |= ^=）→ 对应的二元算子。
+bool bitwise_assign_base_op(an_expr_operator_kind op, an_expr_operator_kind& base) {
+    switch (op) {
+        case eok_shiftl_assign:
+            base = eok_shiftl;
+            return true;
+        case eok_shiftr_assign:
+            base = eok_shiftr;
+            return true;
+        case eok_and_assign:
+            base = eok_and;
+            return true;
+        case eok_or_assign:
+            base = eok_or;
+            return true;
+        case eok_xor_assign:
+            base = eok_xor;
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 复合赋值 → 基础二元算子；不是复合赋值时返回 false 且不改 base。
+bool compound_assign_base_op(an_expr_operator_kind op, an_expr_operator_kind& base) {
+    return arith_assign_base_op(op, base) || bitwise_assign_base_op(op, base);
+}
+
+// 是否属于赋值类（`=` 与所有 `op=`）。
+bool is_assign_operator(an_expr_operator_kind op) {
+    an_expr_operator_kind base = op;
+    return op == eok_assign || compound_assign_base_op(op, base);
+}
+
+// 按基础算子发射二元运算：位运算走 bitwise，其余按操作数类型走浮点/整型算术。
+// 复合赋值复用这一处，省得「+=」和「+」的符号性/浮点分派逻辑各写一遍再走样。
+llvm::Value* emit_binop_by_base_op(an_expr_operator_kind base, a_type_ptr type, llvm::Value* va,
+                                   llvm::Value* vb, KernelContext& kc) {
+    const bool is_fp = type != nullptr && type->kind == tk_float;
+    if (is_bitwise_operator(base)) {
+        if (is_fp) {
+            fail("位运算符要求整型操作数");
+        }
+        return emit_bitwise_binop(base, is_unsigned_integer(type), va, vb, kc);
+    }
+    if (is_fp) {
+        return emit_fp_arith(base, va, vb, kc);
+    }
+    return emit_int_arith(base, is_unsigned_integer(type), va, vb, kc);
+}
+
 // 把 EDG 运算符 kind 归类。
 OpClass classify_operator(an_expr_operator_kind op) {
-    if (op == eok_assign) {
+    if (is_assign_operator(op)) {
         return OpClass::Assign;
     }
     if (is_arith_operator(op)) {
@@ -1389,7 +1514,7 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
     const an_expr_operator_kind op = expr->variant.operation.kind;
     switch (classify_operator(op)) {
         case OpClass::Assign:
-            return translate_assign(expr->variant.operation.operands, kc);
+            return translate_assign(op, expr->variant.operation.operands, kc);
         case OpClass::Arith:
             return translate_arith(op, expr, kc);
         case OpClass::Compare:

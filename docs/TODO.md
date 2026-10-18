@@ -132,9 +132,34 @@
       变量一律掺入 `threadIdx.x`，否则常量折叠后 PTX 里根本不出指令，断言就成了空转。
       `make check` **183/183**。
 
-      **仍未覆盖**（B9-2）：复合赋值形式 `<<=` `>>=` `&=` `|=` `^=`（`eok_*_assign`）。
-      另外 `eok_not`（逻辑非）目前落到 `translate_unary` 的 `default` 分支也走
-      `CreateNot`（按位取反），语义存疑，需要单独核对。
+      **B9-2（同一轮补完）**：复合赋值 `+= -= *= /= %=` `<<= >>= &= |= ^=` 与
+      **逻辑非 `!` 的语义错误**。
+
+      先做了 spike 才动手，因为「EDG 会不会把 `a += 1` 降级成 `a = a + 1`」是未知的。
+      实测答案是**不会**：IL 里保留 `eok_add_assign` / `eok_or_assign` 等节点，
+      所以此前 `x += 1` 会直接撞「不支持的运算符」。同一份 IL 还暴露了两件事：
+      - 逻辑非在 IL 里是 `eok_not(eok_bool_cast(x))`，而 `eok_bool_cast` 当时完全没处理；
+      - `bool` 类型不是独立 kind，而是 `int_kind=char` + `bool_type=TRUE`（映射为 i8）。
+
+      **逻辑非的旧实现是错的**：`eok_not` 落到 `translate_unary` 的 `default` 分支走
+      `CreateNot`（按位取反），`!0` 得 -1、`!5` 得 -6 —— 对任意非零输入恒为非零，
+      与逻辑非完全相反。它没被暴露是因为 `!x` 前面总套着不被识别的 `eok_bool_cast`，
+      编译先失败了，压根走不到 `eok_not`。现在两者合成 `emit_logical_or_bool`：
+      先 `to_i1` 归一再按需取反，最后扩回目标类型。
+
+      **复合赋值**不展开成 `a = a op b`，而是「算一次地址 → load → 运算 → store」，
+      这样 `p[i++] += 1` 这类左值只求值一次。基础算子映射拆成算术/位运算两个小函数
+      （合起来 10 case + default 会顶到 CCN 11）。
+
+      **测试**：`tests/golden/e2e/compound_assign.cu`，21 项数值断言 + 4 条 PTX 断言
+      （`and` / `or` / `xor` / `shr.s32`）。PTX 只挑不容易被优化改写的：`b <<= 2` 会被
+      LLVM 化成 `add b, b`、`a /= 4` 会被化成移位，硬断言这些会误报。
+      中间结果全部写进 `out[]` —— spike 里吃过亏：kernel 若被代数化简成
+      `a + ~a = -1`，整条依赖链会被折叠成一条 `mov`，断言就测了个寂寞。
+      `make check` **191/191**。
+
+      仍未覆盖：指针复合赋值（`eok_padd_assign` / `eok_psubtract_assign`，即 `p += i`），
+      以及 `&&` / `||`（`eok_land` / `eok_lor`）。
 
 ## B'. 里程碑实施（M1）
 

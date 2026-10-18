@@ -6,6 +6,37 @@
 
 ### Added
 
+- **复合赋值 `+= -= *= /= %=` `<<= >>= &= |= ^=` 与逻辑非 `!`（TODO B9-2）**：
+  此前这两类语法都编译不过，且失败信息都是「不支持的运算符」，从错误里分不出是哪一项。
+
+  **先 spike 再动手**，因为「EDG 会不会把 `a += 1` 降级成 `a = a + 1`」是未知的。
+  实测答案是**不会** —— IL 里保留 `eok_add_assign` / `eok_or_assign` 等节点。
+  同一份 IL 还暴露了两件原先没料到的：
+  - 逻辑非在 IL 里是 `eok_not(eok_bool_cast(x))`，而 `eok_bool_cast` 完全没处理；
+  - `bool` 不是独立类型 kind，而是 `int_kind=char` + `bool_type=TRUE`，映射为 i8
+    （所以类型系统不用改，只是取反后要把 i1 扩回 i8）。
+
+  **逻辑非的旧实现是错的**：`eok_not` 落到 `translate_unary` 的 `default` 分支走
+  `CreateNot`（按位取反），于是 `!0` 得 -1、`!5` 得 -6 —— 对任意非零输入恒为非零，
+  与逻辑非正好相反。它一直没暴露，是因为 `!x` 前面总套着不被识别的 `eok_bool_cast`，
+  编译先失败了，根本走不到 `eok_not`。现在两者合成 `emit_logical_or_bool`：
+  先 `to_i1` 归一再按需取反，最后扩回目标类型。
+
+  **复合赋值**不展开成 `a = a op b`，而是「地址求值一次 → load → 运算 → store」，
+  这样 `p[i++] += 1` 这类带副作用的左值不会被算两次。基础算子映射拆成
+  算术/位运算两个小函数 —— 合成一个大 switch 是 10 case + default，CCN 会到 11。
+
+  测试 `tests/golden/e2e/compound_assign.cu`：21 项数值断言 + 4 条 PTX 断言
+  （`and` / `or` / `xor` / `shr.s32`）。两处刻意的选择：
+  - PTX 只断言不容易被优化改写的四条。`b <<= 2` 会被 LLVM 化成 `add b, b`、
+    `a /= 4` 会被化成移位，硬断言 shl/div/rem 是误报而不是发现 bug。
+  - 中间结果全部写进 `out[]`。spike 时就吃过亏：`a + ~a` 恒等于 -1，LLVM 把整个
+    kernel 折叠成一条 `mov -1`，PTX 里连一条算术指令都没有 —— 若只断言最终值，
+    测试看起来全绿，实际什么也没验证。
+  `make check` **191/191**。
+
+  仍未覆盖：指针复合赋值（`p += i`，`eok_padd_assign`）与 `&&` / `||`（`eok_land` / `eok_lor`）。
+
 - **位运算符 `<<` `>>` `&` `|` `^` `~`（TODO B9）**：`il_to_llvm` 新增 `OpClass::Bitwise`
   分派，`eok_and` / `eok_or` / `eok_xor` / `eok_shiftl` / `eok_shiftr` 落 LLVM
   `and` / `or` / `xor` / `shl` / `ashr|lshr`，一元 `~`（`eok_complement`）落 `CreateNot`。

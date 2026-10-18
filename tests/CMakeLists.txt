@@ -855,6 +855,51 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "bitwise OK")
 
+        # B9-2 golden：复合赋值（+= -= *= /= %= <<= >>= &= |= ^=）与逻辑非 !。
+        # PTX 只断言最不容易被优化改写的四条：
+        #   `b <<= 2` 可能被 LLVM 化成 `add b, b`，`a /= 4` / `a %= 4` 会被化成
+        #   移位与掩码，硬断言 shl / div / rem 会误报。逻辑非同理（没有专门的 PTX
+        #   指令，最终是 `setp` + `selp`），改由 e2e 的数值断言覆盖。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_ca_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_compound.cil")
+            set(_ca_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_compound.ptx")
+            add_test(NAME golden_frontend_compound
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_ca_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/compound_assign.cu")
+            add_test(NAME golden_device_il_to_ptx_compound
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_ca_ptx}" "${_ca_cil}")
+            set_tests_properties(golden_device_il_to_ptx_compound PROPERTIES
+                DEPENDS golden_frontend_compound)
+            add_test(NAME golden_device_il_to_ptx_compound_and
+                COMMAND grep -qE "and\\.b32" "${_ca_ptx}")
+            add_test(NAME golden_device_il_to_ptx_compound_or
+                COMMAND grep -qE "(^|[^x])or\\.b32" "${_ca_ptx}")
+            add_test(NAME golden_device_il_to_ptx_compound_xor
+                COMMAND grep -qE "xor\\.b32" "${_ca_ptx}")
+            add_test(NAME golden_device_il_to_ptx_compound_ashr
+                COMMAND grep -qE "shr\\.s32" "${_ca_ptx}")
+            foreach(_ca_name and or xor ashr)
+                set_tests_properties(golden_device_il_to_ptx_compound_${_ca_name}
+                    PROPERTIES DEPENDS golden_device_il_to_ptx_compound)
+            endforeach()
+        endif()
+
+        # B9-2 e2e：复合赋值 + 逻辑非编译 + 运行 + 数值校验（21 项）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_ca_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_compound_run")
+        add_test(NAME e2e_hacc_compound_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/compound_assign.cu"
+                    -o "${_e2e_ca_run_exe}")
+        add_test(NAME e2e_hacc_compound_run
+            COMMAND "${_e2e_ca_run_exe}")
+        set_tests_properties(e2e_hacc_compound_run PROPERTIES
+            DEPENDS e2e_hacc_compound_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "compound OK")
+
         # KI-1 / ADR 0007 e2e：设备全局**跨 kernel 共享**（模块粒度 = 编译单元）。
         # 修复前必然失败：每个 kernel 各载入一份 module，.global 各一份副本，
         # 后一个 kernel 读到模块初值。无可用 CUDA 设备时返回 77，按 SKIP 处理。
