@@ -763,6 +763,44 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             endforeach()
         endif()
 
+        # B9 golden：位运算符（& | ^ << >> ~）→ LLVM and/or/xor/shl/ashr/lshr → PTX。
+        # 注意 PTX 断言里的 \bor\b：xor.b32 含子串 "or.b32"，不加词边界会误判
+        # 「or 指令已生成」。~（eok_complement）不单独断言指令 —— LLVM 可能把它
+        # 翻成 not.b32 也可能保留为 xor -1，形式不唯一，靠 e2e 的数值断言覆盖。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_bw_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_bitwise.cil")
+            set(_bw_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_bitwise.ptx")
+            add_test(NAME golden_frontend_bitwise
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_bw_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/bitwise.cu")
+            add_test(NAME golden_device_il_to_ptx_bitwise
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_bw_ptx}" "${_bw_cil}")
+            set_tests_properties(golden_device_il_to_ptx_bitwise PROPERTIES
+                DEPENDS golden_frontend_bitwise)
+            # 逐条显式断言。不写成 foreach 是因为要从正则反推测试名，
+            # 而正则里的 `\b` 会在 CTest 生成阶段触发 "Invalid character escape"。
+            # `(^|[^x])or\.b32` 排除 xor.b32 的子串误匹配。
+            add_test(NAME golden_device_il_to_ptx_bitwise_and
+                COMMAND grep -qE "and\\.b32" "${_bw_ptx}")
+            add_test(NAME golden_device_il_to_ptx_bitwise_or
+                COMMAND grep -qE "(^|[^x])or\\.b32" "${_bw_ptx}")
+            add_test(NAME golden_device_il_to_ptx_bitwise_xor
+                COMMAND grep -qE "xor\\.b32" "${_bw_ptx}")
+            add_test(NAME golden_device_il_to_ptx_bitwise_shl
+                COMMAND grep -qE "shl\\.b32" "${_bw_ptx}")
+            add_test(NAME golden_device_il_to_ptx_bitwise_ashr
+                COMMAND grep -qE "shr\\.s32" "${_bw_ptx}")
+            add_test(NAME golden_device_il_to_ptx_bitwise_lshr
+                COMMAND grep -qE "shr\\.u32" "${_bw_ptx}")
+            foreach(_bw_name and or xor shl ashr lshr)
+                set_tests_properties(golden_device_il_to_ptx_bitwise_${_bw_name}
+                    PROPERTIES DEPENDS golden_device_il_to_ptx_bitwise)
+            endforeach()
+        endif()
+
         # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_dg_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global_run")
@@ -802,6 +840,20 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_atomics_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "atomics OK")
+
+        # B9 e2e：位运算符编译 + 运行 + 数值校验。
+        # 覆盖 4 种指令 + 有符号/无符号右移的区分（同一 bit 模式，两种结果）。
+        # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
+        set(_e2e_bw_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_bitwise_run")
+        add_test(NAME e2e_hacc_bitwise_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/bitwise.cu"
+                    -o "${_e2e_bw_run_exe}")
+        add_test(NAME e2e_hacc_bitwise_run
+            COMMAND "${_e2e_bw_run_exe}")
+        set_tests_properties(e2e_hacc_bitwise_run PROPERTIES
+            DEPENDS e2e_hacc_bitwise_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "bitwise OK")
 
         # KI-1 / ADR 0007 e2e：设备全局**跨 kernel 共享**（模块粒度 = 编译单元）。
         # 修复前必然失败：每个 kernel 各载入一份 module，.global 各一份副本，

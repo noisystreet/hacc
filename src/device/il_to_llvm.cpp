@@ -660,6 +660,45 @@ llvm::Value* translate_arith(an_expr_operator_kind op, an_expr_node_ptr expr, Ke
     return emit_int_arith(op, is_unsigned_integer(expr->type), va, vb, kc);
 }
 
+// 位运算指令（& | ^ << >>）。仅整型；右移按符号性选算术/逻辑移位。
+//
+// 为什么右移要分符号：`>>` 对负的有符号数在 C 里是实现定义，但 nvcc/PTX 一律走
+// 算术右移（保留符号位），故有符号用 CreateAShr、无符号用 CreateLShr。
+// 左移不分符号（CreateShl），溢出行为在 PTX 里是截断，与 C 的未定义行为不同，
+// 但我们只负责忠实翻译，不对用户代码做额外的溢出检查。
+llvm::Value* emit_bitwise_binop(an_expr_operator_kind op, bool is_unsigned, llvm::Value* va,
+                                llvm::Value* vb, KernelContext& kc) {
+    switch (op) {
+        case eok_and:
+            return kc.builder.CreateAnd(va, vb);
+        case eok_or:
+            return kc.builder.CreateOr(va, vb);
+        case eok_xor:
+            return kc.builder.CreateXor(va, vb);
+        case eok_shiftl:
+            return kc.builder.CreateShl(va, vb);
+        case eok_shiftr:
+            return is_unsigned ? kc.builder.CreateLShr(va, vb) : kc.builder.CreateAShr(va, vb);
+        default:
+            fail("内部错误：非位运算符被送进 emit_bitwise_binop");
+    }
+}
+
+// 位运算（& | ^ << >>）：操作数必须为整型。
+//
+// 浮点操作数直接报错而不是隐式截断 —— C 里对 float 用 & 是编译错误，
+// 这里保持一致，避免用户以为「写出来了就是对的」。
+llvm::Value* translate_bitwise(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr a = binary_operands(expr->variant.operation.operands, "位运算符");
+    an_expr_node_ptr b = a->next;
+    if (expr->type != nullptr && expr->type->kind == tk_float) {
+        fail("位运算符要求整型操作数");
+    }
+    llvm::Value* va = translate_expr(a, kc);
+    llvm::Value* vb = translate_expr(b, kc);
+    return emit_bitwise_binop(op, is_unsigned_integer(expr->type), va, vb, kc);
+}
+
 // 浮点比较指令。
 llvm::Value* emit_fp_compare(an_expr_operator_kind op, llvm::Value* va, llvm::Value* vb,
                              KernelContext& kc) {
@@ -779,6 +818,11 @@ llvm::Value* translate_unary(an_expr_operator_kind op, an_expr_node_ptr expr, Ke
             const bool is_fp = expr->type != nullptr && expr->type->kind == tk_float;
             return is_fp ? kc.builder.CreateFNeg(v) : kc.builder.CreateNeg(v);
         }
+        case eok_complement:
+            // ~x：按位取反，结果类型与操作数一致（CreateNot 即 xor -1）。
+            // 与 eok_not（逻辑非，结果为 bool）是两回事 —— 后者目前落到下面的
+            // default 分支，也用 CreateNot，语义存疑，见 TODO B9-2。
+            return kc.builder.CreateNot(translate_expr(operand, kc));
         default: {
             llvm::Value* v = translate_expr(operand, kc);
             return kc.builder.CreateNot(v);
@@ -1228,6 +1272,7 @@ enum class OpClass {
     Assign,
     Arith,
     Compare,
+    Bitwise,
     Cast,
     Unary,
     DotField,
@@ -1269,6 +1314,41 @@ bool is_compare_operator(an_expr_operator_kind op) {
     }
 }
 
+// 是否为二元位运算符（& | ^ << >>）。
+//
+// 注意 EDG 的命名：按位与/或/异或就叫 eok_and / eok_or / eok_xor，
+// 位移是 eok_shiftl / eok_shiftr（不是 shl/shr）。按位取反 eok_complement
+// 是一元的，归在 is_unary_operator 里。
+bool is_bitwise_operator(an_expr_operator_kind op) {
+    switch (op) {
+        case eok_and:
+        case eok_or:
+        case eok_xor:
+        case eok_shiftl:
+        case eok_shiftr:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 是否为一元运算符（* & - ! ~）。
+//
+// 单独抽成函数是为了让 classify_operator 保持低复杂度 —— 原先这里是一串
+// `||` 条件，每加一个运算符都会把主分派函数的圈复杂度顶上去。
+bool is_unary_operator(an_expr_operator_kind op) {
+    switch (op) {
+        case eok_indirect:
+        case eok_address_of:
+        case eok_negate:
+        case eok_not:
+        case eok_complement:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // 把 EDG 运算符 kind 归类。
 OpClass classify_operator(an_expr_operator_kind op) {
     if (op == eok_assign) {
@@ -1280,10 +1360,13 @@ OpClass classify_operator(an_expr_operator_kind op) {
     if (is_compare_operator(op)) {
         return OpClass::Compare;
     }
+    if (is_bitwise_operator(op)) {
+        return OpClass::Bitwise;
+    }
     if (op == eok_cast) {
         return OpClass::Cast;
     }
-    if (op == eok_indirect || op == eok_address_of || op == eok_negate || op == eok_not) {
+    if (is_unary_operator(op)) {
         return OpClass::Unary;
     }
     if (op == eok_dot_field) {
@@ -1311,6 +1394,8 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             return translate_arith(op, expr, kc);
         case OpClass::Compare:
             return translate_compare(op, expr, kc);
+        case OpClass::Bitwise:
+            return translate_bitwise(op, expr, kc);
         case OpClass::Cast:
             return translate_cast(expr, kc);
         case OpClass::Unary:

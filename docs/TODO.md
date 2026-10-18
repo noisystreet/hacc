@@ -107,19 +107,34 @@
       - 验证：`unit_toolchain`、`e2e_hacc_host_cxx_missing` / `_empty`（WILL_FAIL）、
         `e2e_hacc_host_cxx_clang_build` / `_clang_run`（真机 `vectorAdd OK`）；`make check` **126/126**。
 
-- [ ] **B9【跨项目·coolrt P5.1 暴露】位运算符 `<<` `>>` `&` `|` `^` `~` 整体未支持**：
+- [x] **B9【跨项目·coolrt P5.1 暴露】位运算符 `<<` `>>` `&` `|` `^` `~`** —— **已完成**。
       coolrt 已声明 `atomicAnd` / `atomicOr` / `atomicXor`，hacc 也已能映射到
       `atomicrmw and/or/xor` → `atom.global.{and,or,xor}.b32`，但 `il_to_llvm` 的表达式翻译
-      （M1.2.3）只覆盖「算术 / 比较 / 赋值 / 取址 / 解引用 / 转换」，**位运算符一个都没有**。
+      （M1.2.3）原本只覆盖「算术 / 比较 / 赋值 / 取址 / 解引用 / 转换」，**位运算符一个都没有**。
       后果很具体：用户写不出 `atomicOr(&flag, 1u << tid)` 这种最常见的用法，只能传字面量
       或已算好的变量 —— P5.1 的 e2e 用例原本就是这么写的，编译报
       「不支持的运算符」后才改成常量。
-      工作量：`eok_shl` / `eok_shr` / `eok_bitand` / `eok_bitor` / `eok_bitxor` / `eok_compl`
-      各需一个分支，属机械工作。**但现在已有真实用例驱动**：coolrt P5.3 的 warp 原语
-      （`__shfl_down_sync` / `__ballot_sync` / `__activemask` 等）典型写法处处是
-      `threadIdx.x & 0x1F`、`srcLane ^ 1`（蝴蝶变换），没有位运算符就写不出有意义的代码 ——
-      故 **P5.3 开工前需先做本项**，否则只能把 e2e 限制在「只用字面量」的极简形式，
-      验证得了映射、验证不了可用性。
+
+      **实现（EDG 的实际命名与最初假设不同，这里记下以免下次再猜）**：
+      - `eok_and` / `eok_or` / `eok_xor`（**不是** `eok_bitand` / `eok_bitor`）
+      - `eok_shiftl` / `eok_shiftr`（**不是** `eok_shl` / `eok_shr`）
+      - `eok_complement`（**不是** `eok_compl`）
+      - 新增 `OpClass::Bitwise` + `is_bitwise_operator()` + `emit_bitwise_binop()` +
+        `translate_bitwise()`；`~` 走 `translate_unary` 的独立 case。
+      - 右移按符号性分派：有符号 `ashr`、无符号 `lshr`；左移 `shl` 不分符号。
+      - 顺带把 `classify_operator` 里那串 `||`（一元运算符判断）抽成 `is_unary_operator()`，
+        否则加 `Bitwise` 分支会把圈复杂度顶过门限 10。
+      - 浮点操作数直接报错（与 C 一致），不做隐式截断。
+
+      **测试**：`tests/golden/e2e/bitwise.cu`，16 项数值断言 + 6 条 PTX 指令断言
+      （`and.b32` / `or.b32` / `xor.b32` / `shl.b32` / `shr.s32` / `shr.u32`）。
+      `or` 的断言必须写成 `(^|[^x])or\.b32` —— `xor.b32` 含子串 `or.b32`，不加边界会误判。
+      变量一律掺入 `threadIdx.x`，否则常量折叠后 PTX 里根本不出指令，断言就成了空转。
+      `make check` **183/183**。
+
+      **仍未覆盖**（B9-2）：复合赋值形式 `<<=` `>>=` `&=` `|=` `^=`（`eok_*_assign`）。
+      另外 `eok_not`（逻辑非）目前落到 `translate_unary` 的 `default` 分支也走
+      `CreateNot`（按位取反），语义存疑，需要单独核对。
 
 ## B'. 里程碑实施（M1）
 

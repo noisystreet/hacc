@@ -54,8 +54,9 @@ __global__ void atomics_kernel(int* out) {
     // 位运算原子：128 线程重复施加同一常量，结果必须与「常量自身」一致。
     //   g_bits_or  = 0 OR 2   ×128 = 2      （若误实现为 ADD 会是 256，为 AND/XOR 会是 0）
     //   g_bits_and = 0xFFFFFFFF AND 0xFF ×128 = 0xFF  （若误实现为 OR 则不变）
-    // 用常量而非 `1u << (t%32)` 这类表达式：hacc 尚不支持 << / ~ / & / | / ^ 运算符
-    //（M1.2.3 只覆盖算术/比较/赋值/取址/解引用/转换），已记入 docs/TODO.md。
+    // 这里刻意用常量而非 `1u << (t % 32)`：位运算符（B9）现已支持，
+    // 但本用例只关心原子语义，掺入位运算会把失败原因搅在一起 ——
+    // 位运算的独立验证见 bitwise.cu。
     atomicOr(&g_bits_or, 2u);
     atomicAnd(&g_bits_and, 0xFFu);
 

@@ -6,6 +6,29 @@
 
 ### Added
 
+- **位运算符 `<<` `>>` `&` `|` `^` `~`（TODO B9）**：`il_to_llvm` 新增 `OpClass::Bitwise`
+  分派，`eok_and` / `eok_or` / `eok_xor` / `eok_shiftl` / `eok_shiftr` 落 LLVM
+  `and` / `or` / `xor` / `shl` / `ashr|lshr`，一元 `~`（`eok_complement`）落 `CreateNot`。
+  **右移按符号性分派**：有符号 `ashr`（保留符号位）、无符号 `lshr`（补零）；
+  左移与三个按位算子不分符号。浮点操作数直接报错，与 C 一致，不做隐式截断。
+
+  踩到的第一件事是**枚举名猜错了**：EDG 里是 `eok_and` / `eok_or` / `eok_xor` /
+  `eok_shiftl` / `eok_shiftr` / `eok_complement`，不是我以为的
+  `eok_bitand` / `eok_shl` / `eok_compl`。在 `il_def.h` 里查实后才动手。
+
+  顺带把 `classify_operator` 里那串 `||`（判断一元运算符）抽成 `is_unary_operator()` ——
+  直接加 `Bitwise` 分支会把它顶到 CCN 11，超过门限 10，`make check` 会拦。
+
+  测试 `tests/golden/e2e/bitwise.cu`：16 项数值断言覆盖字面量/变量两条路径、
+  有符号与无符号右移的区分（同一 bit 模式 `0xFFFFFFF0`，算术得 -4、逻辑得 `0x3FFFFFFC`）、
+  以及 `t & 0x1F`、`(1<<3)|(1<<5)` 这类 warp 代码的典型组合；
+  另有 6 条 PTX 指令断言（`and.b32` / `or.b32` / `xor.b32` / `shl.b32` / `shr.s32` / `shr.u32`）。
+  两处测试写法上的坑：`or\.b32` 会命中 `xor.b32` 的子串，必须加边界写 `(^|[^x])or\.b32`；
+  变量若全是常量，常量折叠后 PTX 里根本不出指令，断言就成了空转 —— 故一律掺入 `threadIdx.x`。
+  `make check` **183/183**。
+
+  这同时解除了 coolrt P5.3（warp 原语）与 P5.1（`atomicOr(&f, 1u << tid)`）的硬前置。
+
 - **coolrt P5.1：`atomicAnd` / `atomicOr` / `atomicXor` 映射**：coolrt 的 `device_builtins.h`
   新增 6 个声明（`int*` + `unsigned int*` × 三个算子），hacc 侧补上对应映射 ——
   `AtomicOp` 加 `And`/`Or`/`Xor`、`kAtomicBuiltins[]` 加三项，落
