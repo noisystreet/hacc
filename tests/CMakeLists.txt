@@ -750,6 +750,9 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                     "atom\\.global\\.max\\.s32"
                     "atom\\.global\\.min\\.u32"
                     "atom\\.global\\.max\\.u32"
+                    "atom\\.global\\.and\\.b32"
+                    "atom\\.global\\.or\\.b32"
+                    "atom\\.global\\.xor\\.b32"
                     "atom\\.global\\.cas\\.b32")
                 string(REPLACE "\\\\" "" _at_name "${_at_pat}")
                 string(REPLACE "." "_" _at_name "${_at_name}")

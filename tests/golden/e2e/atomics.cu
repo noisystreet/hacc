@@ -2,6 +2,7 @@
 //
 // 设备侧映射（见 m4-subset-s1-plan.md §3.5）：
 //   atomicAdd/Sub/Exch/Min/Max → LLVM atomicrmw → PTX atom.global.<op>.<type>
+//   atomicAnd/Or/Xor           → LLVM atomicrmw → PTX atom.global.{and,or,xor}.b32
 //   atomicCAS                  → LLVM cmpxchg   → PTX atom.global.cas.b32
 // 有符号与无符号的 min/max 落不同的 PTX 类型（.s32 / .u32），故两者都要覆盖。
 //
@@ -32,6 +33,12 @@ __device__ int g_cas = 0;             // atomicCAS 抢占目标
 __device__ int g_cas_wins = 0;        // 抢占成功者计数（应为 1）
 __device__ int g_sub = 100;           // 单线程 atomicSub
 __device__ int g_exch = 0;            // 单线程 atomicExch
+// 位运算原子（P5.1）：竞争类用「全体线程共同置位/清位」，结果唯一，断言强。
+__device__ unsigned int g_bits_or = 0u;            // 重复 OR 2u → 2
+__device__ unsigned int g_bits_and = 0xFFFFFFFFu;  // 重复 AND 0xFFu → 0xFF
+__device__ int g_and = 0xFF;                       // 单线程 atomicAnd
+__device__ int g_or = 0x00;                        // 单线程 atomicOr
+__device__ int g_xor = 0xFF;                       // 单线程 atomicXor
 
 __global__ void atomics_kernel(int* out) {
     int t = threadIdx.x;
@@ -43,6 +50,14 @@ __global__ void atomics_kernel(int* out) {
     atomicMax(&g_umax, 7u);
     atomicMin(&g_umin, 9u);
     atomicAdd(&g_fsum, 1.5f);
+
+    // 位运算原子：128 线程重复施加同一常量，结果必须与「常量自身」一致。
+    //   g_bits_or  = 0 OR 2   ×128 = 2      （若误实现为 ADD 会是 256，为 AND/XOR 会是 0）
+    //   g_bits_and = 0xFFFFFFFF AND 0xFF ×128 = 0xFF  （若误实现为 OR 则不变）
+    // 用常量而非 `1u << (t%32)` 这类表达式：hacc 尚不支持 << / ~ / & / | / ^ 运算符
+    //（M1.2.3 只覆盖算术/比较/赋值/取址/解引用/转换），已记入 docs/TODO.md。
+    atomicOr(&g_bits_or, 2u);
+    atomicAnd(&g_bits_and, 0xFFu);
 
     // 只有第一个把 0 换成 42 的线程算「抢占成功」，其余线程拿到旧值 42。
     int old = atomicCAS(&g_cas, 0, 42);
@@ -58,6 +73,11 @@ __global__ void atomics_kernel(int* out) {
         int exch_old = atomicExch(&g_exch, 9);
         int sub_old = atomicSub(&g_sub, 3);
 
+        // 位运算：同样返回旧值。三个算子各给一组能区分运算类型的初值/入参。
+        int and_old = atomicAnd(&g_and, 0x0F);  // 0xFF & 0x0F = 0x0F，旧值 0xFF
+        int or_old = atomicOr(&g_or, 0x0F);     // 0x00 | 0x0F = 0x0F，旧值 0x00
+        int xor_old = atomicXor(&g_xor, 0x0F);  // 0xFF ^ 0x0F = 0xF0，旧值 0xFF
+
         out[1] = g_sum;
         out[2] = g_min;
         out[3] = (int)g_umax;
@@ -70,18 +90,26 @@ __global__ void atomics_kernel(int* out) {
         out[10] = g_cas_wins;
         out[11] = g_max;
         out[12] = (int)g_umin;
+        out[13] = (int)g_bits_or;
+        out[14] = (int)g_bits_and;
+        out[15] = and_old;
+        out[16] = g_and;
+        out[17] = or_old;
+        out[18] = g_or;
+        out[19] = xor_old;
+        out[20] = g_xor;
     }
 }
 
 int main() {
     int* d_out = nullptr;
     // 无可用 CUDA 设备时 coolMalloc 失败：返回 77（SKIP 约定），供测试框架跳过。
-    if (coolMalloc((void**)&d_out, sizeof(int) * 16) != coolSuccess) {
+    if (coolMalloc((void**)&d_out, sizeof(int) * 24) != coolSuccess) {
         printf("atomics SKIP: no usable CUDA device\n");
         return 77;
     }
 
-    int h_out[16] = {0};
+    int h_out[24] = {0};
     coolMemcpy(d_out, h_out, sizeof(h_out), coolMemcpyHostToDevice);
 
     atomics_kernel<<<1, NTHREADS>>>(d_out);
@@ -108,6 +136,15 @@ int main() {
         {"atomicCAS 抢占成功次数", h_out[10], 1},
         {"atomicMax（int）", h_out[11], 5},
         {"atomicMin（unsigned）", h_out[12], 9},
+        // 位运算：竞争类的期望值唯一，误实现成别的算子会立刻露出来。
+        {"atomicOr 竞争（重复 OR 2）", h_out[13], 2},
+        {"atomicAnd 竞争（重复 AND 0xFF）", h_out[14], 0xFF},
+        {"atomicAnd 旧值", h_out[15], 0xFF},
+        {"atomicAnd 结果", h_out[16], 0x0F},
+        {"atomicOr 旧值", h_out[17], 0x00},
+        {"atomicOr 结果", h_out[18], 0x0F},
+        {"atomicXor 旧值", h_out[19], 0xFF},
+        {"atomicXor 结果", h_out[20], 0xF0},
     };
 
     int failed = 0;

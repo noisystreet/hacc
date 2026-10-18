@@ -107,6 +107,20 @@
       - 验证：`unit_toolchain`、`e2e_hacc_host_cxx_missing` / `_empty`（WILL_FAIL）、
         `e2e_hacc_host_cxx_clang_build` / `_clang_run`（真机 `vectorAdd OK`）；`make check` **126/126**。
 
+- [ ] **B9【跨项目·coolrt P5.1 暴露】位运算符 `<<` `>>` `&` `|` `^` `~` 整体未支持**：
+      coolrt 已声明 `atomicAnd` / `atomicOr` / `atomicXor`，hacc 也已能映射到
+      `atomicrmw and/or/xor` → `atom.global.{and,or,xor}.b32`，但 `il_to_llvm` 的表达式翻译
+      （M1.2.3）只覆盖「算术 / 比较 / 赋值 / 取址 / 解引用 / 转换」，**位运算符一个都没有**。
+      后果很具体：用户写不出 `atomicOr(&flag, 1u << tid)` 这种最常见的用法，只能传字面量
+      或已算好的变量 —— P5.1 的 e2e 用例原本就是这么写的，编译报
+      「不支持的运算符」后才改成常量。
+      工作量：`eok_shl` / `eok_shr` / `eok_bitand` / `eok_bitor` / `eok_bitxor` / `eok_compl`
+      各需一个分支，属机械工作。**但现在已有真实用例驱动**：coolrt P5.3 的 warp 原语
+      （`__shfl_down_sync` / `__ballot_sync` / `__activemask` 等）典型写法处处是
+      `threadIdx.x & 0x1F`、`srcLane ^ 1`（蝴蝶变换），没有位运算符就写不出有意义的代码 ——
+      故 **P5.3 开工前需先做本项**，否则只能把 e2e 限制在「只用字面量」的极简形式，
+      验证得了映射、验证不了可用性。
+
 ## B'. 里程碑实施（M1）
 
 - [x] **M1.1 设备后端（LLVM IR → PTX）**：**已实现**——`coolicc` 接入 LLVM/NVPTX（`-DHACC_WITH_LLVM=ON`，

@@ -1092,7 +1092,8 @@ llvm::Value* try_translate_device_call(an_expr_node_ptr expr, KernelContext& kc)
 // ------------------------------------------------------------------
 
 // 原子的语义操作。与 atomicrmw 的 BinOp 不是一一对应：Min/Max 要看符号性。
-enum class AtomicOp { Add, Sub, Exch, Min, Max, Cas };
+// And/Or/Xor 是位运算，与符号性无关（PTX 均为 .b32）。
+enum class AtomicOp { Add, Sub, Exch, Min, Max, And, Or, Xor, Cas };
 
 struct AtomicBuiltinMapping {
     const char* builtin_name;
@@ -1104,6 +1105,8 @@ constexpr AtomicBuiltinMapping kAtomicBuiltins[] = {
     {"atomicAdd", AtomicOp::Add, 2},   {"atomicSub", AtomicOp::Sub, 2},
     {"atomicExch", AtomicOp::Exch, 2}, {"atomicMin", AtomicOp::Min, 2},
     {"atomicMax", AtomicOp::Max, 2},   {"atomicCAS", AtomicOp::Cas, 3},
+    {"atomicAnd", AtomicOp::And, 2},   {"atomicOr", AtomicOp::Or, 2},
+    {"atomicXor", AtomicOp::Xor, 2},
 };
 
 const AtomicBuiltinMapping* find_atomic_builtin(const char* name) {
@@ -1116,21 +1119,36 @@ const AtomicBuiltinMapping* find_atomic_builtin(const char* name) {
 }
 
 // 整型的 atomicrmw 映射。有符号/无符号的 min/max 语义不同，选错会静默算出错误结果
-// （如 atomicMax 遇负值）。
+// （如 atomicMax 遇负值），故只有那两项按符号分派，其余走查表。
+
+// 与符号性无关的原子操作 → atomicrmw BinOp。
+// 用查表而非 switch：原子算子还会继续增加（位运算刚补完，后续还有 inc/dec），
+// 每加一个都往 switch 里塞 case 会把 integer_atomic_bin_op 的圈复杂度顶破门限。
+struct PlainAtomicBinOp {
+    AtomicOp op;
+    llvm::AtomicRMWInst::BinOp bin_op;
+};
+
+constexpr PlainAtomicBinOp kPlainAtomicBinOps[] = {
+    {AtomicOp::Add, llvm::AtomicRMWInst::Add},   {AtomicOp::Sub, llvm::AtomicRMWInst::Sub},
+    {AtomicOp::Exch, llvm::AtomicRMWInst::Xchg}, {AtomicOp::And, llvm::AtomicRMWInst::And},
+    {AtomicOp::Or, llvm::AtomicRMWInst::Or},     {AtomicOp::Xor, llvm::AtomicRMWInst::Xor},
+};
+
 llvm::AtomicRMWInst::BinOp integer_atomic_bin_op(AtomicOp op, bool is_unsigned) {
+    for (const PlainAtomicBinOp& m : kPlainAtomicBinOps) {
+        if (m.op == op) {
+            return m.bin_op;
+        }
+    }
+    // 只有 Min/Max 的语义依赖符号性。
     switch (op) {
-        case AtomicOp::Add:
-            return llvm::AtomicRMWInst::Add;
-        case AtomicOp::Sub:
-            return llvm::AtomicRMWInst::Sub;
-        case AtomicOp::Exch:
-            return llvm::AtomicRMWInst::Xchg;
         case AtomicOp::Min:
             return is_unsigned ? llvm::AtomicRMWInst::UMin : llvm::AtomicRMWInst::Min;
         case AtomicOp::Max:
             return is_unsigned ? llvm::AtomicRMWInst::UMax : llvm::AtomicRMWInst::Max;
-        case AtomicOp::Cas:
-            break;  // CAS 走 cmpxchg，不经过本函数。
+        default:
+            break;
     }
     fail("atomicCAS 不走 atomicrmw 路径");
 }

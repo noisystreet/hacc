@@ -6,6 +6,19 @@
 
 ### Added
 
+- **coolrt P5.1：`atomicAnd` / `atomicOr` / `atomicXor` 映射**：coolrt 的 `device_builtins.h`
+  新增 6 个声明（`int*` + `unsigned int*` × 三个算子），hacc 侧补上对应映射 ——
+  `AtomicOp` 加 `And`/`Or`/`Xor`、`kAtomicBuiltins[]` 加三项，落
+  `atom.global.{and,or,xor}.b32`（位运算不分符号，PTX 均为 `.b32`，重载只为对齐 CUDA 签名）。
+  `integer_atomic_bin_op` 借这次重构：与符号性无关的算子改为**查表**，只有 Min/Max 仍按符号分派。
+  原先逐个加 case 会把它顶到 **CCN 12**（门限 10，`make check` 直接失败），改完回到安全区间，
+  且以后再加原子算子不再让复杂度线性增长。
+  测试：`atomics.cu` 增竞争段（`0 OR 2` ×128 = 2、`0xFFFFFFFF AND 0xFF` ×128 = 0xFF ——
+  误实现成 ADD/AND/XOR 都会立刻露出来）与单线程段（三算子各验旧值 + 结果），
+  CMake 加三条 PTX 断言。`make check` **173/173**、零 SKIP。
+  **顺带发现**：写测试时才意识到 `<<` / `~` 等**位运算符整体未支持**（用例因此改用常量），
+  已记为 [TODO B9](docs/TODO.md)。
+
 - **M4.7 S1 收尾：`cool*` 内存/流 API 混用验证**：ADR 0004 §S1 最后一项「主机侧与 coolrt `cool*`
   内存/流 API 混用」此前**只有机制、没有覆盖** —— `<<<grid, block, sharedMem, stream>>>` 的四参数
   形式在 `launch_rewrite` 里早已支持（第 4 参缺省 `nullptr`），`haccLaunch` 也会透传给
