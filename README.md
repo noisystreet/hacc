@@ -57,7 +57,20 @@ build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
 # → atomicReduce OK: sum(0..127) = 8128
 ```
 
-`make check`：**112/112 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
+### 中间产物与 `-keep`
+
+`--emit=exe` 成功时默认只留可执行文件；`-keep`（`--keep`）保留中间产物，`--keep-dir <d>`
+指定目录（默认当前工作目录）。**失败时始终保留并在 stderr 列出清单**，便于定位断在哪一阶段：
+
+| 文件（`<stem>` = 输入文件名去扩展名） | 内容 | 对应 nvcc |
+| --- | --- | --- |
+| `<stem>.hacc.il` | EDG IL（device 中间表示） | `.cudafe1.gpu` |
+| `<stem>.hacc.cpp` | 前端输出的 host 源（**未拼桩**） | `.cudafe1.cpp` |
+| `<stem>.hacc.stub.cpp` | 主机桩 + 注册 | `.cudafe1.stub.c` |
+| `<stem>.hacc.gen.cpp` | 桩 + host（主机编译的实际输入） | — |
+| `<stem>.ptx` | 设备映像 | `.ptx` |
+
+`make check`：**137/137 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
 **fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `while` / `switch`、
 `double` 等未覆盖的原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
 [known-issues.md](docs/known-issues.md)。

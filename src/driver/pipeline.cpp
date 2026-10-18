@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -42,19 +43,55 @@ std::string resolve_tool(const std::string& explicit_path, const char* env_name,
     return dir_of(self_path) + tool_name;
 }
 
-// 中间 .cil 路径：由输出路径派生（<output>.cil）。
-std::string cil_path_for(const PipelineOptions& opts) {
-    return opts.output_path + ".cil";
+// 中间产物目录：--keep-dir 优先，否则当前工作目录（nvcc 行为）。
+std::string intermediate_dir(const PipelineOptions& opts) {
+    return opts.keep_dir.empty() ? std::string(".") : opts.keep_dir;
 }
 
-// 中间 host 源路径：由输出路径派生（<output>.hacc.cpp）。
+// 中间产物基准名 = 输入文件名去掉扩展名。
+// nvcc 的中间产物以源文件命名（`foo.cu` → `foo.ptx`），与 `-o` 无关；
+// 这里保持一致，避免 `-o build/out` 时中间产物跟着跑进 build/。
+std::string input_stem(const PipelineOptions& opts) {
+    const std::string& p = opts.input_path;
+    const size_t slash = p.find_last_of('/');
+    const std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    const size_t dot = base.find_last_of('.');
+    return (dot == std::string::npos || dot == 0) ? base : base.substr(0, dot);
+}
+
+// 拼中间产物路径：<keep-dir|.>/<input stem><suffix>。
+std::string intermediate_path(const PipelineOptions& opts, const char* suffix) {
+    return intermediate_dir(opts) + "/" + input_stem(opts) + suffix;
+}
+
+std::string il_path_for(const PipelineOptions& opts) {
+    return intermediate_path(opts, ".hacc.il");
+}
+
 std::string host_path_for(const PipelineOptions& opts) {
-    return opts.output_path + ".hacc.cpp";
+    return intermediate_path(opts, ".hacc.cpp");
 }
 
-// 中间 PTX 路径（Exe 模式）：由输出路径派生（<output>.ptx）。
+std::string stub_path_for(const PipelineOptions& opts) {
+    return intermediate_path(opts, ".hacc.stub.cpp");
+}
+
+std::string gen_path_for(const PipelineOptions& opts) {
+    return intermediate_path(opts, ".hacc.gen.cpp");
+}
+
 std::string ptx_path_for(const PipelineOptions& opts) {
-    return opts.output_path + ".ptx";
+    return intermediate_path(opts, ".ptx");
+}
+
+// 确保中间产物目录存在（未给 --keep-dir 时不创建任何东西）。
+bool ensure_intermediate_dir(const PipelineOptions& opts) {
+    if (opts.keep_dir.empty()) {
+        return true;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(opts.keep_dir, ec);
+    return !ec && std::filesystem::is_directory(opts.keep_dir);
 }
 
 // 读取整个文件；失败返回 false。
@@ -104,11 +141,15 @@ std::string resolve_coolrt_root(const PipelineOptions& opts) {
     return dir_of(opts.self_path) + "../coolruntime";
 }
 
-// 拼桩：读 host 源 + PTX，跑改写器拿内核名，生成桩并拼到 host 源**顶部**。
+// 生成主机桩与「桩 + host 源」编译单元（B7）：
+//   <stem>.hacc.stub.cpp —— 只有桩（对应 nvcc 的 `.cudafe1.stub.c`）
+//   <stem>.hacc.gen.cpp  —— 桩置顶 + 前端 host 源（主机编译的实际输入）
 // 桩须在用户代码之前（haccLaunch / __cool_reg_* 先声明，见 M2.2b 实测）。
+// 不改写 <stem>.hacc.cpp：`-keep` 时要能看到前端的原始输出。
 // 成功返回 true；失败填 error。
-bool stitch_stubs(const PipelineOptions& opts, const std::string& host_path,
-                  const std::string& ptx_path, std::string* error) {
+bool write_stub_and_gen(const PipelineOptions& opts, const std::string& host_path,
+                        const std::string& ptx_path, const std::string& stub_path,
+                        const std::string& gen_path, std::string* error) {
     std::string host_src;
     if (!read_file(host_path, host_src)) {
         *error = "无法读取主机源：" + host_path;
@@ -143,8 +184,12 @@ bool stitch_stubs(const PipelineOptions& opts, const std::string& host_path,
         devices.push_back(hacc::host::SymbolSpec{nm, 0});
     }
     std::string stubs = hacc::host::generate_stubs(r.kernel_names, ptx, constants, devices);
-    if (!write_file(host_path, stubs + host_src)) {
-        *error = "无法写回主机源：" + host_path;
+    if (!write_file(stub_path, stubs)) {
+        *error = "无法写主机桩：" + stub_path;
+        return false;
+    }
+    if (!write_file(gen_path, stubs + host_src)) {
+        *error = "无法写编译单元：" + gen_path;
         return false;
     }
     return true;
@@ -269,6 +314,25 @@ bool run_frontend_stage(const PipelineOptions& opts, const std::string& cil,
     return run_stage(argv, "coolfe++", result);
 }
 
+// 阶段 1'（--emit=il）：止于 EDG IL，`-o` 直接落 IL 产物。
+bool run_il_stage(const PipelineOptions& opts, PipelineResult* result) {
+    std::vector<std::string> argv = {resolve_coolfe_path(opts)};
+    for (const auto& a : build_coolfe_args(opts, opts.output_path)) {
+        argv.push_back(a);
+    }
+    return run_stage(argv, "coolfe++", result);
+}
+
+// 阶段 1''（--emit=host）：止于 host 源，`-o` 直接落 host 产物（不拼桩）。
+bool run_host_only_stage(const PipelineOptions& opts, const std::string& cil,
+                         PipelineResult* result) {
+    std::vector<std::string> argv = {resolve_coolfe_path(opts)};
+    for (const auto& a : build_coolfe_host_args(opts, cil, opts.output_path)) {
+        argv.push_back(a);
+    }
+    return run_stage(argv, "coolfe++", result);
+}
+
 // 阶段 2：EDG IL → PTX（Exe 模式 PTX 落中间文件；Ptx 模式直接落 -o）。
 bool run_device_stage(const PipelineOptions& opts, const std::string& cil, const std::string& ptx,
                       PipelineResult* result) {
@@ -280,11 +344,11 @@ bool run_device_stage(const PipelineOptions& opts, const std::string& cil, const
     return run_stage(argv, "coolicc", result);
 }
 
-// 阶段 3（仅 Exe）：拼桩 + 主机编译。
-bool run_host_stage(const PipelineOptions& opts, const std::string& host, const std::string& ptx,
-                    PipelineResult* result) {
+// 阶段 3（仅 Exe）：生成桩与编译单元，再主机编译。
+bool run_host_stage(const PipelineOptions& opts, const std::string& host, const std::string& stub,
+                    const std::string& gen, const std::string& ptx, PipelineResult* result) {
     std::string err;
-    if (!stitch_stubs(opts, host, ptx, &err)) {
+    if (!write_stub_and_gen(opts, host, ptx, stub, gen, &err)) {
         result->error = err;
         return false;
     }
@@ -292,24 +356,80 @@ bool run_host_stage(const PipelineOptions& opts, const std::string& host, const 
     // 打印实际使用的主机编译器：这是「到底哪个编译器在编」的唯一凭据（可观测性 G5）。
     std::fprintf(stderr, "hacc: 主机编译器 = %s\n", cxx.c_str());
     std::vector<std::string> argv = {cxx};
-    for (const auto& a : build_host_compile_args(opts, host)) {
+    for (const auto& a : build_host_compile_args(opts, gen)) {
         argv.push_back(a);
     }
     const std::string stage = "主机编译（" + support::basename_of(cxx) + "）";
     return run_stage(argv, stage.c_str(), result);
 }
 
-// 清理中间产物（除非 -keep）。
-void cleanup_intermediates(const PipelineOptions& opts, const std::string& cil,
-                           const std::string& host, const std::string& ptx, bool want_exe) {
-    if (opts.keep) {
+// 删除中间产物（-keep 时保留）。
+void remove_files(const std::vector<std::string>& paths) {
+    for (const auto& p : paths) {
+        std::remove(p.c_str());
+    }
+}
+
+// 列出仍然存在的中间产物：-keep 成功与任意失败时都要报（可观测性 G5）。
+void report_intermediates(const char* reason, const std::vector<std::string>& paths) {
+    std::vector<std::string> present;
+    for (const auto& p : paths) {
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) {
+            present.push_back(p);
+        }
+    }
+    if (present.empty()) {
         return;
     }
-    std::remove(cil.c_str());
-    if (want_exe) {
-        std::remove(host.c_str());
-        std::remove(ptx.c_str());
+    std::fprintf(stderr, "hacc: %s，保留中间产物（%zu 个）：\n", reason, present.size());
+    for (const auto& p : present) {
+        std::fprintf(stderr, "hacc:   %s\n", p.c_str());
     }
+}
+
+// 本次运行涉及的中间产物（按 emit 模式）。
+std::vector<std::string> intermediates_for(EmitMode emit, const std::string& il,
+                                           const std::string& host, const std::string& stub,
+                                           const std::string& gen, const std::string& ptx) {
+    std::vector<std::string> v;
+    if (emit == EmitMode::Il) {
+        return v;  // 前端直接写 -o，无中间产物
+    }
+    v.push_back(il);
+    if (emit != EmitMode::Exe) {
+        return v;  // Ptx / Host 额外只有 IL
+    }
+    v.push_back(host);
+    v.push_back(stub);
+    v.push_back(gen);
+    v.push_back(ptx);
+    return v;
+}
+
+// 按 emit 模式跑阶段；全部成功返回 true。
+bool dispatch_stages(const PipelineOptions& opts, const std::string& il, const std::string& host,
+                     const std::string& stub, const std::string& gen, const std::string& ptx,
+                     PipelineResult* result) {
+    if (opts.emit == EmitMode::Il) {
+        return run_il_stage(opts, result);
+    }
+    if (opts.emit == EmitMode::Host) {
+        return run_host_only_stage(opts, il, result);
+    }
+    const bool want_exe = (opts.emit == EmitMode::Exe);
+    // Ptx 模式终产物就是 `-o`；Exe 模式的 PTX 是中间产物（<stem>.ptx）。
+    const std::string ptx_target = want_exe ? ptx : opts.output_path;
+    if (!run_frontend_stage(opts, il, host, want_exe, result)) {
+        return false;
+    }
+    if (!run_device_stage(opts, il, ptx_target, result)) {
+        return false;
+    }
+    if (want_exe && !run_host_stage(opts, host, stub, gen, ptx_target, result)) {
+        return false;
+    }
+    return true;
 }
 
 PipelineResult run_pipeline(const PipelineOptions& opts) {
@@ -322,24 +442,29 @@ PipelineResult run_pipeline(const PipelineOptions& opts) {
         result.error = "缺少输出文件（-o）";
         return result;
     }
+    if (!ensure_intermediate_dir(opts)) {
+        result.error = "无法创建 --keep-dir 目录：" + opts.keep_dir;
+        return result;
+    }
 
-    const std::string cil = cil_path_for(opts);
-    const bool want_exe = (opts.emit == EmitMode::Exe);
+    const std::string il = il_path_for(opts);
     const std::string host = host_path_for(opts);
-    const std::string ptx = want_exe ? ptx_path_for(opts) : opts.output_path;
+    const std::string stub = stub_path_for(opts);
+    const std::string gen = gen_path_for(opts);
+    const std::string ptx = ptx_path_for(opts);
+    const std::vector<std::string> candidates =
+        intermediates_for(opts.emit, il, host, stub, gen, ptx);
 
-    if (!run_frontend_stage(opts, cil, host, want_exe, &result)) {
+    if (!dispatch_stages(opts, il, host, stub, gen, ptx, &result)) {
+        // 失败时默认保留中间产物（同 nvcc），并列出，便于定位是哪一阶段断的。
+        report_intermediates("编译失败", candidates);
         return result;
     }
-    if (!run_device_stage(opts, cil, ptx, &result)) {
-        return result;
+    if (opts.keep) {
+        report_intermediates("-keep", candidates);
+    } else {
+        remove_files(candidates);
     }
-    if (want_exe && !run_host_stage(opts, host, ptx, &result)) {
-        return result;
-    }
-
-    cleanup_intermediates(opts, cil, host, ptx, want_exe);
-
     result.ok = true;
     return result;
 }

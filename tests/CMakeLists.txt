@@ -704,6 +704,69 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS e2e_hacc_vector_add_exe)
             set_tests_properties(e2e_hacc_tid_kernel_ptx PROPERTIES
                 DEPENDS e2e_hacc_tid_kernel)
+
+            # B7 产物集与命名（--emit / -keep）：-keep 全保留、默认清理、失败保留并列出。
+            set(_b7_keep "${CMAKE_CURRENT_BINARY_DIR}/b7_keep")
+            set(_b7_clean "${CMAKE_CURRENT_BINARY_DIR}/b7_clean")
+            set(_b7_fail "${CMAKE_CURRENT_BINARY_DIR}/b7_fail")
+            set(_b7_ptx "${CMAKE_CURRENT_BINARY_DIR}/b7_ptx")
+            file(REMOVE_RECURSE "${_b7_keep}" "${_b7_clean}" "${_b7_fail}" "${_b7_ptx}")
+            file(MAKE_DIRECTORY "${_b7_keep}" "${_b7_clean}" "${_b7_fail}" "${_b7_ptx}")
+            set(_b7_src "${CMAKE_CURRENT_SOURCE_DIR}/golden/host/vector_add.cu")
+            # 期望的中间产物，与 pipeline.hpp 的命名表一致。
+            set(_b7_files
+                "vector_add.hacc.il" "vector_add.hacc.cpp" "vector_add.hacc.stub.cpp"
+                "vector_add.hacc.gen.cpp" "vector_add.ptx")
+            string(REPLACE ";" " " _b7_files_sp "${_b7_files}")
+
+            # 1) -keep：5 个中间产物全部保留。
+            add_test(NAME cli_keep_build
+                COMMAND hacc "${_b7_src}" -o "${_b7_keep}/keep_exe"
+                        -keep --keep-dir "${_b7_keep}")
+            add_test(NAME cli_keep_intermediates
+                COMMAND sh -c "for f in ${_b7_files_sp}; do \
+                    test -f '${_b7_keep}'/$f || { echo \"缺少 $f\"; exit 1; }; done")
+            set_tests_properties(cli_keep_intermediates PROPERTIES DEPENDS cli_keep_build)
+
+            # 2) 默认：成功即清理，目录里只剩可执行文件。
+            add_test(NAME cli_default_clean_build
+                COMMAND hacc "${_b7_src}" -o "${_b7_clean}/clean_exe" --keep-dir "${_b7_clean}")
+            add_test(NAME cli_default_clean_assert
+                COMMAND sh -c "for f in ${_b7_files_sp}; do \
+                    test ! -f '${_b7_clean}'/$f || { echo \"未清理 $f\"; exit 1; }; done")
+            set_tests_properties(cli_default_clean_assert PROPERTIES DEPENDS cli_default_clean_build)
+
+            # 3) 失败：中间产物保留，stderr 列出清单（便于定位断在哪阶段）。
+            # 注意：WILL_FAIL 与 PASS_REGULAR_EXPRESSION 会互相翻转，故退出码与消息分开验证。
+            add_test(NAME cli_failure_keep_build
+                COMMAND hacc "${_b7_src}" -o "${_b7_fail}/fail_exe"
+                        --keep-dir "${_b7_fail}" --host-cxx=/bin/false)
+            set_tests_properties(cli_failure_keep_build PROPERTIES WILL_FAIL TRUE)
+            add_test(NAME cli_failure_keep_message
+                COMMAND sh -c "\"$1\" \"$2\" -o \"$3\" --keep-dir \"$4\" --host-cxx=/bin/false \
+                            2>&1 | grep -q '保留中间产物'"
+                        _ $<TARGET_FILE:hacc> "${_b7_src}" "${_b7_fail}/fail_msg" "${_b7_fail}")
+            add_test(NAME cli_failure_keep_assert
+                COMMAND sh -c "for f in ${_b7_files_sp}; do \
+                    test -f '${_b7_fail}'/$f || { echo \"缺少 $f\"; exit 1; }; done")
+            set_tests_properties(cli_failure_keep_assert PROPERTIES DEPENDS cli_failure_keep_build)
+
+            # 4) --emit=ptx + -keep：终产物落到 -o，IL 作为中间产物保留。
+            add_test(NAME cli_emit_ptx_keep_build
+                COMMAND hacc "${_b7_src}" --emit=ptx -keep
+                        -o "${_b7_ptx}/emit.ptx" --keep-dir "${_b7_ptx}")
+            add_test(NAME cli_emit_ptx_keep_assert
+                COMMAND sh -c "test -f '${_b7_ptx}/emit.ptx' && \
+                    test -f '${_b7_ptx}/vector_add.hacc.il'")
+            set_tests_properties(cli_emit_ptx_keep_assert PROPERTIES DEPENDS cli_emit_ptx_keep_build)
+
+            # 5) 未知 --emit：明确报错，不静默忽略（退出码与消息分开验证）。
+            add_test(NAME cli_emit_unknown_exit
+                COMMAND hacc "${_b7_src}" --emit=xyz -o "${_b7_clean}/never")
+            set_tests_properties(cli_emit_unknown_exit PROPERTIES WILL_FAIL TRUE)
+            add_test(NAME cli_emit_unknown_message
+                COMMAND sh -c "\"$1\" \"$2\" --emit=xyz -o \"$3\" 2>&1 | grep -q '未知的 --emit'"
+                        _ $<TARGET_FILE:hacc> "${_b7_src}" "${_b7_clean}/never2")
         endif()
 
         # B8 主机编译器选择（--host-cxx）。

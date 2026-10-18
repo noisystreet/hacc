@@ -1,15 +1,15 @@
-// hacc driver 的编译流水线编排（M1.2.5 / M2.3）。
+// hacc driver 的编译流水线编排（M1.2.5 / M2.3 / B7）。
 //
 // 一期流水线（`.cu` → PTX，--emit=ptx）：
-//   coolfe++ <input.cu> -o <tmp.cil>            # .cu → EDG IL
-//   coolicc --from-il -arch=sm_XX -o <out.ptx> <tmp.cil>   # IL → PTX
+//   coolfe++ <input.cu> -o <stem>.hacc.il                  # .cu → EDG IL
+//   coolicc --from-il -arch=sm_XX -o <out.ptx> <stem>.hacc.il   # IL → PTX
 //
 // M2.3 主机路径（`.cu` → 可执行，--emit=exe，默认）：
-//   coolfe++ <input.cu> --emit-host=<tmp>.hacc.cpp -o <tmp>.cil   # host 源 + IL
-//   coolicc --from-il -arch=sm_XX -o <tmp>.ptx <tmp>.cil          # IL → PTX
-//   driver: rewrite_source(input.cu) → kernel_names               # 拿内核名
-//   driver: 读 <tmp>.ptx + generate_stubs → 拼到 host 源顶部       # 桩
-//   <host-cxx> <tmp>.hacc.cpp -I<coolrt> -lcoolrt -o <out>         # 主机编译
+//   coolfe++ <input.cu> --emit-host=<stem>.hacc.cpp -o <stem>.hacc.il
+//   coolicc --from-il -arch=sm_XX -o <stem>.ptx <stem>.hacc.il
+//   driver: rewrite_source(input.cu) → kernel_names
+//   driver: generate_stubs → <stem>.hacc.stub.cpp，再拼成 <stem>.hacc.gen.cpp
+//   <host-cxx> <stem>.hacc.gen.cpp -I<coolrt> -lcoolrt -o <out>
 //
 // 两个子工具与 hacc 同目录（构建产物在一起）；可用环境变量覆盖（见 .cpp）。
 // 纯逻辑（参数拼装、路径推导）与执行分离，便于单测。
@@ -21,10 +21,12 @@
 
 namespace hacc::driver {
 
-// 产物模式。
+// 产物模式（对应 nvcc 的 `-ptx` 与默认「一步到可执行」等）。
 enum class EmitMode {
-    Ptx,  // 纯设备产物（止于 PTX，M1.2 已有）
-    Exe,  // 可执行文件（默认，对齐 nvcc「一步到可执行」）
+    Exe,   // 可执行文件（默认，对齐 nvcc「一步到可执行」）
+    Ptx,   // 止于 PTX（对齐 nvcc `-ptx`）
+    Il,    // 止于 EDG IL（本编译器特有，供观测）
+    Host,  // 止于 host 源（拼桩之前的主机代码，供观测）
 };
 
 // 流水线选项。
@@ -33,7 +35,8 @@ struct PipelineOptions {
     std::string output_path;                // 输出（-o）：PTX 或可执行文件
     std::string arch = "sm_80";             // -arch=sm_XX
     EmitMode emit = EmitMode::Exe;          // 产物模式
-    bool keep = false;                      // -keep：保留中间产物（.cil / .hacc.cpp / .ptx）
+    bool keep = false;                      // -keep / --keep：保留中间产物
+    std::string keep_dir;                   // --keep-dir：中间产物目录（空 = 当前工作目录）
     std::vector<std::string> include_dirs;  // -I：透传给 coolfe++ 与 g++
     // 子工具路径（空则按同目录 / 环境变量推导）。
     std::string coolfe_path;
@@ -80,8 +83,14 @@ std::vector<std::string> build_coolicc_args(const PipelineOptions& opts,
 std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
                                                  const std::string& host_path);
 
-// 执行流水线。emit=Ptx 时 .cu → .cil → .ptx；emit=Exe 时再拼桩 + 主机编译。
-// 成功返回 ok=true。keep=false 时删除中间产物。
+// 执行流水线。Exe：.cu → IL → PTX → 桩 + 主机编译；Ptx / Il / Host 止于对应阶段。
+// 中间产物命名（B7 定稿，对齐 nvcc 的产物角色；落在 --keep-dir 或当前工作目录）：
+//   <stem>.hacc.il        EDG IL（对应 nvcc `.cudafe1.gpu`）
+//   <stem>.hacc.cpp       前端 host 源，未拼桩（对应 `.cudafe1.cpp`）
+//   <stem>.hacc.stub.cpp  主机桩（对应 `.cudafe1.stub.c`）
+//   <stem>.hacc.gen.cpp   桩 + host，主机编译的实际输入
+//   <stem>.ptx            设备映像（一期终产物）
+// 成功时默认删除中间产物，`-keep` 保留并列出；失败始终保留并列出（便于定位断在哪阶段）。
 PipelineResult run_pipeline(const PipelineOptions& opts);
 
 }  // namespace hacc::driver

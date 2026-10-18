@@ -76,7 +76,16 @@
       但 `dim3` 等由 **coolrt 公开头**提供，还是由 `hacc_runtime.h` 提供？需确认，避免缺失 / 重定义。
 - [ ] **B6 惰性注册的生命周期 / 回收**：模块何时 `coolModuleUnload`（`atexit`？全程不卸？）
       ——[ADR 0003](adr/0003-host-stub-fatbin-registration.md) 只讲「惰性加载」，未讲「卸载 / 释放」。
-- [ ] **B7 `--emit` / `-keep` 的产物集与命名**（对应可观测性目标 G5）。
+- [x] **B7 `--emit` / `-keep` 的产物集与命名**：**已定稿**（对应可观测性目标 G5）。
+      - 命名（基于输入 stem，与 `-o` 无关）：`<stem>.hacc.il`（EDG IL）/ `.hacc.cpp`（前端 host 源，
+        **未拼桩**）/ `.hacc.stub.cpp`（主机桩）/ `.hacc.gen.cpp`（桩 + host，主机编译输入）/ `.ptx`。
+      - 行为：成功默认删除、`-keep` / `--keep` 保留并列出；**失败始终保留并列出清单**；
+        `--keep-dir <d>` 指定目录（默认当前工作目录）。
+      - `--emit=` 统一解析，未知值明确报错（`可选：exe / ptx / il / host`）。
+      - 顺带修复：拼桩不再就地覆盖 `<stem>.hacc.cpp`（此前 `-keep` 看不到前端原始输出）。
+      - 顺带重构：`take_value_option` 抽出 `take_prefixed_value`，CCN 11 → 7。
+      - 新增 11 个 CLI 测试（`cli_keep_*` / `cli_default_clean_*` / `cli_failure_keep_*` /
+        `cli_emit_ptx_keep_*` / `cli_emit_unknown_*`）；`make check` **137/137**。
 - [x] **B8 主机编译器 / 链接器选择**：**已定——默认 `g++`，可用 `--host-cxx <path>` / `--host-cxx=<path>` /
       `$HACC_HOST_CXX` / `$HACC_GXX`（旧名兼容）覆盖；`clang++` 已验证可编**（`e2e_hacc_host_cxx_clang_build`）。
       - 解析收敛到 `src/support/toolchain.cpp`（`resolve_host_cxx`），避免 driver 与前端两处各自

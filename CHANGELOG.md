@@ -6,6 +6,22 @@
 
 ### Added
 
+- **B7 产物集与命名（`--emit` / `-keep` / `--keep-dir`）**：中间产物命名定稿，对齐 nvcc 的
+  产物角色（plan §6.3）：`<stem>.hacc.il`（EDG IL）· `<stem>.hacc.cpp`（前端 host 源，
+  **不再被桩覆盖**）· `<stem>.hacc.stub.cpp`（主机桩）· `<stem>.hacc.gen.cpp`（桩 + host，
+  主机编译的实际输入）· `<stem>.ptx`（设备映像）。文件名基于输入 stem（同 nvcc，与 `-o` 无关）。
+  行为：成功时默认删除中间产物、`-keep`（`--keep`）保留并列出；**失败时始终保留并列出**
+  （便于定位断在哪一阶段）；`--keep-dir <d>` 指定目录（默认当前工作目录）。
+  `--emit=` 改为统一解析，未知值明确报错（`可选：exe / ptx / il / host`），不再落到
+  「未知选项」这一模糊提示。
+  **修复**：此前拼桩是就地覆盖 `<stem>.hacc.cpp`，`-keep` 看不到前端原始输出（与 nvcc 的
+  `.cudafe1.cpp` + `.cudafe1.stub.c` 分离保存不一致）。
+  顺带把 `take_value_option` 的「`--flag=value` / `--flag value`」抽成 `take_prefixed_value`，
+  CCN 由 11 降回 7（过掉 lint 门禁，也避免每加一个选项就多两个分支）。
+  新增 11 个测试：`cli_keep_*`、`cli_default_clean_*`、`cli_failure_keep_*`
+  （含 stderr 清单断言）、`cli_emit_ptx_keep_*`、`cli_emit_unknown_*`（退出码与消息分开验，
+  因为 `WILL_FAIL` 与 `PASS_REGULAR_EXPRESSION` 会互相翻转）；`make check` **137/137**。
+
 - **B8 主机编译器可选（`--host-cxx`）**：主机编译阶段不再硬编码 `g++`。优先级为
   `--host-cxx <path>` / `--host-cxx=<path>` > `$HACC_HOST_CXX` > `$HACC_GXX`（旧名，保留兼容）
   > `g++`；解析收敛到 `src/support/toolchain.{hpp,cpp}` 单一实现，避免 driver 与前端两处

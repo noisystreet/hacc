@@ -274,15 +274,17 @@ cubin/SASS 等不产出（属后续阶段或 Non-Goal）。
 | nvcc 产物 | 作用 | hacc 一期对应（参考） |
 | --- | --- | --- |
 | `.cpp4.ii` / `.cpp1.ii` | host / device 预处理 | 内部步骤，默认不单独保留 |
-| `.cudafe1.cpp` | host 纯 C++ TU | 生成的 host 源（`coolfe++` 输出） |
-| `.cudafe1.stub.c` | host 桩 + 注册 | 主机桩 / 注册（可并入 host 源） |
-| `.cudafe1.gpu` | device 中间代码 | device 中间表示（**EDG IL**，交 `coolicc`） |
-| `.ptx` | PTX | `<name>.ptx`（一期终产物） |
+| `.cudafe1.cpp` | host 纯 C++ TU | `<stem>.hacc.cpp`（`coolfe++` 输出，**未拼桩**） |
+| `.cudafe1.stub.c` | host 桩 + 注册 | `<stem>.hacc.stub.cpp`（独立的桩 TU） |
+| （nvcc 无对应） | 桩 + host 合并 | `<stem>.hacc.gen.cpp`（主机编译的实际输入） |
+| `.cudafe1.gpu` | device 中间代码 | `<stem>.hacc.il`（**EDG IL**，交 `coolicc`） |
+| `.ptx` | PTX | `<stem>.ptx`（一期终产物） |
 | `.sm_XY.cubin` | SASS | **不产出**（后续 `--emit=cubin`） |
 | `.fatbin.c` / `_dlink.*` | 打包 / RDC 链接 | **不产出**（一期无 fatbin 容器、无 RDC） |
 
-- **保留与观测**：默认只保留终产物；`-keep` 保留上述中间产物
-  （命名沿用对应 nvcc 产物的角色，具体文件名在实现期定稿）。
+- **保留与观测（B7 已定稿）**：成功时默认只保留终产物，`-keep`（`--keep`）保留上述中间产物
+  并列出；**失败时始终保留并列出清单**（便于定位断在哪一阶段）。`--keep-dir <d>` 指定
+  中间产物目录（默认当前工作目录）；文件名基于**输入文件 stem**，与 `-o` 无关（同 nvcc）。
 - **原则**：产物集合以「**最小可端到端**」为准——host 源 / 主机桩 / device 中间表示 / PTX。
 - **衔接点（A5，一期基本集）**：`coolfe++` 与 `coolicc` 之间以 **EDG IL** 为交接物——
   `coolfe++` 产出 IL，`coolicc` 消费 IL 并降为 **LLVM IR** → NVPTX → PTX。契合
@@ -367,8 +369,8 @@ CUDA 库、多 GPU/Peer/Graph 编程。
 > **一期范围 = M0–M5**：设备产物为 **PTX**（主机桩/注册/`<<<>>>` 端到端同期交付，PTX 交驱动 PTX JIT 载入）；
 > 一期测试可调用 `ptxas` 仅作 golden 校验，**不产出、不内嵌 cubin**。**M6（后续）**才引入 `--emit=cubin`（直接调用 `ptxas`）。
 
-> **当前进度（2026-10）**：**M0–M4 已完成**（`make check` **126/126**，真机零 SKIP）；M5 里
-> 的 `--emit` / `-keep` 观测输出（原 TODO 的 B7）**尚未实现**，CI 形态（原 C5）仍待定。
+> **当前进度（2026-10）**：**M0–M4 已完成**；M5 的 `--emit` / `-keep` 观测输出（原 TODO 的 B7）
+> **已完成**（`make check` **137/137**，真机零 SKIP）；仅 CI 形态（原 C5）仍待定。
 
 ## 11. 测试与验证策略
 
