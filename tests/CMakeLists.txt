@@ -767,6 +767,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             add_test(NAME cli_emit_unknown_message
                 COMMAND sh -c "\"$1\" \"$2\" --emit=xyz -o \"$3\" 2>&1 | grep -q '未知的 --emit'"
                         _ $<TARGET_FILE:hacc> "${_b7_src}" "${_b7_clean}/never2")
+
+            # B5：dim3 的 CUDA 风格构造（dim3(x) / (x,y) / (x,y,z)，默认 (1,1,1)）端到端。
+            # build 阶段即可验证「构造式可编译」；run 阶段无 GPU 时返回 77 → SKIP。
+            set(_e2e_d3_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_dim3_ctor")
+            add_test(NAME e2e_hacc_dim3_ctor_build
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/dim3_ctor.cu"
+                        -o "${_e2e_d3_exe}")
+            add_test(NAME e2e_hacc_dim3_ctor_run
+                COMMAND "${_e2e_d3_exe}")
+            set_tests_properties(e2e_hacc_dim3_ctor_run PROPERTIES
+                DEPENDS e2e_hacc_dim3_ctor_build
+                SKIP_RETURN_CODE 77
+                PASS_REGULAR_EXPRESSION "dim3Ctor OK")
         endif()
 
         # B8 主机编译器选择（--host-cxx）。

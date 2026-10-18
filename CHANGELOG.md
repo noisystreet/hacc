@@ -6,6 +6,18 @@
 
 ### Added
 
+- **B5 `dim3` 归属定稿 + CUDA 风格构造**：`dim3` 由 coolrt 公开头（`cool_types.h`）唯一提供，
+  hacc 的 `hacc_runtime.h` **只消费不定义**——显式 `#include <cool/cool_types.h>` 声明依赖
+  （此前是靠 `cool_runtime_api.h` 间接拿到），并加 `static_assert(std::is_trivially_copyable<dim3>)`
+  锁住 `coolLaunchKernel` 按值传参的前提。另立同义类型会破坏 C ABI / ODR 一致性，故明确排除。
+  coolrt 侧同步给 `dim3` 补了 CUDA 同款 `dim3(x, y, z)` 构造函数（默认各维为 1），用户可按
+  CUDA 习惯写 `dim3 block(256)` / `dim3 grid((n + 255) / 256)`；ABI 不变（12 字节、对齐 4、
+  可平凡复制），C 下仍是纯聚合 struct。
+  `to_dim3` 保持 `dim3{v, 1, 1}` 花括号写法：对「带/不带构造函数」两版 coolrt 头都成立。
+  新增 `tests/golden/e2e/dim3_ctor.cu` + `e2e_hacc_dim3_ctor_build` / `_run`
+  （真机输出 `dim3Ctor OK`，同时校验设备侧 dim3 仍按 12 字节聚合传参）；`make check` **139/139**。
+  顺带修正 `docs/m2-host-path-plan.md` §8.4 里「dim3 无构造函数」的过时表述。
+
 - **B7 产物集与命名（`--emit` / `-keep` / `--keep-dir`）**：中间产物命名定稿，对齐 nvcc 的
   产物角色（plan §6.3）：`<stem>.hacc.il`（EDG IL）· `<stem>.hacc.cpp`（前端 host 源，
   **不再被桩覆盖**）· `<stem>.hacc.stub.cpp`（主机桩）· `<stem>.hacc.gen.cpp`（桩 + host，

@@ -72,8 +72,18 @@
 - [ ] **B4【跨项目】默认流语义 × coolruntime `COOL_STRICT_DEFAULT_STREAM`**：该开关在
       coolruntime `ARCHITECTURE.md` 仍为未决项（Owner: maintainers，Due: P2）；
       它决定 hacc 生成 `<<<>>>`（`stream=NULL`）的行为是否符合预期。需与 coolrt 对齐。
-- [ ] **B5 `dim3` 等类型的来源**：生成的主机代码 include coolrt `include/cool/*.h`；
-      但 `dim3` 等由 **coolrt 公开头**提供，还是由 `hacc_runtime.h` 提供？需确认，避免缺失 / 重定义。
+- [x] **B5 `dim3` 等类型的来源**：**已定 —— `dim3` 由 coolrt 公开头（`cool_types.h`）唯一提供**。
+      - hacc 的 `hacc_runtime.h` **只消费不定义**：显式 `#include <cool/cool_types.h>` 声明依赖，
+        并加 `static_assert(std::is_trivially_copyable<dim3>)` 锁住「按值传 C ABI」的前提。
+        （此前是靠 `cool_runtime_api.h` 间接拿到的隐式依赖。）
+      - 依据：`coolLaunchKernel(kernel, dim3, dim3, ...)` 的 grid/block 按值传递，两侧必须是同一
+        类型（ODR / ABI 一致性）；另立同义类型在 C++ 下 ODR 冲突、在 C 下成为两个不兼容结构体。
+      - 顺带补齐 **CUDA 兼容的 `dim3(x,y,z)` 构造函数**（coolrt 侧，默认各维为 1）；设备侧仍按
+        12 字节聚合传参，ABI 不变。
+      - 验证：coolrt `test_dim3`（构造 / 默认值 / ABI / 非聚合）、hacc `e2e_hacc_dim3_ctor_build`
+        / `_run`（真机 `dim3Ctor OK`）；`make check` coolrt **9/9**、hacc **139/139**。
+      - 已知限制（不是 B5 引入的）：`<cstdio>` 等 C++ 包装头会拉进 libstdc++ 的 `c++config.h`，
+        EDG 不认其中的 `__has_builtin(...)` → 前端成片报错。写 `.cu` 请用 `<stdio.h>` 等 C 头。
 - [ ] **B6 惰性注册的生命周期 / 回收**：模块何时 `coolModuleUnload`（`atexit`？全程不卸？）
       ——[ADR 0003](adr/0003-host-stub-fatbin-registration.md) 只讲「惰性加载」，未讲「卸载 / 释放」。
 - [x] **B7 `--emit` / `-keep` 的产物集与命名**：**已定稿**（对应可观测性目标 G5）。

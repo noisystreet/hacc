@@ -26,10 +26,20 @@
 
 #include <cstddef>
 #include <mutex>
+#include <type_traits>
 
 #include <cool/cool_runtime_api.h>
+// `dim3` 由 coolrt 公开头唯一提供：这里显式声明依赖，不再「碰巧靠 api 头间接拿到」。
+// 不要在此定义 dim3 或同义类型——coolLaunchKernel 的 grid/block 是 dim3 按值传递，
+// 两侧必须是同一类型（ODR / C ABI 一致性）。见 docs/TODO.md 的 B5。
+#include <cool/cool_types.h>
 
 namespace hacc {
+
+// dim3 跨 C ABI 按值传递，必须保持可平凡复制（拷贝即 memcpy 语义）。
+// 归属方是 coolrt；hacc 只消费不定义。
+static_assert(std::is_trivially_copyable<dim3>::value,
+              "dim3 必须可平凡复制：coolLaunchKernel 按值传递（见 TODO B5）");
 
 // 模块注册描述：每个**编译单元**（= 一份设备映像）一个（ADR 0007）。
 // 同一份 PTX 只载入一次，故同一 TU 内所有内核共享同一个 module 实例——
@@ -174,6 +184,8 @@ inline coolError_t haccGetSymbolAddressAll(const ModuleRegistration* const* mods
 }
 
 // grid/block 归一化为 dim3：接受 int（如 (n+255)/256）或 dim3。
+// 用花括号而非 dim3(...)：coolrt 的 dim3 带 C++ 构造函数后仍接受 `dim3{a,b,c}`
+// （列表初始化走构造函数），故对「带/不带构造函数的 coolrt 头」都成立。
 inline dim3 to_dim3(unsigned int v) {
     return dim3{v, 1, 1};
 }

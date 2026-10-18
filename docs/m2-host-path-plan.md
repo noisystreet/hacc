@@ -243,8 +243,8 @@ tid_kernel.cu → hacc → 真实 PTX → 内嵌字节数组 → g++ 编译链�
 ### 8.4 修正 3：`haccLaunch` 的 grid/block 需**模板化**
 
 - **原方案 §3.4 写的是 `dim3` 参数**。
-- **实测**：`<<<g, b>>>` 的 `g`/`b` 常为 `int`（如 `(n+255)/256`），`dim3` 是 C struct（无构造函数），
-  **不能隐式转换** → 编译失败。
+- **实测（当时）**：`<<<g, b>>>` 的 `g`/`b` 常为 `int`（如 `(n+255)/256`），当时的 `dim3` 是纯 C
+  struct（无构造函数），**不能隐式转换** → 编译失败。
 - **修正**：`haccLaunch` 的 grid/block 参数用**模板**，内部经 `to_dim3` 统一转 `dim3`：
   ```cpp
   inline dim3 to_dim3(unsigned int v) { return dim3{v, 1, 1}; }
@@ -266,6 +266,11 @@ void haccLaunch(const hacc::KernelRegistration& reg, G grid, B block,
     (void)coolLaunchKernel(k, hacc::to_dim3(grid), hacc::to_dim3(block), argv, smem, stream);
 }
 ```
+
+> **后续（B5，2026-10）**：coolrt 的 `dim3` 已补 C++ 构造函数（对齐 CUDA 的 `dim3(x,y,z)`，
+> 默认各维为 1）。**模板化仍然必要**——`<<<g, b>>>` 的 `g`/`b` 依然可能是 `int` 表达式，
+> 需要模板实参接住再归一化。`to_dim3` 用 `dim3{v,1,1}`（花括号）而非 `dim3(v,1,1)`：
+> 前者对「带/不带构造函数的 coolrt 头」都成立（有构造函数时走列表初始化）。
 
 > **注**：`(void*)&args...` 中 `args` 是**按值传入的模板参数**，本身即具名临时，生命周期覆盖整个调用——
 > 满足「实参按值物化」语义（§3.4）。无需额外 `auto __a0 = ...`。
