@@ -408,12 +408,6 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         # M3.5 边界用例：非法/未覆盖构造应 fail loud（编译失败 + 诊断匹配）。
         # 用脚本捕获 stderr 并校验诊断正则（错误在 stderr，PASS_REGULAR_EXPRESSION 只匹配 stdout）。
         if(HACC_COOLRUNTIME_INCLUDE)
-            # while 循环（子集未覆盖）→ 翻译失败，诊断带源位置（第 6 行）。
-            add_test(NAME diag_unsupported_while
-                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
-                        "$<TARGET_FILE:hacc>"
-                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/diag_unsupported_while.cu"
-                        "${HACC_COOLRUNTIME_INCLUDE}" ":6: 不支持的语句 kind")
             # switch 语句（子集未覆盖）→ 翻译失败，诊断带源位置（第 6 行）。
             add_test(NAME diag_unsupported_switch
                 COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_diag_fail.sh"
@@ -541,6 +535,90 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_const_mem_run_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "constMem OK")
+
+        # M5.1 golden：循环子集（while / for / do-while）→ PTX 循环结构。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_lf_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_forms.cil")
+            set(_lf_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_forms.ptx")
+            add_test(NAME golden_frontend_loop_forms
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_lf_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/loop_forms.cu")
+            add_test(NAME golden_device_il_to_ptx_loop_forms
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_lf_ptx}" "${_lf_cil}")
+            set_tests_properties(golden_device_il_to_ptx_loop_forms PROPERTIES
+                DEPENDS golden_frontend_loop_forms)
+            # 三种循环各有独立入口 → 确认 stmk_while / stmk_for / stmk_end_test_while
+            # 都被真正降级（而不是某个被静默跳过）。
+            add_test(NAME golden_device_il_to_ptx_loop_forms_while
+                COMMAND grep -qE "\\.visible \\.entry loop_while" "${_lf_ptx}")
+            add_test(NAME golden_device_il_to_ptx_loop_forms_for
+                COMMAND grep -qE "\\.visible \\.entry loop_for" "${_lf_ptx}")
+            add_test(NAME golden_device_il_to_ptx_loop_forms_do
+                COMMAND grep -qE "\\.visible \\.entry loop_do" "${_lf_ptx}")
+            # 回跳分支：循环以 br 回跳表示（而非直线展开）。
+            add_test(NAME golden_device_il_to_ptx_loop_forms_branch
+                COMMAND grep -qE "bra\\.uni" "${_lf_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_loop_forms_while
+                                 golden_device_il_to_ptx_loop_forms_for
+                                 golden_device_il_to_ptx_loop_forms_do
+                                 golden_device_il_to_ptx_loop_forms_branch PROPERTIES
+                DEPENDS golden_device_il_to_ptx_loop_forms)
+        endif()
+
+        # M5.1 e2e：内核内 stride for 循环（N > 线程数，每线程迭代多次）+ 结果校验。
+        set(_e2e_loop_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_stride_run")
+        add_test(NAME e2e_hacc_loop_stride_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/loop_stride.cu"
+                    -o "${_e2e_loop_exe}")
+        add_test(NAME e2e_hacc_loop_stride_run
+            COMMAND "${_e2e_loop_exe}")
+        set_tests_properties(e2e_hacc_loop_stride_run PROPERTIES
+            DEPENDS e2e_hacc_loop_stride_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "loopStride OK")
+
+        # M5.2 golden：break / continue（EDG 降为 stmk_goto + stmk_label）→ PTX 跳转结构。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_lc_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_control.cil")
+            set(_lc_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_control.ptx")
+            add_test(NAME golden_frontend_loop_control
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_lc_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/loop_control.cu")
+            add_test(NAME golden_device_il_to_ptx_loop_control
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_lc_ptx}" "${_lc_cil}")
+            set_tests_properties(golden_device_il_to_ptx_loop_control PROPERTIES
+                DEPENDS golden_frontend_loop_control)
+            # 三个入口都在 → goto/label 在 for / while 两种循环里都降级成功。
+            add_test(NAME golden_device_il_to_ptx_loop_control_break
+                COMMAND grep -qE "entry ctrl_break" "${_lc_ptx}")
+            add_test(NAME golden_device_il_to_ptx_loop_control_while
+                COMMAND grep -qE "entry ctrl_while_break" "${_lc_ptx}")
+            # continue 的指纹：i == 4 会编译成 setp.eq（另两个内核用的是 ge / gt）。
+            add_test(NAME golden_device_il_to_ptx_loop_control_continue
+                COMMAND grep -qE "setp\\.eq\\.s32" "${_lc_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_loop_control_break
+                                 golden_device_il_to_ptx_loop_control_while
+                                 golden_device_il_to_ptx_loop_control_continue PROPERTIES
+                DEPENDS golden_device_il_to_ptx_loop_control)
+        endif()
+
+        # M5.2 e2e：break / continue 真机语义校验（continue 若跳到循环头会死循环）。
+        set(_e2e_lc_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_break_continue_run")
+        add_test(NAME e2e_hacc_loop_break_continue_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/loop_break_continue.cu"
+                    -o "${_e2e_lc_exe}")
+        add_test(NAME e2e_hacc_loop_break_continue_run
+            COMMAND "${_e2e_lc_exe}")
+        set_tests_properties(e2e_hacc_loop_break_continue_run PROPERTIES
+            DEPENDS e2e_hacc_loop_break_continue_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "loopCtrl OK")
 
         # M4.3 golden：__threadfence{,_block,_system} → NVVM membar.{gl,cta,sys}。
         # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。

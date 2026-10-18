@@ -13,7 +13,9 @@
 //   M1.2.2：带 cool_global 属性的**无参内核** → 空 Function。
 //   M1.2.3：标量参数 + 简单语句（赋值/算术/if）。
 //     - 参数：tk_routine 的 param_type_list → LLVM 参数（标量 int/float/pointer）。
-//     - 语句：stmk_expr / stmk_if / stmk_block / stmk_return / stmk_decl / stmk_init。
+//     - 语句：stmk_expr / stmk_if / stmk_block / stmk_return / stmk_decl / stmk_init /
+//       stmk_while / stmk_for / stmk_end_test_while（M5.1 补循环）/
+//       stmk_goto / stmk_label（M5.2 补 break、continue）。
 //     - 表达式：enk_variable / enk_constant / enk_operation（算术/比较/赋值/取址/解引用）。
 //     - 类型：tk_integer（i8..i64）/ tk_float（float/double）/ tk_pointer（ptr）。
 //   未覆盖的构造一律报错（fail loud），不静默产出错误 IR。
@@ -449,6 +451,11 @@ struct KernelContext {
     const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>* constant_globals = nullptr;
     // 文件作用域 __device__ 变量 → addrspace(1) 全局（M4.1），同上。
     const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>* device_globals = nullptr;
+
+    // 代码标签 → LLVM 基本块（M5.2：break / continue 被 EDG 降为 stmk_goto + stmk_label）。
+    // 按需创建：goto 与 label 谁先出现谁建块，另一边查同一张表，故前向跳转（break 跳到循环
+    // 之后的 label）与后向跳转都成立。
+    std::unordered_map<a_label_ptr, llvm::BasicBlock*> labels;
 
     KernelContext(llvm::LLVMContext& c, llvm::Module& m) : ctx(c), module(m), builder(c) {}
 };
@@ -1402,13 +1409,53 @@ void translate_init(a_statement_ptr stmt, KernelContext& kc) {
     kc.builder.CreateStore(val, it->second);
 }
 
-// if 语句：条件转 i1，建 then/else/end 三块并递归翻译分支。
-void translate_if(a_statement_ptr stmt, KernelContext& kc) {
-    llvm::Value* cond = translate_expr(stmt->expr, kc);
-    // 条件已标准化为整型/布尔；转成 i1 供 br 使用。
+// 条件表达式 → i1（br 用）。EDG 已把 if / 循环的测试表达式标准化为整型/布尔。
+llvm::Value* to_i1(llvm::Value* cond, KernelContext& kc) {
     if (!cond->getType()->isIntegerTy(1)) {
         cond = kc.builder.CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0));
     }
+    return cond;
+}
+
+// 当前插入点所在块是否已有终结指令（ret / br）。
+// 必需：分支或循环体里出现 return 时，块已以 ret 结束，再无条件补 br 会生成
+// 「终结指令后接指令」的非法 IR（LLVM verifier 拒绝）。
+bool block_terminated(KernelContext& kc) {
+    llvm::BasicBlock* bb = kc.builder.GetInsertBlock();
+    return bb != nullptr && bb->getTerminator() != nullptr;
+}
+
+// 取（必要时创建）label 对应的基本块。前向引用也成立：break 在 label 之前出现时先建块，
+// 后方的 label 语句随后 SetInsertPoint 到同一块。
+llvm::BasicBlock* label_block(a_label_ptr label, KernelContext& kc) {
+    llvm::BasicBlock*& bb = kc.labels[label];
+    if (bb == nullptr) {
+        bb = llvm::BasicBlock::Create(kc.ctx, "label", kc.builder.GetInsertBlock()->getParent());
+    }
+    return bb;
+}
+
+// goto（break / continue 的降级形态）：无条件跳到 label 块。
+// 当前块已终结（如已 return）时不再补 br —— 该跳转不可达，插指令会生成非法 IR。
+void translate_goto(a_statement_ptr stmt, KernelContext& kc) {
+    llvm::BasicBlock* target = label_block(stmt->variant.label.ptr, kc);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(target);
+    }
+}
+
+// 代码标签：把后续语句接到该块上。
+void translate_label(a_statement_ptr stmt, KernelContext& kc) {
+    llvm::BasicBlock* target = label_block(stmt->variant.label.ptr, kc);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(target);
+    }
+    kc.builder.SetInsertPoint(target);
+}
+
+// if 语句：条件转 i1，建 then/else/end 三块并递归翻译分支。
+void translate_if(a_statement_ptr stmt, KernelContext& kc) {
+    llvm::Value* cond = to_i1(translate_expr(stmt->expr, kc), kc);
     llvm::Function* fn = kc.builder.GetInsertBlock()->getParent();
     llvm::BasicBlock* then_bb = llvm::BasicBlock::Create(kc.ctx, "if.then", fn);
     llvm::BasicBlock* else_bb = llvm::BasicBlock::Create(kc.ctx, "if.else", fn);
@@ -1418,48 +1465,187 @@ void translate_if(a_statement_ptr stmt, KernelContext& kc) {
 
     kc.builder.SetInsertPoint(then_bb);
     translate_statement(stmt->variant.if_stmt.then_statement, kc);
-    kc.builder.CreateBr(end_bb);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(end_bb);
+    }
 
     kc.builder.SetInsertPoint(else_bb);
     translate_statement(stmt->variant.if_stmt.else_statement, kc);
-    kc.builder.CreateBr(end_bb);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(end_bb);
+    }
 
     kc.builder.SetInsertPoint(end_bb);
 }
+
+// while（stmk_while）：cond → body → cond。
+void translate_while(a_statement_ptr stmt, KernelContext& kc) {
+    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock* cond_bb = llvm::BasicBlock::Create(kc.ctx, "while.cond", fn);
+    llvm::BasicBlock* body_bb = llvm::BasicBlock::Create(kc.ctx, "while.body", fn);
+    llvm::BasicBlock* end_bb = llvm::BasicBlock::Create(kc.ctx, "while.end", fn);
+
+    kc.builder.CreateBr(cond_bb);
+
+    kc.builder.SetInsertPoint(cond_bb);
+    llvm::Value* cond = to_i1(translate_expr(stmt->expr, kc), kc);
+    kc.builder.CreateCondBr(cond, body_bb, end_bb);
+
+    kc.builder.SetInsertPoint(body_bb);
+    translate_statement(stmt->variant.loop_statement, kc);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(cond_bb);
+    }
+
+    kc.builder.SetInsertPoint(end_bb);
+}
+
+// do-while（EDG 的 stmk_end_test_while）：body → cond → body（首次必进）。
+void translate_end_test_while(a_statement_ptr stmt, KernelContext& kc) {
+    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock* body_bb = llvm::BasicBlock::Create(kc.ctx, "do.body", fn);
+    llvm::BasicBlock* cond_bb = llvm::BasicBlock::Create(kc.ctx, "do.cond", fn);
+    llvm::BasicBlock* end_bb = llvm::BasicBlock::Create(kc.ctx, "do.end", fn);
+
+    kc.builder.CreateBr(body_bb);
+
+    kc.builder.SetInsertPoint(body_bb);
+    translate_statement(stmt->variant.loop_statement, kc);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(cond_bb);
+    }
+
+    kc.builder.SetInsertPoint(cond_bb);
+    llvm::Value* cond = to_i1(translate_expr(stmt->expr, kc), kc);
+    kc.builder.CreateCondBr(cond, body_bb, end_bb);
+
+    kc.builder.SetInsertPoint(end_bb);
+}
+
+// for（stmk_for）：init → cond → body → increment → cond。
+// 字段位置由 EDG il_def.h 决定：cond 在 statement->expr；body 在
+// variant.for_loop.statement；init / increment / for_init_scope 在
+// variant.for_loop.extra_info（a_for_loop）。
+void translate_for(a_statement_ptr stmt, KernelContext& kc) {
+    a_for_loop_ptr fl = stmt->variant.for_loop.extra_info;
+    // init 可能是声明（for (int i = 0; ...)），须先翻译以把变量登记进 locals。
+    // 注：locals 是函数级 map，for-init 变量在循环后仍可见（不做作用域清理）；
+    // 内核内同名遮蔽极少见，暂按此简化处理。
+    if (fl != nullptr && fl->initialization != nullptr) {
+        translate_statement(fl->initialization, kc);
+    }
+
+    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock* cond_bb = llvm::BasicBlock::Create(kc.ctx, "for.cond", fn);
+    llvm::BasicBlock* body_bb = llvm::BasicBlock::Create(kc.ctx, "for.body", fn);
+    llvm::BasicBlock* inc_bb = llvm::BasicBlock::Create(kc.ctx, "for.inc", fn);
+    llvm::BasicBlock* end_bb = llvm::BasicBlock::Create(kc.ctx, "for.end", fn);
+
+    kc.builder.CreateBr(cond_bb);
+
+    kc.builder.SetInsertPoint(cond_bb);
+    // 无条件 for（for (;;)）的 expr 为 NULL → 恒真。
+    llvm::Value* cond = stmt->expr != nullptr ? to_i1(translate_expr(stmt->expr, kc), kc)
+                                              : llvm::ConstantInt::getTrue(kc.ctx);
+    kc.builder.CreateCondBr(cond, body_bb, end_bb);
+
+    kc.builder.SetInsertPoint(body_bb);
+    translate_statement(stmt->variant.for_loop.statement, kc);
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(inc_bb);
+    }
+
+    kc.builder.SetInsertPoint(inc_bb);
+    if (fl != nullptr && fl->increment != nullptr) {
+        translate_expr(fl->increment, kc);
+    }
+    if (!block_terminated(kc)) {
+        kc.builder.CreateBr(cond_bb);
+    }
+
+    kc.builder.SetInsertPoint(end_bb);
+}
+
+// 语句种类 → 处理函数。查表分派而不是 switch：新增语句种类只改表一行，
+// 且 dispatch 本身的圈复杂度不随种类增加而上涨（CCN 门禁 ≤10）。
+using StmtHandler = void (*)(a_statement_ptr, KernelContext& kc);
+
+void stmt_block(a_statement_ptr stmt, KernelContext& kc) {
+    // 语句块：顺序翻译 statements 链。
+    for (a_statement_ptr s = stmt->variant.block.statements; s != nullptr; s = s->next) {
+        translate_statement(s, kc);
+    }
+}
+void stmt_expr(a_statement_ptr stmt, KernelContext& kc) {
+    translate_expr(stmt->expr, kc);
+}
+void stmt_decl(a_statement_ptr stmt, KernelContext& kc) {
+    translate_decl(stmt, kc);
+}
+void stmt_init(a_statement_ptr stmt, KernelContext& kc) {
+    translate_init(stmt, kc);
+}
+void stmt_if(a_statement_ptr stmt, KernelContext& kc) {
+    translate_if(stmt, kc);
+}
+void stmt_while(a_statement_ptr stmt, KernelContext& kc) {
+    translate_while(stmt, kc);
+}
+void stmt_do_while(a_statement_ptr stmt, KernelContext& kc) {
+    translate_end_test_while(stmt, kc);
+}
+void stmt_for(a_statement_ptr stmt, KernelContext& kc) {
+    translate_for(stmt, kc);
+}
+void stmt_return(a_statement_ptr /*stmt*/, KernelContext& kc) {
+    // 内核返回 void；M1.2.3 只处理无返回值内核。
+    kc.builder.CreateRetVoid();
+}
+void stmt_empty(a_statement_ptr /*stmt*/, KernelContext& /*kc*/) {}
+
+void stmt_goto(a_statement_ptr stmt, KernelContext& kc) {
+    translate_goto(stmt, kc);
+}
+void stmt_label(a_statement_ptr stmt, KernelContext& kc) {
+    translate_label(stmt, kc);
+}
+
+struct StmtEntry {
+    a_statement_kind kind;
+    StmtHandler handler;
+};
+
+// 覆盖范围即本表的条目；未列出的 kind 一律 fail loud（不静默跳过）。
+constexpr StmtEntry kStmtTable[] = {
+    {stmk_block, stmt_block},
+    {stmk_expr, stmt_expr},
+    {stmk_decl, stmt_decl},
+    {stmk_init, stmt_init},
+    {stmk_if, stmt_if},
+    {stmk_while, stmt_while},
+    {stmk_end_test_while, stmt_do_while},
+    {stmk_for, stmt_for},
+    {stmk_return, stmt_return},
+    {stmk_empty, stmt_empty},
+
+    {stmk_goto, stmt_goto},
+    {stmk_label, stmt_label},
+};
 
 // 语句翻译。
 void translate_statement(a_statement_ptr stmt, KernelContext& kc) {
     if (stmt == nullptr) {
         return;
     }
-    switch (stmt->kind) {
-        case stmk_block:
-            // 语句块：顺序翻译 statements 链。
-            for (a_statement_ptr s = stmt->variant.block.statements; s != nullptr; s = s->next) {
-                translate_statement(s, kc);
-            }
+    for (const StmtEntry& entry : kStmtTable) {
+        if (entry.kind == stmt->kind) {
+            entry.handler(stmt, kc);
             return;
-        case stmk_expr:
-            translate_expr(stmt->expr, kc);
-            return;
-        case stmk_decl:
-            translate_decl(stmt, kc);
-            return;
-        case stmk_init:
-            translate_init(stmt, kc);
-            return;
-        case stmk_if:
-            translate_if(stmt, kc);
-            return;
-        case stmk_return:
-            // 内核返回 void；M1.2.3 只处理无返回值内核。
-            kc.builder.CreateRetVoid();
-            return;
-        case stmk_empty:
-            return;
-        default:
-            fail("不支持的语句 kind（M1.2.3 仅覆盖 block/expr/decl/init/if/return/empty）");
+        }
     }
+    fail(
+        "不支持的语句 kind（M5.2 覆盖 block/expr/decl/init/if/return/empty/while/for/"
+        "do-while/goto/label；switch、range-for、asm、coroutine 暂不支持）");
 }
 
 // 取函数体 scope：用 EDG 的 scope_for_routine（il.h:3992）。

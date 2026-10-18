@@ -6,6 +6,35 @@
 
 ### Added
 
+- **M5.2 内核 `break` / `continue`**：EDG 把它们降成 `stmk_goto` + `stmk_label` 一对语句（实测：
+  `k_for_break` 的 IL 里两者通过 `label` 实体指针互指），因此新增 `KernelContext::labels`
+  （label 实体 → LLVM `BasicBlock`）按需建块 —— 谁先出现谁建、另一边查同一张表，
+  前向跳转（`break` 跳到循环之后的 label）与后向跳转都成立。`translate_goto` / `translate_label`
+  均尊重 `block_terminated()`：已 `return` 的块不再补 `br`。
+  **正确性关键在 `continue`**：它必须跳到 **increment 块**而不是循环头，否则 `i` 不递增 → 死循环。
+  PTX 实测 `@%p2 bra $L__BB1_4`，而 `BB1_4` 正是 `add.s32 %r6, %r6, %r5`（increment）。
+  测试：`golden_frontend_loop_control` + `golden_device_il_to_ptx_loop_control{_break,_while,_continue}`
+  （continue 以 `setp.eq.s32` 作指纹，另两个内核用 `ge` / `gt`）+ `e2e_hacc_loop_break_continue_run`
+  （真机：`break` 只写 0..3、`continue` 跳过 4，输出 `loopCtrl OK`；若 continue 跳错位置，测试会挂死
+  而非误判通过）。`make check` **153/153**、零 SKIP。
+  **边界前移**：`diag_unsupported_break` 随实现删除；`switch` 仍是边界（`diag_unsupported_switch` 保留）。
+
+- **M5.1 内核循环（`while` / `for` / `do-while`）**：补齐 ADR 0004 §S0 承诺的「控制流」里最硬的缺口 ——
+  此前 `translate_statement` 只覆盖 `block/expr/decl/init/if/return/empty`，**内核体内无法写任何循环**
+  （9 个 samples 的 `for` 全在主机侧 `main()`，由 g++ 编译；`atomic_reduce` 靠 `threadIdx.x` 直接算绕开 stride 循环）。
+  按 EDG IL 的三种语句种类分别降级：`stmk_while`（cond→body→cond）、`stmk_for`
+  （init→cond→body→inc→cond，init/increment 在 `variant.for_loop.extra_info`）、`stmk_end_test_while`（do-while，body→cond）。
+  顺带修掉两处隐患：① `for (;;)` 的 `expr` 为 NULL 时按恒真处理；② 新增 `block_terminated()` 守卫 ——
+  分支/循环体里出现 `return` 后不再补 `br`，否则生成「终结指令后接指令」的非法 IR（`translate_if` 同样受益）。
+  **`translate_statement` 改为查表分派**（`kStmtTable`）：新增语句种类只改表一行，dispatch 的 CCN 不再随种类上涨
+  （此前加 3 个 case 就顶破 CCN 10 门禁，而按 clean-code 该用数据结构消分支，不该加白名单）。
+  测试：`golden_frontend_loop_forms` + `golden_device_il_to_ptx_loop_forms{_while,_for,_do,_branch}`
+  （PTX 断言三入口 + `bra.uni` 回跳）+ `e2e_hacc_loop_stride_run`（N=1024 > 128 线程，真机每线程迭代 8 次，
+  输出 `loopStride OK`）。`make check` **147/147**、零 SKIP。
+  **边界前移**：`diag_unsupported_while` 随功能实现删除（while 不再是不支持项，正向覆盖由 loop_forms 承担）；
+  新增 `diag_unsupported_break` 钉住新边界 —— `break` / `continue` 被 EDG 降为 `stmk_goto` + `stmk_label`，
+  仍需 label→基本块映射，暂不支持（诊断位置也因此从 kernel 声明行前移到 `for` 语句行）。
+
 - **B5 `dim3` 归属定稿 + CUDA 风格构造**：`dim3` 由 coolrt 公开头（`cool_types.h`）唯一提供，
   hacc 的 `hacc_runtime.h` **只消费不定义**——显式 `#include <cool/cool_types.h>` 声明依赖
   （此前是靠 `cool_runtime_api.h` 间接拿到），并加 `static_assert(std::is_trivially_copyable<dim3>)`

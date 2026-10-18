@@ -201,6 +201,26 @@
 - [ ] **C5 hacc 的 CI 形态**：EDG ~853MB 拉取 + 是否有 GPU；coolruntime 的 CI 因无 GPU 仅做格式检查，
       hacc 是否照此。
 - [ ] **C6 面向教学的诊断格式**：阶段 / 源位置 / 成因的**具体输出格式**（Coding Rules 仅有原则）。
+- [x] **C7 ADR 0004 的 S0「控制流」与实现不符 → 已按路线 ② 补实现（M5.1 完成）**：ADR 0004 §S0 写明
+      「语言子集：…控制流…」，而当时 `src/device/il_to_llvm.cpp` 的 `translate_statement` 只覆盖
+      `block / expr / decl / init / if / return / empty`——**`while` / `for` / `switch` 全不支持**；
+      旁证是 9 个 samples 的内核体内零循环（`for` 只在主机侧 `main()`）。
+      **已完成**：`stmk_while` / `stmk_for` / `stmk_end_test_while` 三种循环已降级到 LLVM IR（M5.1），
+      `translate_statement` 同时改为查表分派；`make check` **147/147**、零 SKIP。
+      负向用例 `diag_unsupported_while` 随功能实现删除（正向覆盖由 `golden_*_loop_forms` 承担）。
+      详见 CHANGELOG 的 M5.1 条目。
+- [x] **C8 循环控制 `break` / `continue` → 已完成（M5.2）**：`break` 与 `continue` 被 EDG 降为
+      `stmk_goto` + `stmk_label`（实测：`k_for_break` 的 IL 里两者成对出现）。实现方式：
+      `KernelContext::labels`（label 实体 → LLVM `BasicBlock`）按需建块，前向/后向跳转都成立。
+      **关键验证**：`continue` 必须跳 increment 块而非循环头（否则 `i` 不增 → 死循环），
+      PTX 实测 `bra $L__BB1_4` 且 `BB1_4` 即 `add.s32 %r6, %r6, %r5`；真机 e2e `loopCtrl OK`。
+      `make check` **153/153**。负向用例 `diag_unsupported_break` 随实现删除。
+- [ ] **C9 剩余表达力边界：`switch` 与自定义 `__device__` 函数调用**：
+      `switch` 需 `stmk_switch`（body 在 `variant.switch_stmt.body_statement`）+ `stmk_switch_case`
+      （`variant.switch_case.switch_statement` / `extra_info`）的 case 分派，由
+      `diag_unsupported_switch` 钉住；自定义 `__device__` 函数调用仍报「不支持的函数调用」
+      （m4-handoff §6.1），需要先决定「内联展开」还是「发射独立设备函数」。
+      另：`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 也在 Non-Goal 或未覆盖之列。
 
 ---
 

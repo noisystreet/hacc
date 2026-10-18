@@ -39,6 +39,11 @@ hacc 是 [coolrt](../coolruntime) 的**编译前端**，用于补上 coolrt 架�
 `__restrict__` / `__threadfence*` / 原子内建 / 指针地址空间传播 / samples 与边界用例）均已打通。
 真 kernel 已在本机 GPU 上跑通并校验结果。
 
+**M5.1 已支持内核内循环**（`while` / `for` / `do-while`），**M5.2 补上 `break` / `continue`**
+（EDG 把它们降为 `stmk_goto` + `stmk_label`）——此前内核体里连循环都写不了，
+只能写「一线程一元素」的演示 kernel。剩余边界：`switch`、自定义 `__device__` 函数调用，
+一律 fail loud（见 `docs/TODO.md` C9）。
+
 主机编译默认调用 `g++`；可用 `--host-cxx <path>`（或 `$HACC_HOST_CXX`）切到 `clang++`
 （已验证可编）。**前端**系统头探测仍固定取 GCC 的头：EDG 按 GCC 语义解析，clang 的
 resource-dir 内建头会让它成片报错，详见 [docs/TODO.md](docs/TODO.md) 的 B8。
@@ -70,8 +75,8 @@ build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
 | `<stem>.hacc.gen.cpp` | 桩 + host（主机编译的实际输入） | — |
 | `<stem>.ptx` | 设备映像 | `.ptx` |
 
-`make check`：**137/137 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
-**fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `while` / `switch`、
+`make check`：**153/153 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
+**fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `switch`、
 `double` 等未覆盖的原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
 [known-issues.md](docs/known-issues.md)。
 
