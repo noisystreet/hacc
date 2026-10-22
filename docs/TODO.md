@@ -16,7 +16,7 @@
 >   它们补的是 **ADR 0004 §S0「控制流」** 的缺口，**不是**里程碑 M5 的完成信号。
 >
 > 当前真实进度（2026-10 复核）：**M0–M4 完成**；C7–C10（M5.1–M5.4）与 B9/B9-2 完成，
-> `make check` **191/191**、零 SKIP；**里程碑 M5 仍差 C4（跳过机制）、C5（CI 形态）**。
+> `make check` **199/199**、零 SKIP；**里程碑 M5 仍差 C4（跳过机制）、C5（CI 形态）**。
 
 ---
 
@@ -166,8 +166,9 @@
       `a + ~a = -1`，整条依赖链会被折叠成一条 `mov`，断言就测了个寂寞。
       `make check` **191/191**。
 
-      仍未覆盖：指针复合赋值（`eok_padd_assign` / `eok_psubtract_assign`，即 `p += i`），
-      以及 `&&` / `||`（`eok_land` / `eok_lor`）。
+      当初未覆盖的两项**已完成**（C11 前半）：指针复合赋值（`eok_padd_assign` /
+      `eok_psubtract_assign`，即 `p += i`）与 `&&` / `||`（`eok_land` / `eok_lor`，**含短路**）。
+      见 CHANGELOG 对应条目与 `tests/golden/e2e/logical_ptr.cu`。
 
 ## B'. 里程碑实施（M1）
 
@@ -291,6 +292,9 @@
       NVPTX 的 call ABI 有寄存器保存开销，热路径可能需要 `alwaysinline`）；
       `stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 仍未覆盖；
       递归的设备函数会生成 PTX 但 `ptxas` 会拒绝（CUDA 不支持递归），可在前端提前报错。
+      **已完成（C11 前半）**：`&&` / `||`（含短路）与指针复合赋值 `p += i` / `p -= i`，
+      见 CHANGELOG 与 `tests/golden/e2e/logical_ptr.cu`（`make check` **199/199**）。
+      **剩余**：内联优化、`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine`、递归设备函数拦截。
 
 ---
 
