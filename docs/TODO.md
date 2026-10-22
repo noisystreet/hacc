@@ -9,6 +9,14 @@
 >
 > 关联文档：[compiler-implementation-plan.md](compiler-implementation-plan.md)、
 > [ADR 0001–0005](adr/)、[README.md](../README.md)、[AGENTS.md](../AGENTS.md)。
+>
+> **编号消歧（务必先读）**：本文件里并存两套「M5」编号，含义不同——
+> - **里程碑 M5「稳定」**（方案 §10：诊断 / `--emit`/`-keep` / CI / 文档 / golden 回归）；
+> - **实施项 M5.1–M5.4 = C7–C10**（循环 / `break`-`continue` / `switch` / 自定义 `__device__` 函数），
+>   它们补的是 **ADR 0004 §S0「控制流」** 的缺口，**不是**里程碑 M5 的完成信号。
+>
+> 当前真实进度（2026-10 复核）：**M0–M4 完成**；C7–C10（M5.1–M5.4）与 B9/B9-2 完成，
+> `make check` **191/191**、零 SKIP；**里程碑 M5 仍差 C4（跳过机制）、C5（CI 形态）**。
 
 ---
 
@@ -294,9 +302,9 @@
 - [x] **KI-1 设备全局变量不跨 kernel 共享** —— ✅ 已修（[ADR 0007](adr/0007-module-granularity-per-tu.md)：
       模块粒度改为编译单元；回归测试 `tests/golden/e2e/dev_global_shared.cu`）。
       严重度**高**：跨 kernel 状态**静默失效**，不报错。M4.1 起存在，M4.4 e2e 发现。
-      当前绕过：单 kernel 内完成，或状态改放设备内存。修复需把 module 从 kernel 粒度上移到
-      编译单元粒度（连带简化 `haccMemcpyToSymbolAll` 的 fan-out、消除 PTX 映像重复 N 份）。
-      **决策见 [ADR 0007](adr/0007-module-granularity-per-tu.md)（Proposed，待批准）**；
+      修复前绕过：单 kernel 内完成，或状态改放设备内存。修复方式（已实施）：把 module 从 kernel
+      粒度上移到编译单元粒度（连带简化 `haccMemcpyToSymbolAll` 的 fan-out、消除 PTX 映像重复 N 份）。
+      **决策见 [ADR 0007](adr/0007-module-granularity-per-tu.md)（Accepted，已实施）**；
       **建议优先于 M4.6**：用户一旦写多 kernel 程序即会撞上，且故障无提示。
 
 ---
