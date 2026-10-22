@@ -701,6 +701,56 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "deviceCall OK")
 
+        # 阶段 2（C11 前半）：短路求值 && / || + 指针复合赋值 p += i / p -= i。
+        # e2e 的断言同时看**副作用计数**（c1/c2 必须为 0）：只断言结果值会漏掉
+        # 「退化成按位 and」这类错误 —— 那种写法算出来的值恰好也是对的。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_lp_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_logical_ptr.cil")
+            set(_lp_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_logical_ptr.ptx")
+            add_test(NAME golden_frontend_logical_ptr
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_lp_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/logical_ptr.cu")
+            add_test(NAME golden_device_il_to_ptx_logical_ptr
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_lp_ptx}" "${_lp_cil}")
+            set_tests_properties(golden_device_il_to_ptx_logical_ptr PROPERTIES
+                DEPENDS golden_frontend_logical_ptr)
+            # 两个内核入口都在。
+            add_test(NAME golden_device_il_to_ptx_logical_ptr_entries
+                COMMAND grep -qE "\\.visible \\.entry k_short_circuit|\\.visible \\.entry k_ptr_compound"
+                        "${_lp_ptx}")
+            # 短路指纹：谓词化条件跳转（@%p bra）跳过右值块。若 && 被翻译成按位 and，
+            # PTX 里只会出现 and.b32，没有这种谓词跳转。
+            add_test(NAME golden_device_il_to_ptx_logical_ptr_shortcircuit
+                COMMAND grep -qE "@%p[0-9]+ bra" "${_lp_ptx}")
+            # 指针复合赋值走 GEP → 索引缩放（mul.wide）或地址相加（add.s64）。
+            add_test(NAME golden_device_il_to_ptx_logical_ptr_gep
+                COMMAND grep -qE "mul\\.wide|add\\.s64" "${_lp_ptx}")
+            # 防退化：本文件没有任何 & 运算符，出现 and.b32 就说明逻辑运算符
+            # 被当成了位运算符处理。
+            add_test(NAME golden_device_il_to_ptx_logical_ptr_no_bitand
+                COMMAND sh -c "! grep -qE 'and\\.b32' \"$1\"" _ "${_lp_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_logical_ptr_entries
+                                 golden_device_il_to_ptx_logical_ptr_shortcircuit
+                                 golden_device_il_to_ptx_logical_ptr_gep
+                                 golden_device_il_to_ptx_logical_ptr_no_bitand PROPERTIES
+                DEPENDS golden_device_il_to_ptx_logical_ptr)
+        endif()
+
+        # 阶段 2 e2e：短路副作用 + 指针复合赋值的真机校验。
+        set(_e2e_lp_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_logical_ptr_run")
+        add_test(NAME e2e_hacc_logical_ptr_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/logical_ptr.cu"
+                    -o "${_e2e_lp_exe}")
+        add_test(NAME e2e_hacc_logical_ptr_run
+            COMMAND "${_e2e_lp_exe}")
+        set_tests_properties(e2e_hacc_logical_ptr_run PROPERTIES
+            DEPENDS e2e_hacc_logical_ptr_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "logicalPtr OK")
+
         # M4.3 golden：__threadfence{,_block,_system} → NVVM membar.{gl,cta,sys}。
         # 需 COOLRuntime 头（.cu 用 #include <cool/cool_runtime.h>）。
         if(HACC_COOLRUNTIME_INCLUDE)

@@ -637,6 +637,32 @@ llvm::Value* emit_int_arith(an_expr_operator_kind op, bool is_unsigned, llvm::Va
     }
 }
 
+// 指针步进：ptr ± idx → GEP（按 pointee 类型缩放）。
+//
+// 抽出来是因为有两个调用方：二元算术（p + i，操作数是表达式节点，要先判定哪侧
+// 是指针）与指针复合赋值（p += i，左值类型已知就是指针）。索引统一转 i64、
+// psubtract 取负索引 —— 两处共用同一份缩放与符号逻辑，避免各写一遍再走样。
+llvm::Value* emit_pointer_step(an_expr_operator_kind op, a_type_ptr ptr_type, llvm::Value* ptr_val,
+                               llvm::Value* idx_val, KernelContext& kc) {
+    if (ptr_type == nullptr || skip_typerefs(ptr_type)->kind != tk_pointer) {
+        fail("指针步进要求指针类型");
+    }
+    if (op != eok_padd && op != eok_psubtract) {
+        fail("内部错误：非指针算术被送进 emit_pointer_step");
+    }
+    // 索引统一为 i64（GEP 索引类型）。
+    if (idx_val->getType() != kc.builder.getInt64Ty()) {
+        idx_val = kc.builder.CreateIntCast(idx_val, kc.builder.getInt64Ty(), /*isSigned=*/true);
+    }
+    if (op == eok_psubtract) {
+        idx_val = kc.builder.CreateNeg(idx_val);
+    }
+    // pointee 类型：不透明指针下 GEP 仍需元素类型。
+    a_type_ptr pointee = skip_typerefs(ptr_type)->variant.pointer.type;
+    llvm::Type* elem_ty = map_type(pointee, kc.ctx);
+    return kc.builder.CreateGEP(elem_ty, ptr_val, idx_val);
+}
+
 // 指针算术（p + i / p - i）：用 GEP 按 pointee 类型步进。
 // 指针操作数取 ptr 值，整数操作数转 i64 作索引；减法取负索引。
 // 仅支持「指针 ± 整数」（不支持指针 - 指针，M2.4 范围）。
@@ -649,22 +675,12 @@ llvm::Value* emit_pointer_arith(an_expr_operator_kind op, an_expr_node_ptr a, an
     }
     an_expr_node_ptr ptr_expr = a_is_ptr ? a : b;
     llvm::Value* ptr_val = a_is_ptr ? va : vb;
-    llvm::Value* idx_val = a_is_ptr ? vb : va;
     // 指针在减法右侧时（i - p）语义非法，明确报错。
     if (op == eok_psubtract && !a_is_ptr) {
         fail("不支持「整数 - 指针」");
     }
-    // 索引统一为 i64（GEP 索引类型）。
-    if (idx_val->getType() != kc.builder.getInt64Ty()) {
-        idx_val = kc.builder.CreateIntCast(idx_val, kc.builder.getInt64Ty(), /*isSigned=*/true);
-    }
-    if (op == eok_psubtract) {
-        idx_val = kc.builder.CreateNeg(idx_val);
-    }
-    // pointee 类型：从指针操作数的类型取（不透明指针下 GEP 仍需元素类型）。
-    a_type_ptr pointee = skip_typerefs(ptr_expr->type)->variant.pointer.type;
-    llvm::Type* elem_ty = map_type(pointee, kc.ctx);
-    return kc.builder.CreateGEP(elem_ty, ptr_val, idx_val);
+    // 缩放、索引转换与减法取负统一交给 emit_pointer_step（与指针复合赋值共用）。
+    return emit_pointer_step(op, ptr_expr->type, ptr_val, a_is_ptr ? vb : va, kc);
 }
 
 // 二元算术（+ - * / %）：按操作数类型选浮点/整型指令。
@@ -842,6 +858,51 @@ llvm::Value* emit_logical_or_bool(an_expr_operator_kind op, an_expr_node_ptr exp
     }
     llvm::Type* dst = map_type(expr->type, kc.ctx);
     return truth->getType() == dst ? truth : kc.builder.CreateZExt(truth, dst);
+}
+
+// 逻辑与/或（&& / ||）：**必须短路**，不能退化成按位 and/or。
+//
+// EDG 把 && / || 保留为 eok_land / eok_lor 节点（不像 break 那样降成 goto + label），
+// 所以短路只能在这里实现：左值先求值并归一为 i1，据其决定要不要进入右值块。
+// 若直译成 `to_i1(a) & to_i1(b)`，右值的副作用（函数调用、原子操作、自增）就会
+// **无条件执行** —— 那是语义错误，不是优化差异。
+//
+// 结构（以 a && b 为例）：
+//   lhs_end: cond br  lhs ? rhs_bb : merge_bb
+//   rhs_bb:  求 b，br merge_bb
+//   merge_bb: phi [false, lhs_end], [b, rhs_bb]
+// `a || b` 只是两个目标块对调、phi 的短路常量取 true。
+//
+// 嵌套（a && b && c）时内层会再建自己的块，插入点最终落在内层 merge 块上，
+// 因此「右值结束块」必须现取 GetInsertBlock()，不能写死预建的 rhs_bb ——
+// 否则 br 落在 rhs_bb 而值定义在其后的块里，LLVM 的支配性检查会拒绝。
+llvm::Value* translate_logical(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr a = binary_operands(expr->variant.operation.operands, "逻辑运算符");
+    an_expr_node_ptr b = a->next;
+    const bool is_and = (op == eok_land);
+    llvm::Function* fn = kc.builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock* rhs_bb =
+        llvm::BasicBlock::Create(kc.ctx, is_and ? "land.rhs" : "lor.rhs", fn);
+    llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(kc.ctx, "logic.end", fn);
+
+    llvm::Value* lhs = to_i1(translate_expr(a, kc), kc);
+    llvm::BasicBlock* lhs_end = kc.builder.GetInsertBlock();
+    // && 左侧为真才求右侧；|| 左侧为假才求右侧。
+    kc.builder.CreateCondBr(lhs, is_and ? rhs_bb : merge_bb, is_and ? merge_bb : rhs_bb);
+
+    kc.builder.SetInsertPoint(rhs_bb);
+    llvm::Value* rhs = to_i1(translate_expr(b, kc), kc);
+    llvm::BasicBlock* rhs_end = kc.builder.GetInsertBlock();
+    kc.builder.CreateBr(merge_bb);
+
+    kc.builder.SetInsertPoint(merge_bb);
+    llvm::PHINode* phi = kc.builder.CreatePHI(kc.builder.getInt1Ty(), 2);
+    phi->addIncoming(kc.builder.getInt1(!is_and), lhs_end);  // 短路值：&& 为假、|| 为真
+    phi->addIncoming(rhs, rhs_end);
+
+    // 结果在 IL 里是 bool（tk_integer + bool_type），map_type 得 i8，需扩回。
+    llvm::Type* dst = map_type(expr->type, kc.ctx);
+    return phi->getType() == dst ? phi : kc.builder.CreateZExt(phi, dst);
 }
 
 // 一元运算：取负 / 取反 / 取址 / 解引用。
@@ -1318,6 +1379,7 @@ enum class OpClass {
     Arith,
     Compare,
     Bitwise,
+    Logical,
     Cast,
     Unary,
     DotField,
@@ -1375,6 +1437,13 @@ bool is_bitwise_operator(an_expr_operator_kind op) {
         default:
             return false;
     }
+}
+
+// 是否为逻辑运算符（&& / ||）。EDG 的命名是 eok_land / eok_lor，与位运算的
+// eok_and / eok_or **只差一个字母**，务必别混：位运算两侧都求值且按位算，
+// 逻辑运算必须**短路**（左侧已决定结果时右侧不求值）。
+bool is_logical_operator(an_expr_operator_kind op) {
+    return op == eok_land || op == eok_lor;
 }
 
 // 是否为一元运算符（* & - ! ~ 以及 (bool)）。
@@ -1446,9 +1515,29 @@ bool bitwise_assign_base_op(an_expr_operator_kind op, an_expr_operator_kind& bas
     }
 }
 
+// 指针复合赋值（p += i / p -= i）→ 对应的指针算术算子。
+//
+// EDG 给的是专用节点 eok_padd_assign / eok_psubtract_assign，不是 add_assign ——
+// 因为语义是「按 pointee 大小缩放后步进」，与整数加法不是一回事。
+// 复合赋值通路（translate_assign）本身已保证左值地址只求值一次，
+// 这里只需把基础算子接到指针步进上（见 emit_binop_by_base_op）。
+bool pointer_assign_base_op(an_expr_operator_kind op, an_expr_operator_kind& base) {
+    switch (op) {
+        case eok_padd_assign:
+            base = eok_padd;
+            return true;
+        case eok_psubtract_assign:
+            base = eok_psubtract;
+            return true;
+        default:
+            return false;
+    }
+}
+
 // 复合赋值 → 基础二元算子；不是复合赋值时返回 false 且不改 base。
 bool compound_assign_base_op(an_expr_operator_kind op, an_expr_operator_kind& base) {
-    return arith_assign_base_op(op, base) || bitwise_assign_base_op(op, base);
+    return arith_assign_base_op(op, base) || bitwise_assign_base_op(op, base) ||
+           pointer_assign_base_op(op, base);
 }
 
 // 是否属于赋值类（`=` 与所有 `op=`）。
@@ -1461,6 +1550,11 @@ bool is_assign_operator(an_expr_operator_kind op) {
 // 复合赋值复用这一处，省得「+=」和「+」的符号性/浮点分派逻辑各写一遍再走样。
 llvm::Value* emit_binop_by_base_op(an_expr_operator_kind base, a_type_ptr type, llvm::Value* va,
                                    llvm::Value* vb, KernelContext& kc) {
+    // 指针复合赋值（p += i / p -= i）：按元素缩放步进，不是整数加减。
+    // 放在浮点/位运算判定之前 —— type 在这里是指针类型，两者都不会命中。
+    if (base == eok_padd || base == eok_psubtract) {
+        return emit_pointer_step(base, type, va, vb, kc);
+    }
     const bool is_fp = type != nullptr && type->kind == tk_float;
     if (is_bitwise_operator(base)) {
         if (is_fp) {
@@ -1487,6 +1581,9 @@ OpClass classify_operator(an_expr_operator_kind op) {
     }
     if (is_bitwise_operator(op)) {
         return OpClass::Bitwise;
+    }
+    if (is_logical_operator(op)) {
+        return OpClass::Logical;
     }
     if (op == eok_cast) {
         return OpClass::Cast;
@@ -1521,6 +1618,8 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             return translate_compare(op, expr, kc);
         case OpClass::Bitwise:
             return translate_bitwise(op, expr, kc);
+        case OpClass::Logical:
+            return translate_logical(op, expr, kc);
         case OpClass::Cast:
             return translate_cast(expr, kc);
         case OpClass::Unary:
