@@ -754,7 +754,10 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                     "atom\\.global\\.or\\.b32"
                     "atom\\.global\\.xor\\.b32"
                     "atom\\.global\\.cas\\.b32")
-                string(REPLACE "\\\\" "" _at_name "${_at_pat}")
+                # CMake 里 "\\" 求值为**单个**反斜杠；_at_pat 求值后是 atom\.global\.add\.u32，
+                # 故此处只能剥一层。写成 "\\\\"（两个）会匹配不到、反斜杠留在测试名里，
+                # 进而触发 CMake CMP0110「测试名含非法字符」警告刷屏。见下方 B9 段同类教训。
+                string(REPLACE "\\" "" _at_name "${_at_pat}")
                 string(REPLACE "." "_" _at_name "${_at_name}")
                 add_test(NAME golden_device_il_to_ptx_atomics_${_at_name}
                     COMMAND grep -qE "${_at_pat}" "${_at_ptx}")
