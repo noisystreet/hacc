@@ -6,6 +6,21 @@
 
 ### Added
 
+- **GPU 用例的跳过机制（C4）**：此前所有 e2e 在拿不到设备时返回 77，ctest 记 SKIP ——
+  于是 `nvidia_uvm` 未加载这类**真故障**和「这台机器没 GPU」表现一样，都是「没失败」。
+  现在拆开：
+
+  - 新增 `tests/golden/e2e/gpu_state.cu`：枚举到设备 → 0；**有 `/dev/nvidia0` 却枚举不到
+    设备 → 1（FAIL，不再是 SKIP）**；连设备节点都没有 → 77（SKIP）+ 醒目 WARNING。
+    判定用「设备节点在不在」而非错误码：cuInit 失败返回 999，与「压根没卡」未必能靠错误码
+    区分，而 `/dev/nvidia0` 由驱动注入、与 uvm 是否加载无关，是更硬的事实。
+  - 三条分支都有回归用例：`e2e_hacc_gpu_state`（真实探测）、`..._no_device` 与 `..._init_fail`
+    （用 `HACC_GPU_STATE_FAULT=n|i` 注入）。**真机故障不可按需制造，所以要能注入** ——
+    否则这两条分支等于没测过。
+  - `make check` 末尾汇总：出现 SKIP 时打印 `⚠ N 个测试被 SKIP —— 「全部通过」不含这些用例`
+    并给出 uvm 排查命令；新增 **`make check-strict`**（SKIP 即失败），供有 GPU 的 CI 或本机复验。
+    实测：临时把一条自测改成真 SKIP → `make check` 正确警告、`make check-strict` 正确失败。
+
 - **MMA / Tensor Core 的编译路径（C12 的 A1 + A2）**：`cool_wmma_*` 五条内建
   （load.a / load.b / load.c / mma / store.d）→ `llvm.nvvm.wmma.m16n16k16.*`，
   PTX 产出 5 条 `wmma.*` 指令，`ptxas -arch=sm_80` 汇编通过（cubin 3624 B，

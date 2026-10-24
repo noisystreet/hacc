@@ -19,7 +19,8 @@
 > C12（MMA / Tensor Core）的 **A1/A2/A4 已完成**——编译路径通（PTX 5 条 `wmma.*` + ptxas 汇编）
 > 且**真机数值验证通过**（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
 > 并做了「把 A/B 传反必须变红」的反向验证）；
-> `make check` **205/205**、零 SKIP；**里程碑 M5 仍差 C4（跳过机制）、C5（CI 形态）**。
+> `make check` **209/209**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
+> **里程碑 M5 仍差 C5（CI 形态）**。
 
 ---
 
@@ -262,8 +263,18 @@
 - [x] **C2 命名 / 路径一致性**：**已定——统一为 `include/coolcc/`**；文档与骨架已同步（运行时头 `include/coolcc/hacc_runtime.h`）。
 - [ ] **C3 一期是否支持多 `.cu`（多 TU WPC）**：「一步到可执行」默认行为下，多个 `.cu` 各自 host 桩 + 注册
       是否属一期？[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) 仅排除 RDC / 跨 TU 设备函数链接，**未点名 WPC 多 TU**。
-- [ ] **C4 golden / 对照策略**：一期是否即引入「与 nvcc 运行结果对照」（方案 §11 标为「可选」）；
-      以及**无 GPU / 无 PTX JIT 时的跳过机制**（CTest label / feature）。
+- [x] **C4 跳过机制 → 已完成；「与 nvcc 运行结果对照」仍是可选、未做**：
+      核心目标不变：**不让「跳过」伪装成「通过」**。
+      - 新增 `tests/golden/e2e/gpu_state.cu`：枚举到设备 → 0；**有 `/dev/nvidia0` 却枚举不到
+        设备 → 1（FAIL，不再是 SKIP）**；连设备节点都没有 → 77（SKIP）+ 醒目 WARNING。
+        判定用「设备节点在不在」而非错误码 —— cuInit 失败返回 999，与「压根没卡」未必能靠
+        错误码区分，而 `/dev/nvidia0` 由驱动/toolkit 注入、与 uvm 是否加载无关。
+      - **三条分支都有回归**：`e2e_hacc_gpu_state`（真实）、`..._no_device`、`..._init_fail`，
+        后两条靠 `HACC_GPU_STATE_FAULT=n|i` 注入 —— 真机故障不可按需制造，不注入就等于没测。
+      - `make check` 末尾汇总 `⚠ N 个测试被 SKIP —— 「全部通过」不含这些用例` 并给 uvm 排查命令；
+        新增 **`make check-strict`**（SKIP 即失败），供有 GPU 的 CI 用。两者都实测过。
+      - **未做**：「与 nvcc 运行结果对照」（方案 §11 标为可选）。需要 nvcc 环境，且与现有
+        「真机 e2e + CPU 参考比对」重复度较高；若引入，建议单独排期并限定用例范围。
 - [ ] **C5 hacc 的 CI 形态**：EDG ~853MB 拉取 + 是否有 GPU；coolruntime 的 CI 因无 GPU 仅做格式检查，
       hacc 是否照此。
 - [ ] **C6 面向教学的诊断格式**：阶段 / 源位置 / 成因的**具体输出格式**（Coding Rules 仅有原则）。
@@ -322,7 +333,8 @@
       **ADR 0008（Tensor Core 子集）** 已写入 `docs/adr/0008-tensor-core-subset.md`，
       **Status = Accepted（2026-10 批准）**。
       **剩余**：仅可选的诊断增强（KI-3：对齐检查优先，warp-uniform 次之）。
-      **C4 仍然要做**（A4 已用 77 SKIP 兜住 hacc 侧，但「无设备 / 初始化失败」的区分本身是 M5 验收标准）：
+      **C4 已落地**（见 C4 条目）：`gpu_state` 探针把「无设备」与「初始化失败」分开，
+      「初始化失败」现在返回 1 而非 77 —— A4 的数值防线不会再被静默 SKIP 掉：
       A/B 传反与 fragment 内部错位都编得过、只有数值错，数值断言是唯一防线。
       本轮实测到一个具体例证（2026-10-24，`nvidia_uvm` 未加载 → 宿主机 `modprobe` 前后各测一次）：
       - uvm 缺失时（`lsmod` 无 `nvidia_uvm`、`/dev/nvidia-uvm` 不存在、`/proc/devices` 无 510）：
