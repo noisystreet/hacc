@@ -6,6 +6,50 @@
 
 ### Added
 
+- **MMA / Tensor Core 的编译路径（C12 的 A1 + A2）**：`cool_wmma_*` 五条内建
+  （load.a / load.b / load.c / mma / store.d）→ `llvm.nvvm.wmma.m16n16k16.*`，
+  PTX 产出 5 条 `wmma.*` 指令，`ptxas -arch=sm_80` 汇编通过（cubin 3624 B，
+  与 A0 spike 的 `-O2` 产物同尺寸）。
+
+  **ABI 选「出参」而非值返回**：`void cool_wmma_load_a_row(frag_a* f, const void* p)`。
+  值返回要求「多返回值 struct intrinsic 的 SSA 管道」（`insertvalue` 组装），而内建映射
+  此前只支持「无参 + void」—— 两个缺口叠在一起风险更高；出参只需聚合 `call` + `store`
+  + 常量下标 `extractvalue`，复用既有通路，且不需要 `insertvalue` 通道。
+
+  **intrinsic 类型必须写死，不能从用户类型推导**：hacc 眼中的 fragment 是
+  `{[8 x i32]}` / `{[8 x float]}`，而 intrinsic 声明是 `{<2 x half> × 8}` / `{float × 8}`
+  —— 不同型、只是 **32 字节布局兼容**。LLVM verifier 会拒掉类型不符的 intrinsic 声明
+  （`Intrinsic has incorrect return type`），但 opaque pointer 下 `store` / `load`
+  不要求指针元素类型一致，这条通路才成立。
+
+  **coolrt 的 fragment 用 `unsigned int[8]` / `float[8]` 占位，而非 `unsigned short[16]`**：
+  两者都是 32 字节，但后者对齐只有 2，而 hacc 生成的聚合值对齐是 4。hacc 目前**不读**
+  类型的 `aligned` 属性（会丢弃），局部变量的对齐取自字段类型 —— align 2 的槽位存
+  align 4 的值属未定义行为，且只在真机数值上暴露。
+
+  测试 `tests/golden/e2e/wmma.cu`：新增脚本 `tests/scripts/check_ptx_patterns.sh`
+  逐条断言 5 条 `wmma.*` 指纹（缺哪条就打印哪条，而不是「某个 grep 挂了」），
+  再叠一层 `ptxas` 汇编 —— `llc` **不校验** intrinsic 名，拼错照样出 PTX，
+  只有 `ptxas` 会报。
+
+  **数值验证（A4）** `tests/golden/e2e/wmma_e2e.cu`：单 warp（1 block × 32 线程）跑
+  `D = A×B + C`（m16n16k16，A row-major / B col-major，f32 累加），与 CPU 参考逐元素比对。
+  **矩阵元素只用 2 的幂**（1 / 0.5 / -1 / 2）：f16 内精确、乘积与累加在 f32 也无舍入，
+  于是容差能收到 1e-6 相对 —— 若用「随便的精度友好值」，A/B 传反这类结构性错误会被
+  容差吃掉。实测 `worst abs diff = 0`（完全一致）。
+
+  **反向验证过（这步比「跑绿」重要）**：把 A/B 传反（用强制转换绕过 C 层类型检查，
+  模拟 hacc 内部顺序错）→ **192/256 元素不匹配、worst diff 30** → 测试变红。
+  因为 mma 的 24 个实参同型（`Intrinsic<D.regs, A.regs ++ B.regs ++ C.regs>`），
+  传错顺序**编得过**、只有数值错，「e2e 绿」本身不构成证据，得先证明它能红。
+
+  **踩到一个坑**：`.cu` 里 include `<math.h>` 会被 EDG 的 `--g++` 模式解析到 libstdc++ 的
+  `/usr/include/c++/14/math.h`（转发 `<cmath>`）→ 拉进 `c++config.h` → 成片
+  `__has_builtin(...)` 报 21 个错。与已知的 `<cstdio>` 属同一类坑，`math.h` 同样中招；
+  本处改用自写的 `abs_d`。
+
+  `make check` **205/205**、零 SKIP（本机 RTX 4060，`nvidia_uvm` 已加载）。
+
 - **短路 `&&` / `||` 与指针复合赋值 `p += i` / `p -= i`（C11 前半）**：此前 `&&` / `||`
   直接撞「不支持的运算符」——连 `if (a && b)` 都编译不过；`p += i` 同样缺失，
   循环里推进指针只能改写 `p = p + i`。

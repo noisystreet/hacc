@@ -15,8 +15,11 @@
 > - **实施项 M5.1–M5.4 = C7–C10**（循环 / `break`-`continue` / `switch` / 自定义 `__device__` 函数），
 >   它们补的是 **ADR 0004 §S0「控制流」** 的缺口，**不是**里程碑 M5 的完成信号。
 >
-> 当前真实进度（2026-10 复核）：**M0–M4 完成**；C7–C10（M5.1–M5.4）与 B9/B9-2 完成，
-> `make check` **199/199**、零 SKIP；**里程碑 M5 仍差 C4（跳过机制）、C5（CI 形态）**。
+> 当前真实进度（2026-10 复核）：**M0–M4 完成**；C7–C10（M5.1–M5.4）、B9/B9-2 与 C11 前半完成；
+> C12（MMA / Tensor Core）的 **A1/A2/A4 已完成**——编译路径通（PTX 5 条 `wmma.*` + ptxas 汇编）
+> 且**真机数值验证通过**（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
+> 并做了「把 A/B 传反必须变红」的反向验证）；
+> `make check` **205/205**、零 SKIP；**里程碑 M5 仍差 C4（跳过机制）、C5（CI 形态）**。
 
 ---
 
@@ -295,6 +298,37 @@
       **已完成（C11 前半）**：`&&` / `||`（含短路）与指针复合赋值 `p += i` / `p -= i`，
       见 CHANGELOG 与 `tests/golden/e2e/logical_ptr.cu`（`make check` **199/199**）。
       **剩余**：内联优化、`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine`、递归设备函数拦截。
+- [x] **C12 MMA（Tensor Core）—— A1/A2/A4 已完成，只剩 A5（文档收口 + ADR 0008）**：方案见工作区根下
+      `agent_space/mma-support-plan.md`（**不在仓库内、不提交**）；A0 spike 已通过
+      （sm_89 上 `wmma.mma.sync` 可编可汇编）。
+      **已完成（A1 + A2）**：coolrt 提供 4 个 fragment 类型（各 32 字节、对齐 4）与
+      5 条**出参 ABI** 内建声明（`cool_wmma_load_a_row/_b_col/_c_row`、`cool_wmma_mma`、
+      `cool_wmma_store_d_row`）；hacc 的 `try_translate_wmma_call` 映射到
+      `llvm.nvvm.wmma.m16n16k16.*`，PTX 产出 5 条 `wmma.*` 指令、`ptxas` 汇编通过。
+      三处关键取舍：① **出参 ABI**（不引入 `insertvalue` 通道，复用聚合 call/store +
+      常量下标 extractvalue）；② **intrinsic 类型写死**（fragment 与 intrinsic **不同型**，
+      只是 32 字节布局兼容，靠 opaque pointer 打通）；③ **fragment 用 u32/float 占位，
+      而非 `unsigned short[16]`**（后者对齐 2，hacc 不读 `aligned` 属性 → 真机上未定义行为）。
+      **A4 已完成（真机数值验证）**：`tests/golden/e2e/wmma_e2e.cu` 单 warp（1 block × 32 线程）
+      跑 `D = A×B + C`（A row-major / B col-major、f32 累加），与 CPU 参考逐元素比对。
+      矩阵元素只用 2 的幂（f16 精确 → 无舍入），容差收到 1e-6 相对，实测 `worst abs diff = 0`。
+      **并做了反向验证**：把 A/B 传反（强制转换绕过 C 层类型检查）→ 192/256 不匹配、
+      worst diff 30 → 变红。因为 mma 的 24 个实参同型、传错顺序编得过，「e2e 绿」不构成证据，
+      必须先证明它能红。`make check` **205/205**、零 SKIP。
+      踩坑：`.cu` 里 `<math.h>` 会被 EDG `--g++` 解析到 libstdc++ 的 wrapper（转发 `<cmath>`）→
+      `c++config.h` → 21 个 `__has_builtin` 报错；与已知的 `<cstdio>` 同类，改用自写 `abs_d`。
+      **剩余**：A2.5（三条红线写进 known-issues，理想是加前端诊断 —— 目前只写在 coolrt 头注释里）、
+      A5 文档收口（含 **ADR 0008（Tensor Core 子集）**——`docs/adr/**` 需人工批准）。
+      **C4 仍然要做**（A4 已用 77 SKIP 兜住 hacc 侧，但「无设备 / 初始化失败」的区分本身是 M5 验收标准）：
+      A/B 传反与 fragment 内部错位都编得过、只有数值错，数值断言是唯一防线。
+      本轮实测到一个具体例证（2026-10-24，`nvidia_uvm` 未加载 → 宿主机 `modprobe` 前后各测一次）：
+      - uvm 缺失时（`lsmod` 无 `nvidia_uvm`、`/dev/nvidia-uvm` 不存在、`/proc/devices` 无 510）：
+        **coolrt 的 unit 测试是硬 FAIL**（`coolMalloc` 返回非 0），不是 SKIP —— 它没有 77 逃生口；
+        而 **hacc 的 GPU e2e 是 SKIP(77) → ctest 显绿**（即 m4-handoff §3.1 的假绿场景）。
+      - 宿主机 `modprobe nvidia_uvm` 后（`/dev/nvidia-uvm` 于 22:02 出现、`cuInit` = 0、设备数 1）：
+        两仓真机全绿（hacc 203/203、coolrt 15/15）。
+      → C4 要分开的是**两件事**：hacc 侧「无设备 SKIP」必须与「初始化失败」区分，否则假绿；
+        coolrt 侧硬 FAIL 本身安全，但错误信息应指向 uvm（现在只报 malloc 失败，指向错方向）。
 
 ---
 

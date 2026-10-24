@@ -47,6 +47,13 @@ PTX 里是 `.func` + `call.uni`，前向/相互调用皆可）——此前内核
 PHI，左侧已决定结果时右值的副作用不执行），指针复合赋值 `p += i` / `p -= i` 一并支持。
 剩余边界见 `docs/TODO.md` C11（非阻塞：内联优化、range-for/asm/coroutine、递归设备函数需前端拦截）。
 
+**MMA / Tensor Core 已打通并做过真机数值验证（C12 的 A1/A2/A4）**：`cool_wmma_*` 五条内建
+（load.a / load.b / load.c / mma / store.d，**出参 ABI**）→ `llvm.nvvm.wmma.m16n16k16.*`，
+PTX 产出 5 条 `wmma.*` 指令、`ptxas` 汇编通过；单 warp 的 `D = A×B + C` 与 CPU 参考
+逐元素一致（`worst abs diff = 0`），并把「A/B 传反」的反向验证跑过（必须变红才算数）。
+三条红线（整 warp 一致执行 / 缓冲 32B 对齐 / D = A×B + C 的顺序）写在
+`coolruntime/include/cool/device_builtins.h`，hacc 侧不设防。见 `docs/TODO.md` C12。
+
 主机编译默认调用 `g++`；可用 `--host-cxx <path>`（或 `$HACC_HOST_CXX`）切到 `clang++`
 （已验证可编）。**前端**系统头探测仍固定取 GCC 的头：EDG 按 GCC 语义解析，clang 的
 resource-dir 内建头会让它成片报错，详见 [docs/TODO.md](docs/TODO.md) 的 B8。
@@ -78,7 +85,7 @@ build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
 | `<stem>.hacc.gen.cpp` | 桩 + host（主机编译的实际输入） | — |
 | `<stem>.ptx` | 设备映像 | `.ptx` |
 
-`make check`：**199/199 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
+`make check`：**205/205 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
 **fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `double` 等未覆盖的
 原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
 [known-issues.md](docs/known-issues.md)。
