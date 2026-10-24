@@ -151,6 +151,15 @@ int main() {
         expect_count(s, "static coolModule_t __cool_module", 1, "多内核 模块句柄只一个");
     }
 
+    // 5) B6 生命周期：生成的桩**不得**做模块卸载（ADR 0007 已定为「进程级不卸载」）。
+    //    设备全局是跨内核的长期状态，在静态析构阶段卸载会与其他静态对象的析构顺序竞态；
+    //    资源由驱动在进程退出时回收。这条断言防的是有人「顺手」加 RAII / atexit 去释放。
+    {
+        const std::string s = generate_stubs({"foo", "bar"}, "PTX");
+        expect_count(s, "coolModuleUnload", 0, "B6 生成桩不得卸载模块");
+        expect_count(s, "atexit", 0, "B6 生成桩不得注册 atexit");
+    }
+
     if (g_failures == 0) {
         std::printf("test_stub_gen: 全部通过\n");
         return 0;

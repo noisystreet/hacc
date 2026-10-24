@@ -95,8 +95,15 @@
         / `_run`（真机 `dim3Ctor OK`）；`make check` coolrt **9/9**、hacc **139/139**。
       - 已知限制（不是 B5 引入的）：`<cstdio>` 等 C++ 包装头会拉进 libstdc++ 的 `c++config.h`，
         EDG 不认其中的 `__has_builtin(...)` → 前端成片报错。写 `.cu` 请用 `<stdio.h>` 等 C 头。
-- [ ] **B6 惰性注册的生命周期 / 回收**：模块何时 `coolModuleUnload`（`atexit`？全程不卸？）
-      ——[ADR 0003](adr/0003-host-stub-fatbin-registration.md) 只讲「惰性加载」，未讲「卸载 / 释放」。
+- [x] **B6 惰性注册的生命周期 / 回收 → 已定：进程级不卸载**（ADR 0007「生命周期」段给了理由，
+      这里补实现侧确认 + 防回归）：
+      - `hacc_runtime.h` 没有 `coolModuleUnload`、没有静态析构；句柄槽位是裸 `static coolModule_t`
+        （POD），**不得**包成带析构函数的 RAII 类型——那会把静态析构顺序竞态重新引进来。
+      - 防回归：`unit_stub_gen` 断言生成的桩既不含 `coolModuleUnload` 也不含 `atexit`
+        （已做反向验证：把断言对象换成输出中确实存在的串 → 报「实际 2 次」变红）。
+      - 附带记录 `resolve_module` 的失败语义：载入失败后 once 已 fired、**后续不再重试**，
+        即「进程启动时驱动未就绪」在该进程内无法自愈（须重启进程）。这是有意的取舍。
+      - **将来若要显式释放**：提供独立 API 让调用方主动调，别挂静态析构。
 - [x] **B7 `--emit` / `-keep` 的产物集与命名**：**已定稿**（对应可观测性目标 G5）。
       - 命名（基于输入 stem，与 `-o` 无关）：`<stem>.hacc.il`（EDG IL）/ `.hacc.cpp`（前端 host 源，
         **未拼桩**）/ `.hacc.stub.cpp`（主机桩）/ `.hacc.gen.cpp`（桩 + host，主机编译输入）/ `.ptx`。
