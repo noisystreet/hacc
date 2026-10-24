@@ -50,6 +50,9 @@
 
   `make check` **205/205**、零 SKIP（本机 RTX 4060，`nvidia_uvm` 已加载）。
 
+  范围与取舍见 **[ADR 0008](docs/adr/0008-tensor-core-subset.md)（Status: Proposed，待人工批准）**；
+  三条红线的「静默出错」现状与其修复优先级记为 **[KI-3](docs/known-issues.md)**。
+
 - **短路 `&&` / `||` 与指针复合赋值 `p += i` / `p -= i`（C11 前半）**：此前 `&&` / `||`
   直接撞「不支持的运算符」——连 `if (a && b)` 都编译不过；`p += i` 同样缺失，
   循环里推进指针只能改写 `p = p + i`。
