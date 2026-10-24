@@ -19,7 +19,7 @@
 > C12（MMA / Tensor Core）的 **A1/A2/A4 已完成**——编译路径通（PTX 5 条 `wmma.*` + ptxas 汇编）
 > 且**真机数值验证通过**（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
 > 并做了「把 A/B 传反必须变红」的反向验证）；
-> `make check` **209/209**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
+> `make check` **213/213**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
 > **里程碑 M5 的阻塞项已清空**（C4 已落地；C5 决策为不设 CI、只用本地质量门）。
 
 ---
@@ -268,8 +268,20 @@
       - **CI / 环境**：镜像预装 `llvm-19-dev`（含 NVPTX）；版本不符时给出清晰报错。
       - 与方案 §12「LLVM/EDG 版本漂移」缓解一致（固定版本 + CI 锁定）。
 - [x] **C2 命名 / 路径一致性**：**已定——统一为 `include/coolcc/`**；文档与骨架已同步（运行时头 `include/coolcc/hacc_runtime.h`）。
-- [ ] **C3 一期是否支持多 `.cu`（多 TU WPC）**：「一步到可执行」默认行为下，多个 `.cu` 各自 host 桩 + 注册
-      是否属一期？[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) 仅排除 RDC / 跨 TU 设备函数链接，**未点名 WPC 多 TU**。
+- [x] **C3 多 `.cu`（多 TU）→ 已支持**：`hacc a.cu b.cu -o prog`，每个 `.cu` 独立走
+      「前端 → PTX → 桩」，最后一次性主机编译链接成**一个**可执行文件。
+      [ADR 0004](adr/0004-cuda-cpp-subset-scope.md) 只排除 RDC / 跨 TU 设备函数链接，
+      WPC 多 TU 本来就该支持——之前只是 driver 的 `PipelineOptions` 只有单个 `input_path`。
+      - 实现要点：每个 TU 派生一份 opts 副本、只改 `input_path`，于是所有 `<stem>.hacc.*`
+        路径推导天然按 TU 分开；桩逐 TU 生成，链接只做一次。
+      - **两条硬限制都会报错**（不静默产出）：① 只支持 `--emit=exe`（ptx/il/host 的产物是
+        每文件一份，一个 `-o` 表达不了）；② 输入不能同名（中间产物按 `<stem>` 命名会互相覆盖）。
+      - **设备侧限制不变**（ADR 0007）：每个 TU 一个 module，内核只能在自己那个 TU 里启动；
+        跨 TU 调用内核需要链接期合并设备映像（RDC 级），一期不做。所以多 TU 的用法是
+        「设备代码按 TU 分组，主机侧用普通 C++ 函数互调」——`multi_tu_a.cu` / `multi_tu_b.cu`
+        就是这个示范。
+      - 验证：`e2e_hacc_multi_tu_run` 真机 `multiTU OK: A=11 B=22`（两个 module 各自载入），
+        加两条负向用例锁住上面两个报错。
 - [x] **C4 跳过机制 → 已完成；「与 nvcc 运行结果对照」仍是可选、未做**：
       核心目标不变：**不让「跳过」伪装成「通过」**。
       - 新增 `tests/golden/e2e/gpu_state.cu`：枚举到设备 → 0；**有 `/dev/nvidia0` 却枚举不到

@@ -138,6 +138,12 @@ Negative / trade-offs:
 > 仅用于保护 `coolModuleGetFunction` 这一步（模块载入由 owner 的 once 保护），
 > 避免两线程首次启动同一内核时并发写句柄槽位。
 
+> **多 TU 已落地（C3，2026-10）。** driver 支持一次传多个 `.cu`（`hacc a.cu b.cu -o prog`）：
+> 每个 TU 各生成一个 module + 一份设备映像 —— 这就是本文的粒度定义在多文件上的自然结果，
+> 文档与实现无冲突。跨 TU 的设备全局**仍不共享**（见 Consequences），跨 TU 启动内核需要
+> 链接期合并设备映像（RDC 级），一期不做。回归用例 `tests/golden/e2e/multi_tu_{a,b}.cu`
+> 真机输出 `multiTU OK: A=11 B=22`（两个 module 各自载入）。
+
 ## References
 
 - [ADR 0003](0003-host-stub-fatbin-registration.md)：主机桩 + 内嵌映像注册（本 ADR 修订其模块粒度）

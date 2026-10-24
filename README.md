@@ -86,7 +86,7 @@ build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
 | `<stem>.hacc.gen.cpp` | 桩 + host（主机编译的实际输入） | — |
 | `<stem>.ptx` | 设备映像 | `.ptx` |
 
-`make check`：**209/209 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
+`make check`：**213/213 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
 **fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `double` 等未覆盖的
 原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
 [known-issues.md](docs/known-issues.md)。
@@ -103,6 +103,9 @@ cmake --build build -j
 
 # M1.1：LLVM IR → PTX（最小内核）
 build/coolicc --emit=ptx -arch=sm_80 tests/golden/device/empty_kernel.ll
+
+# 多 TU：多个 .cu 各自走设备流水线，最后链接成一个可执行文件（仅 --emit=exe）
+build/hacc a.cu b.cu -o prog
 ```
 
 > `HACC_WITH_LLVM=OFF` 时 `coolicc` 仍可构建，但 `--emit=ptx` 走占位实现并明确报错。
