@@ -6,6 +6,15 @@
 
 ### Added
 
+- **S2 计划文档与现状摸底**（[docs/s2-plan.md](docs/s2-plan.md)）：把 ADR 0004 的 S2 三块按
+  实测拆开排期，而不是当整体做。关键实测结论：**模板 `__device__` 函数的实例化 EDG 已经做完了**
+  ——`twice<float>` / `twice<int>` 在 IL 里就是普通函数（`float(float)` / `int(int)`），
+  现有管线本就能翻；真正卡住的只有**模板原型**（参数类型 `tk_template_param`=15，撞
+  `map_type` 的 default 分支），外加三个同名 routine 的 LLVM 命名冲突。
+  另两项：数学内建（`sqrtf`/`fabsf`/`__fmaf`）在 `hacc/src` 里**零处理**；模板 kernel 的
+  `kt<float><<<...>>>` 在**前端改写**阶段就报「`<<<` 前未找到内核名」。
+  据此结论：T1（模板 device 函数）、T3（数学内建）值得做，T2（模板 kernel）建议缓或砍。
+
 - **递归设备函数的现状锁定（C11 余项）**：排查发现原 TODO 的断言「`ptxas` 会拒绝递归、
   应在前端拦截」**不成立** —— hacc 不做内联，`__device__` 在 PTX 里是真 `.func` + `call.uni`，
   sm_89 的硬件调用栈能执行，浅递归结果正确。**因此不加拦截**（拦掉等于禁掉有效用法）。
