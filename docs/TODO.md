@@ -19,7 +19,7 @@
 > C12（MMA / Tensor Core）的 **A1/A2/A4 已完成**——编译路径通（PTX 5 条 `wmma.*` + ptxas 汇编）
 > 且**真机数值验证通过**（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
 > 并做了「把 A/B 传反必须变红」的反向验证）；
-> `make check` **213/213**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
+> `make check` **215/215**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
 > **里程碑 M5 的阻塞项已清空**（C4 已落地；C5 决策为不设 CI、只用本地质量门）。
 
 ---
@@ -328,11 +328,19 @@
       真机 e2e 已验证调用链与指针参数传参。`make check` **168/168**。
 - [ ] **C11 表达力补遗（非阻塞）**：`__device__` 函数内联优化（目前 `-O0` 下每次真 `call`，
       NVPTX 的 call ABI 有寄存器保存开销，热路径可能需要 `alwaysinline`）；
-      `stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 仍未覆盖；
-      递归的设备函数会生成 PTX 但 `ptxas` 会拒绝（CUDA 不支持递归），可在前端提前报错。
+      `stmk_range_based_for` / `stmk_asm` / `stmk_coroutine` 仍未覆盖。
+      - ~~「递归的设备函数会生成 PTX 但 `ptxas` 会拒绝，可在前端提前报错」~~
+        → **前提不成立，已实测推翻**：递归能正常跑（PTX 是真 `.func` + `call.uni`，
+        sm_89 的硬件调用栈可执行），浅递归结果正确。**不做前端拦截** —— 递归合法，
+        拦掉等于禁掉有效用法，而且静态也判不准运行期深度。
+      - 真正的限制是**深度**：默认 per-thread 调用栈 1 KiB → 约 30 层（实测 n=30 对、
+        n=50 起失败），超出后 `coolDeviceSynchronize` 返回 999 且**结果静默保持初值**。
+        详见 [known-issues KI-4](known-issues.md)；回归用例
+        `tests/golden/e2e/recursion.cu`。
       **已完成（C11 前半）**：`&&` / `||`（含短路）与指针复合赋值 `p += i` / `p -= i`，
-      见 CHANGELOG 与 `tests/golden/e2e/logical_ptr.cu`（`make check` **199/199**）。
-      **剩余**：内联优化、`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine`、递归设备函数拦截。
+      见 CHANGELOG 与 `tests/golden/e2e/logical_ptr.cu`。
+      **剩余**：内联优化、`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine`，
+      以及（若要排期）coolrt 封装 `coolDeviceSetLimit` 以便调大调用栈。
 - [x] **C12 MMA（Tensor Core）—— A1/A2/A4/A5 全部完成，ADR 0008 已批准**：方案见工作区根下
       `agent_space/mma-support-plan.md`（**不在仓库内、不提交**）；A0 spike 已通过
       （sm_89 上 `wmma.mma.sync` 可编可汇编）。

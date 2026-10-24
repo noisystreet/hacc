@@ -960,6 +960,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                         "${CMAKE_CURRENT_BINARY_DIR}/multi_tu_dup")
             set_tests_properties(e2e_hacc_multi_tu_rejects_dup_stem PROPERTIES
                 PASS_REGULAR_EXPRESSION "多个输入同名")
+
+            # C11 余项：递归设备函数的现状锁定（不是「拦住递归」，而是锁定两条性质：
+            # 浅递归必须算对；深递归要么对、要么报错，不许静默错值）。
+            # 实测：PTX 是真 .func + call.uni；默认 1 KiB/thread 调用栈只够约 30 层。
+            set(_recursion_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_recursion_run")
+            add_test(NAME e2e_hacc_recursion_build
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/recursion.cu"
+                        -o "${_recursion_exe}")
+            add_test(NAME e2e_hacc_recursion_run COMMAND "${_recursion_exe}")
+            set_tests_properties(e2e_hacc_recursion_run PROPERTIES
+                DEPENDS e2e_hacc_recursion_build
+                SKIP_RETURN_CODE 77
+                PASS_REGULAR_EXPRESSION "recursion OK")
         endif()
 
         # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。

@@ -6,6 +6,15 @@
 
 ### Added
 
+- **递归设备函数的现状锁定（C11 余项）**：排查发现原 TODO 的断言「`ptxas` 会拒绝递归、
+  应在前端拦截」**不成立** —— hacc 不做内联，`__device__` 在 PTX 里是真 `.func` + `call.uni`，
+  sm_89 的硬件调用栈能执行，浅递归结果正确。**因此不加拦截**（拦掉等于禁掉有效用法）。
+  真正的限制是**深度**：默认 per-thread 调用栈 1 KiB → 实测 30 层正确、50 层起
+  `coolDeviceSynchronize` 返回 999 且结果槽位保持初值（静默错值）。调大需
+  `cuCtxSetLimit(CU_LIMIT_STACK_SIZE=0x00, …)`（64 KiB 后 n=200 通过），coolrt 尚未封装。
+  细节见 known-issues **KI-4**。新增 `tests/golden/e2e/recursion.cu` 锁定两条性质：
+  浅递归必须算对；深递归「要么对、要么报错」，**绝不允许 sync_er=0 却是错值**。
+
 - **多 `.cu` 一次编译（多 TU，C3）**：`hacc a.cu b.cu -o prog` —— 每个 `.cu` 独立走
   「前端 → PTX → 桩」，最后一次性主机编译链接成一个可执行文件。此前 `PipelineOptions`
   只有单个 `input_path`，多个位置参数会互相覆盖（最后一个生效），等于静默丢文件。
