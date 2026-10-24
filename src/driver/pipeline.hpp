@@ -31,7 +31,13 @@ enum class EmitMode {
 
 // 流水线选项。
 struct PipelineOptions {
-    std::string input_path;                 // 输入 .cu
+    // 输入（C3：多 TU）。
+    //   `input_paths` —— 命令行给出的全部 `.cu`，按给出顺序；为空时退回 `input_path`。
+    //   `input_path`  —— **当前正在处理的那一个** TU。单文件时两者一致；多文件时
+    //                    run_pipeline 为每个输入派生一份副本并改写这个字段，
+    //                    于是所有 path 推导（`<stem>.hacc.*`）天然按 TU 分开。
+    std::string input_path;
+    std::vector<std::string> input_paths;
     std::string output_path;                // 输出（-o）：PTX 或可执行文件
     std::string arch = "sm_80";             // -arch=sm_XX
     EmitMode emit = EmitMode::Exe;          // 产物模式
@@ -82,6 +88,11 @@ std::vector<std::string> build_coolicc_args(const PipelineOptions& opts,
 // 注：-lcuda 由 coolrt 静态库的依赖决定（见 coolruntime/CMakeLists.txt）。
 std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
                                                  const std::string& host_path);
+
+// 多 TU 版本（C3）：一次主机编译链接多个编译单元。
+// `-o` 只有一个，其余参数同单文件版本。
+std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
+                                                 const std::vector<std::string>& host_paths);
 
 // 执行流水线。Exe：.cu → IL → PTX → 桩 + 主机编译；Ptx / Il / Host 止于对应阶段。
 // 中间产物命名（B7 定稿，对齐 nvcc 的产物角色；落在 --keep-dir 或当前工作目录）：

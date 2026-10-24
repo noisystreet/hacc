@@ -932,6 +932,34 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             set_tests_properties(e2e_hacc_gpu_state_init_fail PROPERTIES
                 DEPENDS e2e_hacc_gpu_state_build
                 PASS_REGULAR_EXPRESSION "gpuState FAILED")
+
+            # C3：多 TU —— 每个 .cu 独立走「前端 → PTX → 桩」，最后链接成一个可执行文件。
+            # A 定义 k_a + run_a()，B 定义 k_b + main()；主机侧跨 TU 调普通 C++ 函数。
+            # 设备映像按 TU 生成，故内核只能在**自己那个 TU**里启动（ADR 0007 的限制），
+            # 这条用例正是对这种用法的示范。
+            set(_multi_tu_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_multi_tu_run")
+            set(_multi_tu_a "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/multi_tu_a.cu")
+            set(_multi_tu_b "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/multi_tu_b.cu")
+            add_test(NAME e2e_hacc_multi_tu_build
+                COMMAND hacc "${_multi_tu_a}" "${_multi_tu_b}" -o "${_multi_tu_exe}")
+            add_test(NAME e2e_hacc_multi_tu_run COMMAND "${_multi_tu_exe}")
+            set_tests_properties(e2e_hacc_multi_tu_run PROPERTIES
+                DEPENDS e2e_hacc_multi_tu_build
+                SKIP_RETURN_CODE 77
+                PASS_REGULAR_EXPRESSION "multiTU OK")
+
+            # 负向：两条限制必须**报错**，而不是静默产出看似成功的结果。
+            add_test(NAME e2e_hacc_multi_tu_rejects_ptx
+                COMMAND hacc "${_multi_tu_a}" "${_multi_tu_b}" --emit=ptx -o
+                        "${CMAKE_CURRENT_BINARY_DIR}/multi_tu_reject.ptx")
+            set_tests_properties(e2e_hacc_multi_tu_rejects_ptx PROPERTIES
+                PASS_REGULAR_EXPRESSION "多 TU 只支持 --emit=exe")
+
+            add_test(NAME e2e_hacc_multi_tu_rejects_dup_stem
+                COMMAND hacc "${_multi_tu_a}" "${_multi_tu_a}" -o
+                        "${CMAKE_CURRENT_BINARY_DIR}/multi_tu_dup")
+            set_tests_properties(e2e_hacc_multi_tu_rejects_dup_stem PROPERTIES
+                PASS_REGULAR_EXPRESSION "多个输入同名")
         endif()
 
         # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。

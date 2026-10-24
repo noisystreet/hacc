@@ -48,15 +48,19 @@ std::string intermediate_dir(const PipelineOptions& opts) {
     return opts.keep_dir.empty() ? std::string(".") : opts.keep_dir;
 }
 
+// 从路径取基准名（去目录、去扩展名）：`a/b/foo.cu` → `foo`。
+std::string stem_of(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    const std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    const size_t dot = base.find_last_of('.');
+    return (dot == std::string::npos || dot == 0) ? base : base.substr(0, dot);
+}
+
 // 中间产物基准名 = 输入文件名去掉扩展名。
 // nvcc 的中间产物以源文件命名（`foo.cu` → `foo.ptx`），与 `-o` 无关；
 // 这里保持一致，避免 `-o build/out` 时中间产物跟着跑进 build/。
 std::string input_stem(const PipelineOptions& opts) {
-    const std::string& p = opts.input_path;
-    const size_t slash = p.find_last_of('/');
-    const std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
-    const size_t dot = base.find_last_of('.');
-    return (dot == std::string::npos || dot == 0) ? base : base.substr(0, dot);
+    return stem_of(opts.input_path);
 }
 
 // 拼中间产物路径：<keep-dir|.>/<input stem><suffix>。
@@ -259,12 +263,14 @@ std::vector<std::string> build_coolicc_args(const PipelineOptions& opts,
 }
 
 std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
-                                                 const std::string& host_path) {
-    // <host-cxx> -std=c++20 <host.cpp> -I<coolrt>/include -I<hacc>/include
+                                                 const std::vector<std::string>& host_paths) {
+    // <host-cxx> -std=c++20 <host.cpp ...> -I<coolrt>/include -I<hacc>/include
     //            [-I <dir> ...] -o <out> <lib> -lcuda
     std::vector<std::string> args;
     args.push_back("-std=c++20");
-    args.push_back(host_path);
+    for (const auto& p : host_paths) {
+        args.push_back(p);
+    }
     const std::string root = resolve_coolrt_root(opts);
     args.push_back("-I" + root + "/include");
     // hacc 自身 include（coolcc/hacc_runtime.h 随编译器分发）。
@@ -278,6 +284,11 @@ std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
                                            : opts.coolrt_lib);
     args.push_back("-lcuda");
     return args;
+}
+
+std::vector<std::string> build_host_compile_args(const PipelineOptions& opts,
+                                                 const std::string& host_path) {
+    return build_host_compile_args(opts, std::vector<std::string>{host_path});
 }
 
 // 把子进程失败信息拼成「<阶段名>失败[: 错误][\n stderr]」。
@@ -344,19 +355,28 @@ bool run_device_stage(const PipelineOptions& opts, const std::string& cil, const
     return run_stage(argv, "coolicc", result);
 }
 
-// 阶段 3（仅 Exe）：生成桩与编译单元，再主机编译。
-bool run_host_stage(const PipelineOptions& opts, const std::string& host, const std::string& stub,
-                    const std::string& gen, const std::string& ptx, PipelineResult* result) {
+// 阶段 3a（仅 Exe）：生成桩与编译单元（每 TU 一次，不编译）。
+// 拆成 3a/3b 是为了多 TU：桩必须逐 TU 生成，而主机编译只在最后做一次（C3）。
+bool write_stub_stage(const PipelineOptions& opts, const std::string& host, const std::string& stub,
+                      const std::string& gen, const std::string& ptx, PipelineResult* result) {
     std::string err;
     if (!write_stub_and_gen(opts, host, ptx, stub, gen, &err)) {
         result->error = err;
         return false;
     }
+    return true;
+}
+
+// 阶段 3b（仅 Exe）：主机编译。单 TU 一个源；多 TU 多个源一次调用、由链接器合并。
+// 注意多个 TU 各自带 static 的 module/kernel 注册表，符号是内部链接，不会互相冲突；
+// 反过来，跨 TU 的 __device__ / __constant__ 也因此不共享（ADR 0007 已记录）。
+bool compile_host_stage(const PipelineOptions& opts, const std::vector<std::string>& gen_paths,
+                        PipelineResult* result) {
     const std::string cxx = resolve_host_cxx_path(opts);
     // 打印实际使用的主机编译器：这是「到底哪个编译器在编」的唯一凭据（可观测性 G5）。
     std::fprintf(stderr, "hacc: 主机编译器 = %s\n", cxx.c_str());
     std::vector<std::string> argv = {cxx};
-    for (const auto& a : build_host_compile_args(opts, gen)) {
+    for (const auto& a : build_host_compile_args(opts, gen_paths)) {
         argv.push_back(a);
     }
     const std::string stage = "主机编译（" + support::basename_of(cxx) + "）";
@@ -426,15 +446,97 @@ bool dispatch_stages(const PipelineOptions& opts, const std::string& il, const s
     if (!run_device_stage(opts, il, ptx_target, result)) {
         return false;
     }
-    if (want_exe && !run_host_stage(opts, host, stub, gen, ptx_target, result)) {
+    if (want_exe && !write_stub_stage(opts, host, stub, gen, ptx_target, result)) {
+        return false;
+    }
+    if (want_exe && !compile_host_stage(opts, {gen}, result)) {
         return false;
     }
     return true;
 }
 
+// 多 TU 的输入列表：`input_paths` 优先，否则退回单个 `input_path`
+// （程序化调用者可能只设其中一个）。
+std::vector<std::string> inputs_of(const PipelineOptions& opts) {
+    if (!opts.input_paths.empty()) {
+        return opts.input_paths;
+    }
+    if (!opts.input_path.empty()) {
+        return {opts.input_path};
+    }
+    return {};
+}
+
+// 多 TU 的两条硬限制，动手前查清并报错，而不是产出错误的东西：
+//   1. 只支持 --emit=exe —— ptx / il / host 的产物是「每文件一份」，单个 `-o` 表达不了。
+//   2. 输入不能同名 —— 中间产物按 `<stem>.hacc.*` 命名，同名会静默互相覆盖。
+bool validate_multi_tu(const PipelineOptions& opts, const std::vector<std::string>& inputs,
+                       PipelineResult* result) {
+    if (opts.emit != EmitMode::Exe) {
+        result->error =
+            "多 TU 只支持 --emit=exe；--emit=ptx / il / host 请对每个文件单独跑"
+            "（这些模式的产物是每文件一份，无法写进一个 -o）";
+        return false;
+    }
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        for (std::size_t j = i + 1; j < inputs.size(); ++j) {
+            if (stem_of(inputs[i]) != stem_of(inputs[j])) {
+                continue;
+            }
+            result->error = "多个输入同名（" + stem_of(inputs[i]) +
+                            "）：中间产物按 <stem>.hacc.* 命名会互相覆盖，请改名或分次编译";
+            return false;
+        }
+    }
+    return true;
+}
+
+// 多 TU：每个输入各跑「前端 → PTX → 桩」，最后一次性主机编译链接（C3）。
+// 每个 TU 一个 module + 一份 PTX 映像（ADR 0007），互不影响；代价是跨 TU 的
+// __device__ / __constant__ 不共享 —— 这是 ADR 0007 已记录的限制，不是这里的疏漏：
+// 要共享设备全局需要链接期合并设备映像（RDC 级），不在一期范围。
+PipelineResult run_multi_tu(const PipelineOptions& opts, const std::vector<std::string>& inputs) {
+    PipelineResult result;
+    std::vector<std::string> gen_paths;
+    std::vector<std::string> candidates;
+    for (const std::string& in : inputs) {
+        PipelineOptions per = opts;
+        per.input_path = in;  // 只改这一处，后续所有 path 推导就都按本 TU 走了
+        const std::string il = il_path_for(per);
+        const std::string host = host_path_for(per);
+        const std::string stub = stub_path_for(per);
+        const std::string gen = gen_path_for(per);
+        const std::string ptx = ptx_path_for(per);
+        const std::vector<std::string> tu_files = {il, host, stub, gen, ptx};
+        candidates.insert(candidates.end(), tu_files.begin(), tu_files.end());
+
+        const bool ok = run_frontend_stage(per, il, host, true, &result) &&
+                        run_device_stage(per, il, ptx, &result) &&
+                        write_stub_stage(per, host, stub, gen, ptx, &result);
+        if (!ok) {
+            result.error = "[" + in + "] " + result.error;  // 标明是哪个文件断的
+            report_intermediates("编译失败", candidates);
+            return result;
+        }
+        gen_paths.push_back(gen);
+    }
+    if (!compile_host_stage(opts, gen_paths, &result)) {
+        report_intermediates("编译失败", candidates);
+        return result;
+    }
+    if (opts.keep) {
+        report_intermediates("-keep", candidates);
+    } else {
+        remove_files(candidates);
+    }
+    result.ok = true;
+    return result;
+}
+
 PipelineResult run_pipeline(const PipelineOptions& opts) {
     PipelineResult result;
-    if (opts.input_path.empty()) {
+    const std::vector<std::string> inputs = inputs_of(opts);
+    if (inputs.empty()) {
         result.error = "缺少输入文件";
         return result;
     }
@@ -446,21 +548,30 @@ PipelineResult run_pipeline(const PipelineOptions& opts) {
         result.error = "无法创建 --keep-dir 目录：" + opts.keep_dir;
         return result;
     }
+    if (inputs.size() > 1) {
+        if (!validate_multi_tu(opts, inputs, &result)) {
+            return result;
+        }
+        return run_multi_tu(opts, inputs);
+    }
 
-    const std::string il = il_path_for(opts);
-    const std::string host = host_path_for(opts);
-    const std::string stub = stub_path_for(opts);
-    const std::string gen = gen_path_for(opts);
-    const std::string ptx = ptx_path_for(opts);
+    // 单 TU：把唯一输入显式写回 input_path（调用方可能只设了 input_paths）。
+    PipelineOptions single = opts;
+    single.input_path = inputs.front();
+    const std::string il = il_path_for(single);
+    const std::string host = host_path_for(single);
+    const std::string stub = stub_path_for(single);
+    const std::string gen = gen_path_for(single);
+    const std::string ptx = ptx_path_for(single);
     const std::vector<std::string> candidates =
-        intermediates_for(opts.emit, il, host, stub, gen, ptx);
+        intermediates_for(single.emit, il, host, stub, gen, ptx);
 
-    if (!dispatch_stages(opts, il, host, stub, gen, ptx, &result)) {
+    if (!dispatch_stages(single, il, host, stub, gen, ptx, &result)) {
         // 失败时默认保留中间产物（同 nvcc），并列出，便于定位是哪一阶段断的。
         report_intermediates("编译失败", candidates);
         return result;
     }
-    if (opts.keep) {
+    if (single.keep) {
         report_intermediates("-keep", candidates);
     } else {
         remove_files(candidates);

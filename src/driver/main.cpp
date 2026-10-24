@@ -13,7 +13,11 @@ namespace {
 
 constexpr const char* kUsage =
     "hacc —— COOL 的 CUDA C++ 子集编译器（对标 nvcc）\n"
-    "用法: hacc [选项] <input.cu>\n"
+    "用法: hacc [选项] <input.cu> [more.cu ...]\n"
+    "\n"
+    "  多个 .cu 时各自独立走「前端 → PTX → 桩」，最后一次性链接成一个可执行文件\n"
+    "  （仅 --emit=exe）。各 TU 文件名不能相同（中间产物按 <stem> 命名）；\n"
+    "  跨 TU 的 __device__ / __constant__ 不共享（ADR 0007 的一期限制）。\n"
     "\n"
     "选项:\n"
     "  -o <file>       输出文件（--emit=exe 时为可执行文件；ptx/il/host 时为对应产物）\n"
@@ -144,7 +148,7 @@ int parse_args(int argc, char** argv, Options* out) {
             std::fprintf(stderr, "hacc: 未知选项 %s\n", a);
             return 2;
         }
-        out->pipeline.input_path = a;
+        out->pipeline.input_paths.push_back(a);
     }
     return -1;  // 继续执行
 }
@@ -163,7 +167,7 @@ int main(int argc, char** argv) {
         return parse_rc;
     }
 
-    if (o.pipeline.input_path.empty()) {
+    if (o.pipeline.input_paths.empty() && o.pipeline.input_path.empty()) {
         std::fprintf(stderr, "hacc: 缺少输入文件。用 -h 查看用法。\n");
         return 2;
     }
