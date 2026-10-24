@@ -1201,6 +1201,193 @@ llvm::Value* try_translate_builtin_call(an_expr_node_ptr expr, KernelContext& kc
     return translate_no_arg_builtin(*mapping, kc);
 }
 
+// ------------------------------------------------------------------ //
+// MMA（C12）：cool_wmma_* 内建 → llvm.nvvm.wmma.* intrinsic。
+// ------------------------------------------------------------------ //
+//
+// 签名按 A0 spike（`agent_space/mma-spike/mma2.ll`，在 sm_89 上 llc + ptxas 双通过）
+// **写死**，不从用户类型推导：
+//
+//   load.a  : {<2 x half> × 8} @(ptr)
+//   load.b  : {<2 x half> × 8} @(ptr)
+//   load.c  : {float × 8}      @(ptr)
+//   mma     : {float × 8}      @(<2 x half> × 8, <2 x half> × 8, float × 8)
+//   store.d : void             @(ptr, float × 8)
+//
+// 为什么必须写死：LLVM verifier 会拒掉类型不符的 intrinsic 声明
+// （`Intrinsic has incorrect return type`），而 hacc 眼中的 coolrt fragment 是
+// `{[8 x i32]}` / `{[8 x float]}` —— 与 intrinsic 的 `{<2 x half> × 8}` **不同型**，
+// 只是 32 字节布局兼容（对齐同为 4）。opaque pointer 下 store / load 不要求指针的
+// 元素类型一致，这条「不同型但同布局」的通路才成立；这也是出参 ABI 能省掉
+// `insertvalue` 通道的原因。
+//
+// **实参顺序错误不报错**：mma 的 24 个实参同型（IntrinsicsNVVM.td
+// `Intrinsic<D.regs, A.regs ++ B.regs ++ C.regs>`），A/B 传反、fragment 内部错位
+// 都能编过，只有数值错。故展开顺序在此写死：A0..A7 / B0..B7 / C0..C7。
+enum class WmmaKind {
+    LoadA,
+    LoadB,
+    LoadC,
+    Mma,
+    StoreD,
+};
+
+struct WmmaBuiltinMapping {
+    const char* builtin_name;
+    WmmaKind kind;
+};
+
+constexpr WmmaBuiltinMapping kWmmaBuiltins[] = {
+    {"cool_wmma_load_a_row", WmmaKind::LoadA},   {"cool_wmma_load_b_col", WmmaKind::LoadB},
+    {"cool_wmma_load_c_row", WmmaKind::LoadC},   {"cool_wmma_mma", WmmaKind::Mma},
+    {"cool_wmma_store_d_row", WmmaKind::StoreD},
+};
+
+// intrinsic 名与 A0 spike 逐字一致（拼错只有 ptxas 会报，llc 照样出 PTX）。
+constexpr const char* kWmmaLoadAIntrinsic = "llvm.nvvm.wmma.m16n16k16.load.a.row.f16";
+constexpr const char* kWmmaLoadBIntrinsic = "llvm.nvvm.wmma.m16n16k16.load.b.col.f16";
+constexpr const char* kWmmaLoadCIntrinsic = "llvm.nvvm.wmma.m16n16k16.load.c.row.f32";
+constexpr const char* kWmmaMmaIntrinsic = "llvm.nvvm.wmma.m16n16k16.mma.row.col.f32.f32";
+constexpr const char* kWmmaStoreDIntrinsic = "llvm.nvvm.wmma.m16n16k16.store.d.row.f32";
+
+// fragment 的单个 32 位槽位：A/B 视图是 <2 x half>，C/D 视图是 float。
+llvm::Type* wmma_half2_type(llvm::LLVMContext& ctx) {
+    return llvm::FixedVectorType::get(llvm::Type::getHalfTy(ctx), 2);
+}
+
+llvm::StructType* wmma_ab_type(llvm::LLVMContext& ctx) {
+    return llvm::StructType::get(ctx, std::vector<llvm::Type*>(8, wmma_half2_type(ctx)));
+}
+
+llvm::StructType* wmma_cd_type(llvm::LLVMContext& ctx) {
+    return llvm::StructType::get(ctx, std::vector<llvm::Type*>(8, llvm::Type::getFloatTy(ctx)));
+}
+
+// 按名字查 wmma 内建映射；未命中返回 nullptr。
+const WmmaBuiltinMapping* find_wmma_builtin(const char* name) {
+    for (const WmmaBuiltinMapping& m : kWmmaBuiltins) {
+        if (std::strcmp(name, m.builtin_name) == 0) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+// 取/建 intrinsic 声明（声明按名唯一，同一模块内只建一次）。
+llvm::Function* get_or_declare_intrinsic(llvm::Module* module, const char* name, llvm::Type* ret,
+                                         llvm::ArrayRef<llvm::Type*> params) {
+    if (llvm::Function* existing = module->getFunction(name)) {
+        return existing;
+    }
+    llvm::FunctionType* fn_ty = llvm::FunctionType::get(ret, params, /*isVarArg=*/false);
+    return llvm::Function::Create(fn_ty, llvm::GlobalValue::ExternalLinkage, name, module);
+}
+
+// 把聚合 fragment 的 8 个成员按 0..7 顺序摊开（常量下标；见上面的顺序说明）。
+void append_fragment_elements(llvm::Value* aggregate, std::vector<llvm::Value*>& out,
+                              KernelContext& kc) {
+    for (unsigned idx = 0; idx < 8; ++idx) {
+        out.push_back(kc.builder.CreateExtractValue(aggregate, idx));
+    }
+}
+
+// 翻译调用点的实参值（callee->next 起，从左到右求值）。
+std::vector<llvm::Value*> translate_builtin_args(an_expr_node_ptr callee, KernelContext& kc) {
+    std::vector<llvm::Value*> args;
+    for (an_expr_node_ptr a = callee->next; a != nullptr; a = a->next) {
+        args.push_back(translate_expr(a, kc));
+    }
+    return args;
+}
+
+// load.a / load.b / load.c：call 返回聚合 → store 进出参 fragment（args[0]）。
+llvm::Value* emit_wmma_load(const char* intrinsic_name, llvm::StructType* frag_ty,
+                            const std::vector<llvm::Value*>& args, KernelContext& kc) {
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    llvm::Type* ptr_ty = llvm::PointerType::get(kc.ctx, 0);
+    llvm::Function* fn = get_or_declare_intrinsic(module, intrinsic_name, frag_ty, {ptr_ty});
+    llvm::Value* frag = kc.builder.CreateCall(fn, {args[1]});
+    return kc.builder.CreateStore(frag, args[0]);
+}
+
+// mma：A/B/C 各摊开 8 个 → 24 个实参；返回值 store 进出参 D（args[0]）。
+llvm::Value* emit_wmma_mma(const std::vector<llvm::Value*>& args, KernelContext& kc) {
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    llvm::StructType* ab_ty = wmma_ab_type(kc.ctx);
+    llvm::StructType* cd_ty = wmma_cd_type(kc.ctx);
+
+    std::vector<llvm::Type*> params;
+    params.insert(params.end(), 16, wmma_half2_type(kc.ctx));        // A 的 8 + B 的 8
+    params.insert(params.end(), 8, llvm::Type::getFloatTy(kc.ctx));  // C 的 8
+
+    std::vector<llvm::Value*> call_args;
+    append_fragment_elements(kc.builder.CreateLoad(ab_ty, args[1]), call_args, kc);  // A
+    append_fragment_elements(kc.builder.CreateLoad(ab_ty, args[2]), call_args, kc);  // B
+    append_fragment_elements(kc.builder.CreateLoad(cd_ty, args[3]), call_args, kc);  // C
+
+    llvm::Function* fn = get_or_declare_intrinsic(module, kWmmaMmaIntrinsic, cd_ty, params);
+    llvm::Value* result = kc.builder.CreateCall(fn, call_args);
+    return kc.builder.CreateStore(result, args[0]);
+}
+
+// store.d：出参 dst（args[0]）+ D 的 8 个 float。
+llvm::Value* emit_wmma_store(const std::vector<llvm::Value*>& args, KernelContext& kc) {
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    std::vector<llvm::Type*> params = {llvm::PointerType::get(kc.ctx, 0)};
+    params.insert(params.end(), 8, llvm::Type::getFloatTy(kc.ctx));
+
+    std::vector<llvm::Value*> call_args = {args[0]};
+    append_fragment_elements(kc.builder.CreateLoad(wmma_cd_type(kc.ctx), args[1]), call_args, kc);
+
+    llvm::Function* fn = get_or_declare_intrinsic(module, kWmmaStoreDIntrinsic,
+                                                  llvm::Type::getVoidTy(kc.ctx), params);
+    return kc.builder.CreateCall(fn, call_args);
+}
+
+// 按 kind 发射。拆出来只为压住 try_translate_wmma_call 的圈复杂度。
+llvm::Value* emit_wmma_builtin(WmmaKind kind, const std::vector<llvm::Value*>& args,
+                               KernelContext& kc) {
+    switch (kind) {
+        case WmmaKind::LoadA:
+            return emit_wmma_load(kWmmaLoadAIntrinsic, wmma_ab_type(kc.ctx), args, kc);
+        case WmmaKind::LoadB:
+            return emit_wmma_load(kWmmaLoadBIntrinsic, wmma_ab_type(kc.ctx), args, kc);
+        case WmmaKind::LoadC:
+            return emit_wmma_load(kWmmaLoadCIntrinsic, wmma_cd_type(kc.ctx), args, kc);
+        case WmmaKind::Mma:
+            return emit_wmma_mma(args, kc);
+        case WmmaKind::StoreD:
+            return emit_wmma_store(args, kc);
+    }
+    return nullptr;
+}
+
+// 翻译 wmma 内建调用。返回 nullptr 表示「不是 wmma 内建」，交由调用方继续判定。
+llvm::Value* try_translate_wmma_call(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr callee = expr->variant.operation.operands;
+    if (callee == nullptr || callee->kind != enk_routine) {
+        return nullptr;
+    }
+    a_routine_ptr r = callee->variant.routine.ptr;
+    const char* name = (r != nullptr) ? r->source_corresp.name : nullptr;
+    if (name == nullptr) {
+        return nullptr;
+    }
+    const WmmaBuiltinMapping* mapping = find_wmma_builtin(name);
+    if (mapping == nullptr) {
+        return nullptr;
+    }
+    const std::vector<llvm::Value*> args = translate_builtin_args(callee, kc);
+    // 先校验个数再 CreateCall：个数不符时 CreateCall 会直接断言崩，用户看不到诊断。
+    const std::size_t expected = (mapping->kind == WmmaKind::Mma) ? 4u : 2u;
+    if (args.size() != expected) {
+        fail(std::string(name) + " 需要 " + std::to_string(expected) + " 个实参（实际 " +
+                 std::to_string(args.size()) + " 个）",
+             expr->position);
+    }
+    return emit_wmma_builtin(mapping->kind, args, kc);
+}
+
 // 翻译对同模块自定义 __device__ 函数的调用（M5.4）。
 // 返回 nullptr 表示「不是设备函数调用」，交由调用方继续判定。
 llvm::Value* try_translate_device_call(an_expr_node_ptr expr, KernelContext& kc) {
@@ -1636,8 +1823,12 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             return v;
         }
         case OpClass::Call: {
-            // 依次尝试：原子内建 → 无参内建 → 自定义 __device__ 函数；都不是则报错。
+            // 依次尝试：原子内建 → wmma 内建 → 无参内建 → 自定义 __device__ 函数；
+            // 都不是则报错。
             llvm::Value* v = try_translate_atomic_call(expr, kc);
+            if (v == nullptr) {
+                v = try_translate_wmma_call(expr, kc);
+            }
             if (v == nullptr) {
                 v = try_translate_builtin_call(expr, kc);
             }
@@ -1646,8 +1837,8 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             }
             if (v == nullptr) {
                 fail(
-                    "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic* "
-                    "与同模块的 __device__ 函数）");
+                    "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic*/"
+                    "cool_wmma_* 与同模块的 __device__ 函数）");
             }
             return v;
         }

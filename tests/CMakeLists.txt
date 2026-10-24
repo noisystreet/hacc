@@ -854,6 +854,58 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             endforeach()
         endif()
 
+        # C12 / MMA golden：cool_wmma_* → llvm.nvvm.wmma.* → PTX wmma.*。
+        # 需 COOLRuntime 头（.cu 用 <cool/cool_runtime.h> 提供 fragment 类型与内建声明）。
+        # 两层校验（对齐 mma-support-plan.md §9.3）：
+        #   1. PTX 指纹：5 条 wmma 指令逐条断言（用脚本，缺哪条就打印哪条）；
+        #   2. ptxas 汇编：llc **不校验** intrinsic 名（拼错照样出 PTX），只有 ptxas 才报。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_wm_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_wmma.cil")
+            set(_wm_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_wmma.ptx")
+            add_test(NAME golden_frontend_wmma
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_wm_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/wmma.cu")
+            add_test(NAME golden_device_il_to_ptx_wmma
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_wm_ptx}" "${_wm_cil}")
+            set_tests_properties(golden_device_il_to_ptx_wmma PROPERTIES
+                DEPENDS golden_frontend_wmma)
+            # 只断指令指纹，不断寄存器列表（随分配变化）。
+            add_test(NAME golden_device_il_to_ptx_wmma_instr
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_ptx_patterns.sh" "${_wm_ptx}"
+                        "wmma\\.load\\.a\\.sync\\.aligned\\.row\\.m16n16k16\\.f16"
+                        "wmma\\.load\\.b\\.sync\\.aligned\\.col\\.m16n16k16\\.f16"
+                        "wmma\\.load\\.c\\.sync\\.aligned\\.row\\.m16n16k16\\.f32"
+                        "wmma\\.mma\\.sync\\.aligned\\.row\\.col\\.m16n16k16\\.f32\\.f32"
+                        "wmma\\.store\\.d\\.sync\\.aligned\\.row\\.m16n16k16\\.f32")
+            set_tests_properties(golden_device_il_to_ptx_wmma_instr PROPERTIES
+                DEPENDS golden_device_il_to_ptx_wmma)
+            # ptxas 汇编（机器上没装 CUDA toolkit 时跳过，不阻塞 CI）。
+            find_program(HACC_PTXAS_EXECUTABLE ptxas)
+            if(HACC_PTXAS_EXECUTABLE)
+                add_test(NAME golden_device_ptx_wmma_ptxas
+                    COMMAND "${HACC_PTXAS_EXECUTABLE}" -arch=sm_80
+                            -o "${CMAKE_CURRENT_BINARY_DIR}/e2e_wmma.cubin" "${_wm_ptx}")
+                set_tests_properties(golden_device_ptx_wmma_ptxas PROPERTIES
+                    DEPENDS golden_device_il_to_ptx_wmma)
+            endif()
+
+            # C12 / MMA e2e（A4）：单 warp 的 D = A×B + C 与 CPU 参考比对。
+            # 无可用设备时样例返回 77，按 SKIP 处理；缓冲由 coolMalloc 分配（256B 对齐 ≥ 32B）。
+            set(_e2e_wmma_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_wmma_run")
+            add_test(NAME e2e_hacc_wmma_run_build
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/wmma_e2e.cu"
+                        -o "${_e2e_wmma_exe}")
+            add_test(NAME e2e_hacc_wmma_run
+                COMMAND "${_e2e_wmma_exe}")
+            set_tests_properties(e2e_hacc_wmma_run PROPERTIES
+                DEPENDS e2e_hacc_wmma_run_build
+                SKIP_RETURN_CODE 77
+                PASS_REGULAR_EXPRESSION "mma OK")
+        endif()
+
         # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。
         # 无可用 CUDA 设备时样例返回 77，测试框架按 SKIP 处理。
         set(_e2e_dg_run_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_dev_global_run")
