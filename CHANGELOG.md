@@ -50,7 +50,7 @@
 
   `make check` **205/205**、零 SKIP（本机 RTX 4060，`nvidia_uvm` 已加载）。
 
-  范围与取舍见 **[ADR 0008](docs/adr/0008-tensor-core-subset.md)（Status: Proposed，待人工批准）**；
+  范围与取舍见 **[ADR 0008](docs/adr/0008-tensor-core-subset.md)**；
   三条红线的「静默出错」现状与其修复优先级记为 **[KI-3](docs/known-issues.md)**。
 
 - **短路 `&&` / `||` 与指针复合赋值 `p += i` / `p -= i`（C11 前半）**：此前 `&&` / `||`

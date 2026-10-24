@@ -298,7 +298,7 @@
       **已完成（C11 前半）**：`&&` / `||`（含短路）与指针复合赋值 `p += i` / `p -= i`，
       见 CHANGELOG 与 `tests/golden/e2e/logical_ptr.cu`（`make check` **199/199**）。
       **剩余**：内联优化、`stmk_range_based_for` / `stmk_asm` / `stmk_coroutine`、递归设备函数拦截。
-- [x] **C12 MMA（Tensor Core）—— A1/A2/A4/A5 全部完成；仅 ADR 0008 待人工批准**：方案见工作区根下
+- [x] **C12 MMA（Tensor Core）—— A1/A2/A4/A5 全部完成，ADR 0008 已批准**：方案见工作区根下
       `agent_space/mma-support-plan.md`（**不在仓库内、不提交**）；A0 spike 已通过
       （sm_89 上 `wmma.mma.sync` 可编可汇编）。
       **已完成（A1 + A2）**：coolrt 提供 4 个 fragment 类型（各 32 字节、对齐 4）与
@@ -320,9 +320,8 @@
       **A2.5 + A5 已完成（文档收口）**：三条红线（warp 一致 / 32B 对齐 / 顺序固定）已登记为
       **KI-3**（`docs/known-issues.md`，含「为什么没修」与修复优先级）；
       **ADR 0008（Tensor Core 子集）** 已写入 `docs/adr/0008-tensor-core-subset.md`，
-      **Status = Proposed，等你批准后转 Accepted**（`docs/adr/**` 属人工批准文档，
-      我没有自行改成 Accepted）。
-      **剩余**：① ADR 0008 批准；② 可选的诊断增强（KI-3：对齐检查优先，warp-uniform 次之）。
+      **Status = Accepted（2026-10 批准）**。
+      **剩余**：仅可选的诊断增强（KI-3：对齐检查优先，warp-uniform 次之）。
       **C4 仍然要做**（A4 已用 77 SKIP 兜住 hacc 侧，但「无设备 / 初始化失败」的区分本身是 M5 验收标准）：
       A/B 传反与 fragment 内部错位都编得过、只有数值错，数值断言是唯一防线。
       本轮实测到一个具体例证（2026-10-24，`nvidia_uvm` 未加载 → 宿主机 `modprobe` 前后各测一次）：

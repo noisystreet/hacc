@@ -53,8 +53,7 @@ PTX 产出 5 条 `wmma.*` 指令、`ptxas` 汇编通过；单 warp 的 `D = A×B
 逐元素一致（`worst abs diff = 0`），并把「A/B 传反」的反向验证跑过（必须变红才算数）。
 三条红线（整 warp 一致执行 / 缓冲 32B 对齐 / D = A×B + C 的顺序）写在
 `coolruntime/include/cool/device_builtins.h`，hacc 侧不设防 —— 它们的「静默出错」现状记为
-[KI-3](docs/known-issues.md)；范围与取舍见 [ADR 0008](docs/adr/0008-tensor-core-subset.md)
-（**Status: Proposed，待批准**）。
+[KI-3](docs/known-issues.md)；范围与取舍见 [ADR 0008](docs/adr/0008-tensor-core-subset.md)。
 
 主机编译默认调用 `g++`；可用 `--host-cxx <path>`（或 `$HACC_HOST_CXX`）切到 `clang++`
 （已验证可编）。**前端**系统头探测仍固定取 GCC 的头：EDG 按 GCC 语义解析，clang 的
