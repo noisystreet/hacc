@@ -77,7 +77,7 @@ ccn:
 
 check: fmt-check ccn build test
 
-# 严格模式：任何 SKIP 都算失败。用于「有 GPU 的 CI」或本机复验 ——
+# 严格模式：任何 SKIP 都算失败。用于「有 GPU 的本机」或发布前复验 ——
 # 平时 make check 允许 SKIP（无 GPU 的开发机上必须能跑），但那时"全绿"是缺省的。
 check-strict: fmt-check ccn build
 	@$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure > $(BUILD_DIR)/ctest-strict.log 2>&1 || \

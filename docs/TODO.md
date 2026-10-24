@@ -20,7 +20,7 @@
 > 且**真机数值验证通过**（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
 > 并做了「把 A/B 传反必须变红」的反向验证）；
 > `make check` **209/209**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
-> **里程碑 M5 仍差 C5（CI 形态）**。
+> **里程碑 M5 的阻塞项已清空**（C4 已落地；C5 决策为不设 CI、只用本地质量门）。
 
 ---
 
@@ -272,11 +272,16 @@
       - **三条分支都有回归**：`e2e_hacc_gpu_state`（真实）、`..._no_device`、`..._init_fail`，
         后两条靠 `HACC_GPU_STATE_FAULT=n|i` 注入 —— 真机故障不可按需制造，不注入就等于没测。
       - `make check` 末尾汇总 `⚠ N 个测试被 SKIP —— 「全部通过」不含这些用例` 并给 uvm 排查命令；
-        新增 **`make check-strict`**（SKIP 即失败），供有 GPU 的 CI 用。两者都实测过。
+        新增 **`make check-strict`**（SKIP 即失败），供有 GPU 的本机复验。两者都实测过。
       - **未做**：「与 nvcc 运行结果对照」（方案 §11 标为可选）。需要 nvcc 环境，且与现有
         「真机 e2e + CPU 参考比对」重复度较高；若引入，建议单独排期并限定用例范围。
-- [ ] **C5 hacc 的 CI 形态**：EDG ~853MB 拉取 + 是否有 GPU；coolruntime 的 CI 因无 GPU 仅做格式检查，
-      hacc 是否照此。
+- [x] **C5 hacc 的 CI 形态 → 决策：不做 CI，质量门只在本地**：GPU 前置（`nvidia_uvm`）不适合
+      托管 runner，EDG（~853MB）也不该每次重拉，单人本地推进时 CI 收益低于维护成本。
+      质量门收敛到本地入口（`make check` / `make check-strict` / pre-commit 的 `project-check`），
+      并在 README「质量门（仅本地，不设 CI）」段写清判定标准：**绿 + 零 SKIP 才算过**，
+      绿但有 `⚠ N 个测试被 SKIP` 不算全过。
+      **若将来要接 CI**，最小路径：只跑 `fmt-check + ccn + build + test`，无 GPU 时接受 SKIP 但
+      必须把警告打出来；GPU 用例留给本地 `check-strict`；EDG 用镜像预装而非每次拉取。
 - [ ] **C6 面向教学的诊断格式**：阶段 / 源位置 / 成因的**具体输出格式**（Coding Rules 仅有原则）。
 - [x] **C7 ADR 0004 的 S0「控制流」与实现不符 → 已按路线 ② 补实现（M5.1 完成）**：ADR 0004 §S0 写明
       「语言子集：…控制流…」，而当时 `src/device/il_to_llvm.cpp` 的 `translate_statement` 只覆盖

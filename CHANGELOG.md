@@ -18,7 +18,8 @@
     （用 `HACC_GPU_STATE_FAULT=n|i` 注入）。**真机故障不可按需制造，所以要能注入** ——
     否则这两条分支等于没测过。
   - `make check` 末尾汇总：出现 SKIP 时打印 `⚠ N 个测试被 SKIP —— 「全部通过」不含这些用例`
-    并给出 uvm 排查命令；新增 **`make check-strict`**（SKIP 即失败），供有 GPU 的 CI 或本机复验。
+    并给出 uvm 排查命令；新增 **`make check-strict`**（SKIP 即失败），供有 GPU 的本机复验。
+    本项目不设 CI（见 C5 决策），质量门只在本地跑。
     实测：临时把一条自测改成真 SKIP → `make check` 正确警告、`make check-strict` 正确失败。
 
 - **MMA / Tensor Core 的编译路径（C12 的 A1 + A2）**：`cool_wmma_*` 五条内建

@@ -107,6 +107,28 @@ build/coolicc --emit=ptx -arch=sm_80 tests/golden/device/empty_kernel.ll
 
 > `HACC_WITH_LLVM=OFF` 时 `coolicc` 仍可构建，但 `--emit=ptx` 走占位实现并明确报错。
 
+## 质量门（仅本地，不设 CI）
+
+本项目**不做 CI**，质量门统一由本地入口承担：GPU 前置（`nvidia_uvm`）不适合托管 runner，
+EDG 前端（~853MB）也不该每次重拉。
+
+```sh
+make check          # fmt-check + ccn + build + test
+make check-strict   # 同上，但 SKIP 即失败 —— 有 GPU 的本机 / 发布前用这个
+pre-commit install  # 一次性：之后每次 commit 自动跑 make check 与 make ccn
+```
+
+**判定「算不算过」的规矩**（比看绿字更重要）：
+
+| 现象 | 结论 |
+| --- | --- |
+| `make check` 绿 + **零 SKIP** | 真过 |
+| `make check` 绿但有 `⚠ N 个测试被 SKIP` | **不算全过** —— 这些用例根本没跑 |
+| `make check-strict` 绿 | 真过，且不用人眼去数 SKIP |
+
+有 GPU 的机器上出现 SKIP 通常是驱动问题（先查 `nvidia_uvm`，见
+[known-issues.md](docs/known-issues.md)）；无 GPU 的机器上 GPU 用例 SKIP 属正常。
+
 ## 设计要点（摘要）
 
 - **前端**：基于 **2026-09-30 开源的 EDG C++ 前端**（`github.com/edgcpp/compiler`，Apache-2.0 WITH LLVM-exception）
