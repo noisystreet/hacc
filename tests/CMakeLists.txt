@@ -904,6 +904,34 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS e2e_hacc_wmma_run_build
                 SKIP_RETURN_CODE 77
                 PASS_REGULAR_EXPRESSION "mma OK")
+
+            # C4 跳过机制：把「没 GPU」与「有 GPU 但初始化失败（如 nvidia_uvm 未加载）」分开。
+            # 有 /dev/nvidia0 却枚举不到设备 → 返回 1（FAIL），不再伪装成 SKIP。
+            set(_gpu_state_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_gpu_state_run")
+            add_test(NAME e2e_hacc_gpu_state_build
+                COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/gpu_state.cu"
+                        -o "${_gpu_state_exe}")
+            add_test(NAME e2e_hacc_gpu_state
+                COMMAND "${_gpu_state_exe}")
+            set_tests_properties(e2e_hacc_gpu_state PROPERTIES
+                DEPENDS e2e_hacc_gpu_state_build
+                SKIP_RETURN_CODE 77
+                PASS_REGULAR_EXPRESSION "gpuState OK")
+
+            # 另两条分支的自测：本机有 GPU 时也要覆盖「无设备」与「初始化失败」，
+            # 否则这两条分支等于没测过（真机故障不可按需制造）。
+            # 用 PASS_REGULAR_EXPRESSION 判输出而非退出码（77 / 1 都是预期的「非零」）。
+            add_test(NAME e2e_hacc_gpu_state_no_device
+                COMMAND ${CMAKE_COMMAND} -E env HACC_GPU_STATE_FAULT=n "${_gpu_state_exe}")
+            set_tests_properties(e2e_hacc_gpu_state_no_device PROPERTIES
+                DEPENDS e2e_hacc_gpu_state_build
+                PASS_REGULAR_EXPRESSION "gpuState WARNING")
+
+            add_test(NAME e2e_hacc_gpu_state_init_fail
+                COMMAND ${CMAKE_COMMAND} -E env HACC_GPU_STATE_FAULT=i "${_gpu_state_exe}")
+            set_tests_properties(e2e_hacc_gpu_state_init_fail PROPERTIES
+                DEPENDS e2e_hacc_gpu_state_build
+                PASS_REGULAR_EXPRESSION "gpuState FAILED")
         endif()
 
         # M4.1 e2e：__device__ 设备全局编译 + 运行 + 结果校验（g_counter == 105）。

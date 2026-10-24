@@ -18,7 +18,7 @@ LIZARD_WHITELIST := whitelizard.txt
 SRC_DIRS := src tests samples include
 FMT_FILES := $(shell find $(SRC_DIRS) -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \) 2>/dev/null)
 
-.PHONY: all configure build test fmt fmt-check lint ccn check clean
+.PHONY: all configure build test fmt fmt-check lint ccn check check-strict clean
 
 all: build
 
@@ -31,7 +31,17 @@ build: configure
 	$(CMAKE) --build $(BUILD_DIR) -j
 
 test: build
-	$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure
+	@$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure > $(BUILD_DIR)/ctest.log 2>&1 || \
+		{ cat $(BUILD_DIR)/ctest.log; exit 1; }
+	@tail -n 3 $(BUILD_DIR)/ctest.log
+	@skips=$$(grep -c '\*\*\*Skipped' $(BUILD_DIR)/ctest.log || true); \
+	if [ "$$skips" != "0" ]; then \
+		echo ""; \
+		echo "⚠  $$skips 个测试被 SKIP —— 「全部通过」不含这些用例。"; \
+		echo "   本机有 GPU 时先查驱动状态（nvidia-smi 正常 ≠ CUDA 可用）："; \
+		echo "     lsmod | grep nvidia_uvm; ls -l /dev/nvidia-uvm; grep -i uvm /proc/devices"; \
+		echo "   要强制零 SKIP：make check-strict"; \
+	fi
 
 # 工具缺失时跳过（打印提示），存在时违规必须让目标失败（退出码非 0）。
 fmt:
@@ -66,6 +76,20 @@ ccn:
 	fi
 
 check: fmt-check ccn build test
+
+# 严格模式：任何 SKIP 都算失败。用于「有 GPU 的 CI」或本机复验 ——
+# 平时 make check 允许 SKIP（无 GPU 的开发机上必须能跑），但那时"全绿"是缺省的。
+check-strict: fmt-check ccn build
+	@$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure > $(BUILD_DIR)/ctest-strict.log 2>&1 || \
+		{ cat $(BUILD_DIR)/ctest-strict.log; exit 1; }
+	@skips=$$(grep -c '\*\*\*Skipped' $(BUILD_DIR)/ctest-strict.log || true); \
+	if [ "$$skips" != "0" ]; then \
+		cat $(BUILD_DIR)/ctest-strict.log; \
+		echo ""; \
+		echo "✗  $$skips 个测试被 SKIP，而 check-strict 要求零 SKIP。"; \
+		exit 1; \
+	fi
+	@tail -n 3 $(BUILD_DIR)/ctest-strict.log
 
 clean:
 	rm -rf $(BUILD_DIR)
