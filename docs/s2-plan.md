@@ -1,9 +1,9 @@
 # S2 计划：进阶子集（模板 / 数学内建 / `__launch_bounds__`）
 
-> 状态：**进行中**（2026-10 立项；**T4 已完成**，T0 剩数学内建探针，T1/T2/T3 未开工）。
+> 状态：**进行中**（2026-10 立项；**T3、T4 已完成**；T1/T2 未开工）。
 > 上游：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) §S2 进阶（可选）。
 > 相关：[已知缺陷 KI-4](known-issues.md)（递归深度限制）、[ADR 0007](adr/0007-module-granularity-per-tu.md)（设备符号不跨 TU）。
-> 实测环境：RTX 4060 Laptop / sm_89 / 驱动 595.58.03 / `make check` 215/215。
+> 实测环境：RTX 4060 Laptop / sm_89 / 驱动 595.58.03 / `make check` 226/226。
 
 ## 1. 目标与范围
 
@@ -171,20 +171,51 @@ PTX 里生成的不是 `.extern .func` 外部引用，而是一个 `.visible .fu
 **若要做，先 spike**：用一个临时 hack 让 `kt<float><<<>>>` 穿过改写器，确认 EDG 实例出的
 `kt<float>` routine 的**名字与签名**，再谈改动。
 
-### T3 数学内建（1–2d，现实收益最高）
+### T3 数学内建（1–2d，现实收益最高）✅ **已完成**
 
-真实 CUDA 代码几乎必用 `sqrtf` / `fabsf` / `__fmaf`，现状大概率直接编不过。
+**落地内容**：16 个 f32 内建，全部映射到**单条 PTX 指令**（`--emit=ptx` 逐个核对过）。
 
-1. 按 T0 摸底结果确定失败形态（未定义符号 / 当普通 extern 函数 / 其它）。
-2. 建映射表，最小集：`sqrtf`→`sqrt.rn.f32`、`fabsf`→`abs.f32`、`__fmaf_rn`→`fma.rn.f32`、
-   `__expf`/`__logf`→`ex2.approx`/`lg2.approx`、`floorf`/`ceilf`、`fminf`/`fmaxf`。
-3. **明确精度契约**：`sinf` 走 `sin.approx.f32`（快但不精确）还是精确实现？
-   一期只做「能用」，文档写清「approx 指令，不保证与 host `sinf` 逐位一致」，
-   **测试用容差（如 1e-5）而不是 `==`**。
-4. 未映射的函数必须 **fail loud**，不得静默生成外部符号（否则链接期才炸，或更糟：
-   PTX 里留未定义符号）。
+| C 名 | PTX 指令 | 精度档 |
+| --- | --- | --- |
+| `sqrtf` | `sqrt.rn.f32` | 精确 |
+| `fabsf` | `abs.f32` | 精确 |
+| `fminf` / `fmaxf` | `min.f32` / `max.f32` | 精确 |
+| `floorf` / `ceilf` / `truncf` | `cvt.rmi` / `cvt.rpi` / `cvt.rzi` | 精确 |
+| `__fmaf_rn` | `fma.rn.f32` | 精确 |
+| `__fsqrt_rn` | `sqrt.rn.f32` | 精确 |
+| `__frcp_rn` | `rcp.rn.f32` | 精确 |
+| `rsqrtf` | `rsqrt.approx.f32` | 近似（CUDA 同名函数即如此） |
+| `__fdividef` | `div.approx.f32` | 近似 |
+| `__expf` | `ex2.approx.f32`（实参先乘 log2 e） | 近似 |
+| `__logf` | `lg2.approx.f32`（结果乘 ln 2） | 近似 |
+| `__sinf` / `__cosf` | `sin.approx` / `cos.approx` | 近似 |
 
-**验收**：`tests/golden/e2e/math_builtins.cu`，容差比较；反向验证（改回精确相等）必须变红。
+**与计划的偏差（有意为之）**：计划原写「`sinf` 走 `sin.approx.f32`」，实现时**没有照做**。
+`sinf` 与 `__sinf` 在 CUDA 里是两个精度档（前者 libdevice 精确实现，后者才是 approx），
+把 `sinf` 映射成 approx 属于「静默降低精度」，与本项目一贯口径（KI-1 / KI-4 / KI-5：
+宁可编不过，不要静默错值）冲突。故 `sinf` / `cosf` / `expf` / `logf` / `powf` 等**一律不收录**，
+调用时明确报错：
+
+```text
+sinf 需要 libdevice 的精确实现，hacc 尚未内置；可改用近似内建（如 __sinf / __expf）或自行实现
+```
+
+要精确版得接 libdevice，属独立工作量。
+
+**其它实现要点**：
+
+- 映射在 `try_translate_math_call`（`src/device/il_to_llvm.cpp`），插在调用分派链
+  `atomic → wmma → **math** → 无参内建 → 自定义 __device__ 函数` 的第三位。
+- 声明在 coolrt `device_builtins.h` 的 `__COOLCC__` 段，且**不带 `__device__` 属性**
+  （与 `__syncthreads` 一致）——它们是编译器内建，加属性反而会进设备函数表。
+- 头里**只声明这 16 个**：未声明的名字得到前端 `identifier ... is undefined`；
+  用户若自行声明（如 `#include <math.h>`），则命中上面的 libdevice 诊断。
+- 未映射且确有声明的情况由 KI-5 的修复兜住（`调用了只有声明、没有定义的设备函数`）。
+
+**验收**：`tests/golden/e2e/math_builtins.cu`（精确档 `==`、近似档容差 1e-4）+
+`tests/golden/negative/unsupported_math.cu`（`sinf` 必须报 libdevice 错）。
+反向验证：把 `kLog2E` 改成 1.0（`__expf` 不换算底数）→ 用例报
+`__expf(1) = 2, want 2.71828175` 变红 ✅。
 
 ### T4 `__launch_bounds__`（0.5d）✅ **已完成**
 
@@ -203,7 +234,7 @@ PTX 里生成的不是 `.extern .func` 外部引用，而是一个 `.visible .fu
 ```
 T0 摸底（0.5d）
   └─ T1 模板 device 函数（1–2d）      ← 收益/成本比最高
-       └─ T3 数学内建（1–2d）         ← 现实收益最高
+       └─ T3 数学内建（1–2d）         ← 现实收益最高 ✅
             └─ T4 launch_bounds（0.5d）✅ 已完成
                  └─ T2 模板 kernel（2–4d，可砍）
 ```

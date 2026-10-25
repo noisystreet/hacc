@@ -597,7 +597,7 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         set_tests_properties(device_undefined_fn_exit PROPERTIES WILL_FAIL TRUE)
         add_test(NAME device_undefined_fn_message
             COMMAND sh -c "\"$1\" --emit=ptx \"$2\" -o \"$3\" 2>&1 \
-                           | grep -q '只有声明、没有定义的设备函数 sqrtf'"
+                           | grep -q '只有声明、没有定义的设备函数 missing_helper'"
                     _ $<TARGET_FILE:hacc> "${_ki5_neg}"
                       "${CMAKE_CURRENT_BINARY_DIR}/undefined_device_fn_msg.ptx")
 
@@ -606,7 +606,7 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
         set(_ki5_pos "${CMAKE_CURRENT_SOURCE_DIR}/golden/negative/declared_unused_device_fn.cu")
         add_test(NAME device_declared_unused_fn_ok
             COMMAND sh -c "\"$1\" --emit=ptx \"$2\" -o \"$3\" \
-                           && ! grep -q 'func.*sqrtf' \"$3\" && ! grep -q 'func.*cosf' \"$3\""
+                           && ! grep -q 'func.*unused_helper' \"$3\" && ! grep -q 'func.*also_unused' \"$3\""
                     _ $<TARGET_FILE:hacc> "${_ki5_pos}"
                       "${CMAKE_CURRENT_BINARY_DIR}/declared_unused_device_fn.ptx")
 
@@ -622,6 +622,31 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             DEPENDS e2e_hacc_device_forward_ref_build
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "forwardRef OK")
+
+        # S2 T3：数学内建。精确档用 ==、近似档用容差（见用例头部说明）。
+        set(_e2e_math_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_math_builtins_run")
+        add_test(NAME e2e_hacc_math_builtins_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/math_builtins.cu"
+                    -o "${_e2e_math_exe}")
+        add_test(NAME e2e_hacc_math_builtins_run
+            COMMAND "${_e2e_math_exe}")
+        set_tests_properties(e2e_hacc_math_builtins_run PROPERTIES
+            DEPENDS e2e_hacc_math_builtins_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "mathBuiltins OK")
+
+        # S2 T3 负向：需要 libdevice 的精确数学函数必须明确报错，不得静默降级为 .approx。
+        # 退出码与消息分开验证（WILL_FAIL 与 PASS_REGULAR_EXPRESSION 会互相翻转）。
+        set(_math_unsup "${CMAKE_CURRENT_SOURCE_DIR}/golden/negative/unsupported_math.cu")
+        add_test(NAME device_unsupported_math_exit
+            COMMAND hacc --emit=ptx "${_math_unsup}"
+                    -o "${CMAKE_CURRENT_BINARY_DIR}/unsupported_math.ptx")
+        set_tests_properties(device_unsupported_math_exit PROPERTIES WILL_FAIL TRUE)
+        add_test(NAME device_unsupported_math_message
+            COMMAND sh -c "\"$1\" --emit=ptx \"$2\" -o \"$3\" 2>&1 \
+                           | grep -q 'sinf 需要 libdevice 的精确实现'"
+                    _ $<TARGET_FILE:hacc> "${_math_unsup}"
+                      "${CMAKE_CURRENT_BINARY_DIR}/unsupported_math_msg.ptx")
 
         # M5.2 golden：break / continue（EDG 降为 stmk_goto + stmk_label）→ PTX 跳转结构。
         if(HACC_COOLRUNTIME_INCLUDE)

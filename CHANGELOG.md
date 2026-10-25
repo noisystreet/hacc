@@ -6,6 +6,27 @@
 
 ### Added
 
+- **数学内建可用了（S2 T3）**：16 个 f32 内建全部映射到**单条 PTX 指令**，`--emit=ptx` 逐个
+  核对过：`sqrtf`→`sqrt.rn.f32`、`fabsf`→`abs.f32`、`fminf`/`fmaxf`→`min`/`max.f32`、
+  `floorf`/`ceilf`/`truncf`→`cvt.rmi`/`rpi`/`rzi`、`__fmaf_rn`→`fma.rn.f32`、
+  `__fsqrt_rn`→`sqrt.rn.f32`、`__frcp_rn`→`rcp.rn.f32`、`rsqrtf`→`rsqrt.approx.f32`、
+  `__fdividef`→`div.approx.f32`、`__expf`→`ex2.approx.f32`（实参先乘 log2 e）、
+  `__logf`→`lg2.approx.f32`（结果乘 ln 2）、`__sinf`/`__cosf`→`sin`/`cos.approx.f32`。
+  实现为 `try_translate_math_call`，插在调用分派链
+  `atomic → wmma → **math** → 无参内建 → 自定义 __device__ 函数` 的第三位。
+
+  **精度契约是显式的、且刻意保守**：只收录「能映射到单条精确指令」的，以及「名字本身
+  即近似语义」的（`__expf` 等）。**需要 libdevice 精确实现的 `sinf`/`cosf`/`expf`/`logf`/
+  `powf` 等一律不收录**——调用时明确报错并给出替代建议，绝不静默降级成 `.approx`。
+  这与计划原文（「`sinf` 走 `sin.approx.f32`」）**有意不同**：`sinf` 与 `__sinf` 在 CUDA 里
+  是两个精度档，把前者当后者用是悄悄降低精度，与本项目「宁可编不过、不要静默错值」的
+  口径冲突。要精确版得接 libdevice，属独立工作量。
+
+  回归：`tests/golden/e2e/math_builtins.cu`（精确档 `==`、近似档容差 1e-4，另有一档在
+  非平凡点验证 approx 真的在算）+ `tests/golden/negative/unsupported_math.cu`（`sinf` 必须
+  报 libdevice 错）。**反向验证已做**：把 `kLog2E` 改成 1.0，用例报
+  `__expf(1) = 2, want 2.71828175` 变红。
+
 - **`__launch_bounds__` 可用了（S2 T4）**：此前**直接编不过**（不是静默忽略）——CUDA 限定符靠
   coolrt 头里的宏转成 EDG 属性（`__global__` → `__attribute__((cool_global))`），而
   `__launch_bounds__` 没有任何定义，于是 `void __launch_bounds__(256, 4) k(...)` 被当成

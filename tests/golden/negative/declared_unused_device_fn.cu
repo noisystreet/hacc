@@ -8,8 +8,8 @@
 // （修复前会生成 `.visible .func sqrtf/cosf` 并返回 0）。
 #include <cool/cool_runtime.h>
 
-__device__ float sqrtf(float); /* 声明但不用 */
-__device__ float cosf(float);  /* 声明但不用 */
+__device__ float unused_helper(float x); /* 声明但不用 */
+__device__ float also_unused(float x);  /* 声明但不用 */
 
 __global__ void k(float* out) {
     out[threadIdx.x] = 1.0f;

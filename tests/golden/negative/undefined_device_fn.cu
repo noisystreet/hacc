@@ -6,12 +6,12 @@
 //     st.param.f32 [func_retval0+0], %f1;
 // 于是编译、链接、运行全部成功，结果恒为 0，属纯静默错值。
 //
-// 期望：hacc 退出码非 0，stderr 含「只有声明、没有定义的设备函数 sqrtf」，
-// 且位置指向下方 `out[threadIdx.x] = sqrtf(x);` 那一行的调用点（而非声明处）。
+// 期望：hacc 退出码非 0，stderr 含「只有声明、没有定义的设备函数 missing_helper」，
+// 且位置指向下方 `out[threadIdx.x] = missing_helper(x);` 那一行的调用点（而非声明处）。
 #include <cool/cool_runtime.h>
 
-__device__ float sqrtf(float); /* 只有声明，没有任何实现 */
+__device__ float missing_helper(float x); /* 只有声明，没有任何实现 */
 
 __global__ void k(float* out, float x) {
-    out[threadIdx.x] = sqrtf(x); /* ← 调用点：应在此处报错 */
+    out[threadIdx.x] = missing_helper(x); /* ← 调用点：应在此处报错 */
 }

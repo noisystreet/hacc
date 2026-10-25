@@ -1388,6 +1388,129 @@ llvm::Value* try_translate_wmma_call(an_expr_node_ptr expr, KernelContext& kc) {
     return emit_wmma_builtin(mapping->kind, args, kc);
 }
 
+// ---------------------------------------------------------------------------
+// 数学内建（S2 T3）
+// ---------------------------------------------------------------------------
+// 精度契约（与 coolrt 的 device_builtins.h 一致）：
+//   - 「能映射到单条精确 PTX 指令」的 → 直接映射（sqrt.rn / abs / min / max /
+//     cvt.rmi·rpi·rzi / fma.rn / rcp.rn）；
+//   - 名字本身即近似语义的（__expf / __logf / __sinf / __cosf / __fdividef / rsqrtf）
+//     → 映射到对应 `.approx` 指令（CUDA 里它们就是这么定义的）；
+//   - 需要 libdevice 精确实现的（sinf / expf / powf …）→ **不映射**，调用点显式报错。
+//     绝不静默降级成 `.approx`：sinf 与 __sinf 是两个精度档，降级等于偷偷降低精度。
+// 全部 f32；由 NVPTX 后端把 intrinsic 降为单条 PTX 指令。
+
+// __expf：ex2.approx 以 2 为底，实参需先乘 log2(e)。
+constexpr double kLog2E = 1.4426950408889634;
+// __logf：lg2.approx 以 2 为底，结果需乘 ln(2)。
+constexpr double kLn2 = 0.6931471805599453;
+
+enum class MathMul {
+    None,
+    Before,  // 实参先乘常量（ex2）
+    After,   // 结果乘常量（lg2）
+};
+
+struct MathBuiltinMapping {
+    const char* name;
+    const char* intrinsic;
+    unsigned arity;
+    MathMul mul;
+    double factor;
+};
+
+constexpr MathBuiltinMapping kMathBuiltins[] = {
+    {"sqrtf", "llvm.sqrt.f32", 1, MathMul::None, 0.0},
+    {"fabsf", "llvm.fabs.f32", 1, MathMul::None, 0.0},
+    {"fminf", "llvm.minnum.f32", 2, MathMul::None, 0.0},
+    {"fmaxf", "llvm.maxnum.f32", 2, MathMul::None, 0.0},
+    {"floorf", "llvm.floor.f32", 1, MathMul::None, 0.0},
+    {"ceilf", "llvm.ceil.f32", 1, MathMul::None, 0.0},
+    {"truncf", "llvm.trunc.f32", 1, MathMul::None, 0.0},
+    {"__fmaf_rn", "llvm.fma.f32", 3, MathMul::None, 0.0},
+    {"__fsqrt_rn", "llvm.nvvm.sqrt.rn.f", 1, MathMul::None, 0.0},
+    {"__frcp_rn", "llvm.nvvm.rcp.rn.f", 1, MathMul::None, 0.0},
+    {"rsqrtf", "llvm.nvvm.rsqrt.approx.f", 1, MathMul::None, 0.0},
+    {"__fdividef", "llvm.nvvm.div.approx.f", 2, MathMul::None, 0.0},
+    {"__expf", "llvm.nvvm.ex2.approx.f", 1, MathMul::Before, kLog2E},
+    {"__logf", "llvm.nvvm.lg2.approx.f", 1, MathMul::After, kLn2},
+    {"__sinf", "llvm.nvvm.sin.approx.f", 1, MathMul::None, 0.0},
+    {"__cosf", "llvm.nvvm.cos.approx.f", 1, MathMul::None, 0.0},
+};
+
+// 需要 libdevice 精确实现、一期**不支持**的数学函数。
+// 单独列出只为给出比「未定义标识符」更可操作的诊断。
+constexpr const char* kUnsupportedMath[] = {
+    "sinf",   "cosf",  "tanf",  "expf",   "exp2f",  "logf",  "log2f",
+    "log10f", "powf",  "atanf", "atan2f", "asinf",  "acosf", "sinhf",
+    "coshf",  "tanhf", "fmodf", "cbrtf",  "hypotf", "erff",  "tgammaf",
+};
+
+const MathBuiltinMapping* find_math_builtin(const char* name) {
+    for (const MathBuiltinMapping& m : kMathBuiltins) {
+        if (std::strcmp(name, m.name) == 0) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+bool is_unsupported_math(const char* name) {
+    for (const char* n : kUnsupportedMath) {
+        if (std::strcmp(name, n) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+llvm::Value* emit_math_builtin(const MathBuiltinMapping& m, std::vector<llvm::Value*>& args,
+                               KernelContext& kc) {
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    llvm::Type* f32 = llvm::Type::getFloatTy(kc.ctx);
+    if (m.mul == MathMul::Before) {
+        args[0] = kc.builder.CreateFMul(args[0], llvm::ConstantFP::get(f32, m.factor));
+    }
+    const std::vector<llvm::Type*> params(m.arity, f32);
+    llvm::Function* fn = get_or_declare_intrinsic(module, m.intrinsic, f32, params);
+    llvm::Value* v = kc.builder.CreateCall(fn, args);
+    if (m.mul == MathMul::After) {
+        v = kc.builder.CreateFMul(v, llvm::ConstantFP::get(f32, m.factor));
+    }
+    return v;
+}
+
+// 翻译数学内建调用。返回 nullptr 表示「不是数学内建」，交由调用方继续判定。
+llvm::Value* try_translate_math_call(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr callee = expr->variant.operation.operands;
+    if (callee == nullptr || callee->kind != enk_routine) {
+        return nullptr;
+    }
+    a_routine_ptr r = callee->variant.routine.ptr;
+    const char* name = (r != nullptr) ? r->source_corresp.name : nullptr;
+    if (name == nullptr) {
+        return nullptr;
+    }
+    const MathBuiltinMapping* mapping = find_math_builtin(name);
+    if (mapping == nullptr) {
+        if (is_unsupported_math(name)) {
+            fail(std::string(name) +
+                     " 需要 libdevice 的精确实现，hacc 尚未内置；"
+                     "可改用近似内建（如 __sinf / __expf）或自行实现",
+                 expr->position);
+        }
+        return nullptr;
+    }
+    std::vector<llvm::Value*> args = translate_builtin_args(callee, kc);
+    // 先校验个数再 CreateCall：个数不符时 CreateCall 会直接断言崩，用户看不到诊断。
+    if (args.size() != mapping->arity) {
+        fail(std::string(name) + " 需要 " + std::to_string(mapping->arity) + " 个实参（实际 " +
+                 std::to_string(args.size()) + " 个）",
+             expr->position);
+    }
+    return emit_math_builtin(*mapping, args, kc);
+}
+
 // 翻译对同模块自定义 __device__ 函数的调用（M5.4）。
 // 返回 nullptr 表示「不是设备函数调用」，交由调用方继续判定。
 llvm::Value* try_translate_device_call(an_expr_node_ptr expr, KernelContext& kc) {
@@ -1823,11 +1946,14 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             return v;
         }
         case OpClass::Call: {
-            // 依次尝试：原子内建 → wmma 内建 → 无参内建 → 自定义 __device__ 函数；
+            // 依次尝试：原子内建 → wmma 内建 → 数学内建 → 无参内建 → 自定义 __device__ 函数；
             // 都不是则报错。
             llvm::Value* v = try_translate_atomic_call(expr, kc);
             if (v == nullptr) {
                 v = try_translate_wmma_call(expr, kc);
+            }
+            if (v == nullptr) {
+                v = try_translate_math_call(expr, kc);
             }
             if (v == nullptr) {
                 v = try_translate_builtin_call(expr, kc);
@@ -1838,7 +1964,8 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             if (v == nullptr) {
                 fail(
                     "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic*/"
-                    "cool_wmma_* 与同模块的 __device__ 函数）");
+                    "数学内建（sqrtf/fabsf/__fmaf_rn 等）/cool_wmma_* 与同模块的 __device__ "
+                    "函数）");
             }
             return v;
         }
