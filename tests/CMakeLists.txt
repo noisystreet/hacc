@@ -587,6 +587,42 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "launchBounds OK")
 
+        # KI-5 回归：调用「只有声明、没有定义」的设备函数必须**在调用点报错**，
+        # 不得静默生成返回 0 的空函数体（曾经的行为：编译链接运行全过、结果恒为 0）。
+        # 注意：WILL_FAIL 与 PASS_REGULAR_EXPRESSION 会互相翻转，故退出码与消息分开验证。
+        set(_ki5_neg "${CMAKE_CURRENT_SOURCE_DIR}/golden/negative/undefined_device_fn.cu")
+        add_test(NAME device_undefined_fn_exit
+            COMMAND hacc --emit=ptx "${_ki5_neg}"
+                    -o "${CMAKE_CURRENT_BINARY_DIR}/undefined_device_fn.ptx")
+        set_tests_properties(device_undefined_fn_exit PROPERTIES WILL_FAIL TRUE)
+        add_test(NAME device_undefined_fn_message
+            COMMAND sh -c "\"$1\" --emit=ptx \"$2\" -o \"$3\" 2>&1 \
+                           | grep -q '只有声明、没有定义的设备函数 sqrtf'"
+                    _ $<TARGET_FILE:hacc> "${_ki5_neg}"
+                      "${CMAKE_CURRENT_BINARY_DIR}/undefined_device_fn_msg.ptx")
+
+        # KI-5 正向（防过严）：只声明、从不调用的设备函数不报错，且 PTX 里不出现其空函数体。
+        # 若「无定义即报错」，coolrt 将来成批声明数学内建后任何 #include 都会炸。
+        set(_ki5_pos "${CMAKE_CURRENT_SOURCE_DIR}/golden/negative/declared_unused_device_fn.cu")
+        add_test(NAME device_declared_unused_fn_ok
+            COMMAND sh -c "\"$1\" --emit=ptx \"$2\" -o \"$3\" \
+                           && ! grep -q 'func.*sqrtf' \"$3\" && ! grep -q 'func.*cosf' \"$3\""
+                    _ $<TARGET_FILE:hacc> "${_ki5_pos}"
+                      "${CMAKE_CURRENT_BINARY_DIR}/declared_unused_device_fn.ptx")
+
+        # M5.4 前向引用的数值回归：device_call.cu 覆盖了该场景但没有 main、只 grep PTX，
+        # 从未验证过数值。此用例真机校验，并锁住 KI-5 修复后「纯声明复用同名定义」的行为。
+        set(_e2e_fwd_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_device_forward_ref_run")
+        add_test(NAME e2e_hacc_device_forward_ref_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/device_forward_ref.cu"
+                    -o "${_e2e_fwd_exe}")
+        add_test(NAME e2e_hacc_device_forward_ref_run
+            COMMAND "${_e2e_fwd_exe}")
+        set_tests_properties(e2e_hacc_device_forward_ref_run PROPERTIES
+            DEPENDS e2e_hacc_device_forward_ref_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "forwardRef OK")
+
         # M5.2 golden：break / continue（EDG 降为 stmk_goto + stmk_label）→ PTX 跳转结构。
         if(HACC_COOLRUNTIME_INCLUDE)
             set(_lc_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_control.cil")

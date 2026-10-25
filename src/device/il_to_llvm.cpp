@@ -2512,6 +2512,91 @@ void define_routine_body(
     }
 }
 
+// KI-5 第一遍：为**有定义**的 device routine 建 LLVM 函数，并按名字登记。
+// 必须先于纯声明处理——否则纯声明那条会各自建出一个永远没有 body 的函数。
+void declare_defined_device_functions(
+    a_scope_ptr file_scope, llvm::Module& module,
+    std::unordered_map<a_routine_ptr, llvm::Function*>& device_functions,
+    std::unordered_map<std::string, llvm::Function*>& by_name) {
+    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
+        if (!has_attribute(r->source_corresp.attributes, kCoolDeviceAttributeName)) {
+            continue;
+        }
+        if (r->function_def_number == 0) {
+            continue;  // 纯声明留到第二遍
+        }
+        llvm::Function* fn = declare_routine(r, module, /*is_kernel=*/false);
+        device_functions[r] = fn;
+        if (r->source_corresp.name != nullptr) {
+            by_name.emplace(r->source_corresp.name, fn);
+        }
+    }
+}
+
+// KI-5 第二遍：纯声明——同名则复用有定义那份（前向引用），否则独立建。
+// 独立建出来的是无 body 的函数，是否报错由 require_called_device_functions_defined
+// 按「有没有被调用」决定。
+void declare_declared_only_device_functions(
+    a_scope_ptr file_scope, llvm::Module& module,
+    std::unordered_map<a_routine_ptr, llvm::Function*>& device_functions,
+    std::unordered_map<std::string, llvm::Function*>& by_name) {
+    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
+        if (!has_attribute(r->source_corresp.attributes, kCoolDeviceAttributeName)) {
+            continue;
+        }
+        if (r->function_def_number != 0) {
+            continue;  // 已在第一遍建好
+        }
+        const char* name = r->source_corresp.name;
+        auto named = name != nullptr ? by_name.find(name) : by_name.end();
+        if (named != by_name.end()) {
+            device_functions[r] = named->second;  // 前向声明 → 复用有定义那一份
+            continue;
+        }
+        llvm::Function* fn = declare_routine(r, module, /*is_kernel=*/false);
+        device_functions[r] = fn;
+        if (name != nullptr) {
+            by_name.emplace(name, fn);
+        }
+    }
+}
+
+// KI-5：建立 device routine → LLVM 函数的映射。
+//
+// 同名「声明 + 定义」在 EDG IL 里是**两条独立 routine 记录**，而 declare_routine 每次都
+// Function::Create 一个新对象。若各建一个，调用点一旦绑定到声明那条，就会调到一个永远
+// 没有 body 的函数（改动前该函数被末尾兜底成「返回 0」—— 静默错值）。
+// 故分两遍：先建有定义的，再让纯声明复用同名函数。
+std::unordered_map<a_routine_ptr, llvm::Function*> declare_device_functions(a_scope_ptr file_scope,
+                                                                            llvm::Module& module) {
+    std::unordered_map<a_routine_ptr, llvm::Function*> device_functions;
+    std::unordered_map<std::string, llvm::Function*> by_name;
+    declare_defined_device_functions(file_scope, module, device_functions, by_name);
+    declare_declared_only_device_functions(file_scope, module, device_functions, by_name);
+    return device_functions;
+}
+
+// KI-5：全部函数体发射完毕**之后**才检查「只有声明、却被调用」的设备函数。
+// 必须放在最后——前向引用的调用点翻译早于其定义体填充，就地检查会误报
+// （device_call.cu 的 forward_use 正是「声明 → 调用 → 定义」）。
+void require_called_device_functions_defined(
+    a_scope_ptr file_scope,
+    const std::unordered_map<a_routine_ptr, llvm::Function*>& device_functions) {
+    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
+        auto it = device_functions.find(r);
+        if (it == device_functions.end()) {
+            continue;
+        }
+        llvm::Function* fn = it->second;
+        if (!fn->isDeclaration() || fn->use_empty()) {
+            continue;  // 有 body；或声明了但从没被调用（coolrt 会成批声明内建，不能误伤）
+        }
+        const char* name = r->source_corresp.name != nullptr ? r->source_corresp.name : "<unnamed>";
+        fail(std::string("调用了只有声明、没有定义的设备函数 ") + name,
+             r->source_corresp.decl_position);
+    }
+}
+
 // 发射文件作用域里的全部 routine（M5.4）：设备函数先声明再填 body，最后建内核。
 // 分遍的原因：设备函数之间可能前向/相互调用，必须先有全部声明才能解析调用目标。
 void emit_all_routines(
@@ -2519,18 +2604,21 @@ void emit_all_routines(
     const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& constant_globals,
     const std::unordered_map<a_variable_ptr, llvm::GlobalVariable*>& device_globals,
     unsigned* kernel_count) {
-    std::unordered_map<a_routine_ptr, llvm::Function*> device_functions;
-    for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
-        if (has_attribute(r->source_corresp.attributes, kCoolDeviceAttributeName)) {
-            device_functions[r] = declare_routine(r, module, /*is_kernel=*/false);
-        }
-    }
+    const std::unordered_map<a_routine_ptr, llvm::Function*> device_functions =
+        declare_device_functions(file_scope, module);
     for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
         auto it = device_functions.find(r);
-        if (it != device_functions.end()) {
-            define_routine_body(r, it->second, module, constant_globals, device_globals,
-                                device_functions);
+        if (it == device_functions.end()) {
+            continue;
         }
+        // KI-5：只有声明、没有定义的设备函数**不发射函数体**。若照旧发射，
+        // define_routine_body 末尾的「非 void 函数补返回零值」兜底会把它变成一个
+        // 合法的空函数（返回 0）—— 调用点既不报错也不链接失败，是纯静默错值。
+        if (r->function_def_number == 0) {
+            continue;
+        }
+        define_routine_body(r, it->second, module, constant_globals, device_globals,
+                            device_functions);
     }
     for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
         if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
@@ -2540,6 +2628,7 @@ void emit_all_routines(
         define_routine_body(r, fn, module, constant_globals, device_globals, device_functions);
         ++(*kernel_count);
     }
+    require_called_device_functions_defined(file_scope, device_functions);
 }
 
 // M3.2：__constant__ 变量 → addrspace(4) 全局。

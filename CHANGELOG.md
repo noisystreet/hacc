@@ -357,6 +357,25 @@
   旁边**（新增 `sibling_with_ext`），不再污染 cwd。移除已无用的 `text_explicit` 字段。
   相关 golden 测试本就显式传 `--emit-il-text=`，断言不变。
 
+### Fixed
+
+- **调用「只有声明、没有定义」的 `__device__` 函数不再静默返回 0**（KI-5，详见
+  `docs/known-issues.md`）：此前 `emit_all_routines` 对所有带 `cool_device` 属性的 routine
+  无条件发射函数体，「仅声明」那条被末尾兜底补成 `ret 0` 的合法空函数——编译、链接、运行
+  全部成功而结果恒为 0（实测 `sqrtf(4.0)` 返回 0）。现改为：仅声明不发射函数体，并在全部
+  函数体发射完后统一检查「被引用过却仍无定义」的设备函数，报
+  `调用了只有声明、没有定义的设备函数 <name>`。
+  **只声明、从未调用**的情况不报错（coolrt 将成批声明数学内建，不能因此让任何 `#include`
+  都编不过）。
+- **同名「声明 + 定义」不再产生重复 PTX 符号**：`declare_routine` 每次都 `Function::Create`
+  新对象，导致 `device_call.cu` 的 PTX 里出现两个同名 `.func`（一个声明、一个有 body）。
+  现在纯声明复用同名定义的 LLVM 函数。实测 ptxas 原本就能把调用配到有 body 的那份
+  （**数值一直是对的**），本条只消除隐患，不是修错值。
+- 新增回归：`tests/golden/negative/undefined_device_fn.cu`（负向，调用必须报错）、
+  `tests/golden/negative/declared_unused_device_fn.cu`（正向，不报错且 PTX 不留空函数体）、
+  `tests/golden/e2e/device_forward_ref.cu`（前向引用真机数值——M5.4 此前只有 PTX 文本断言，
+  从未验证过数值）。
+
 ### Added
 
 - 项目骨架（M0）：CMake 构建、`Makefile` 质量入口（`make check`）、`.clang-format`、

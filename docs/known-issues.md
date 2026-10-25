@@ -278,12 +278,14 @@ cuCtxSetLimit(0x00, 64UL * 1024);   // 必须在 context 建好之后（比如�
 
 ## KI-5 「有声明、无定义」的 `__device__` 函数被静默编译成**返回 0 的空函数**
 
-- **状态**：❌ **未修复**（2026-10 由 S2 T3 的 T0 探针发现）
+- **状态**：✅ **已修复**（2026-10-25；由 S2 T3 的 T0 探针发现，当轮修复）
 - **发现于**：S2 数学内建的 T0 摸底（`docs/s2-plan.md` §2.3）
 - **影响面**：任何**只声明、未定义**的 `__device__` 函数。典型场景：用户自己写
   `__device__ float sqrtf(float);` 想调设备端数学库；以及**将来 coolrt 补数学内建声明**时
 - **严重度**：**高**（编译、链接、运行全部成功，结果恒为 0 —— 纯静默错值）
-- **回归测试**：暂无（修复时补，见「验收方式」）
+- **回归测试**：`tests/golden/negative/undefined_device_fn.cu`（负向：调用必须报错）、
+  `tests/golden/negative/declared_unused_device_fn.cu`（正向：只声明不调用不报错、
+  PTX 里也不留空函数体）、`tests/golden/e2e/device_forward_ref.cu`（前向引用数值）
 
 ### 症状
 
@@ -330,27 +332,42 @@ PTX 里看到的不是外部引用，而是一个**定义**：
 **直接后果**：S2 T3（数学内建）**绝不能只在 coolrt 补声明**。那样会把当前的
 `identifier "sqrtf" is undefined`（fail loud）降级成「静默返回 0」，是严重退化。
 
-### 当前绕过
+### 已采用的修复（2026-10-25）
 
-不使用「只声明无定义」的设备函数；数学内建等 hacc 侧映射表落地（T3）后再用。
+改动都在 [`il_to_llvm.cpp`](../src/device/il_to_llvm.cpp)：
 
-### 修复方向
+1. **不再为「仅声明」的设备函数发射函数体**（`emit_all_routines`）：去掉之后，末尾那个
+   「非 void 函数补返回零值」的兜底不会再把它变成一个合法的空函数。
+2. **全部 body 发射完毕后统一报错**（`require_called_device_functions_defined`）：对仍是
+   LLVM declaration、且**被引用过**（`!use_empty()`）的设备函数 `fail`，信息形如
+   `调用了只有声明、没有定义的设备函数 sqrtf`。
 
-在 `emit_all_routines` / `define_routine_body` 里用**现成的可靠标志** `r->function_def_number == 0`
-判断「仅声明」，然后二选一：
+   **判据为什么用「被调用」而不是「无定义」**：coolrt 将来会成批声明数学内建
+   （`sqrtf`/`sinf`/…），用户只用到其中几个。若「无定义即报错」，任何 `#include` 都会炸
+   ——那是把修复做成新缺陷。`declared_unused_device_fn.cu` 锁定这个方向。
+3. **检查必须放在最后**：前向引用（声明 → 调用 → 定义）时，调用点的翻译早于定义体填充，
+   就地检查会误报——`device_call.cu` 的真实结构立刻把这个错误暴露了出来（第一版实现就
+   栽在这里）。
 
-1. **fail loud（推荐）**：报「设备函数 `<name>` 只有声明、没有定义」并指向声明位置。
-   hacc 不做跨模块/跨 TU 链接（ADR 0007），外部设备函数无处可解析，报错是唯一诚实的结局。
-2. 退而求其次：不发射 body，保留 LLVM `declare`（`ExternalLinkage`），让 PTX 出
-   `.extern .func`，把问题推到 `ptxas`/链接期——但错误信息会远离源头。
+### 顺带修掉的隐患：同名声明/定义会产生重复 PTX 符号
 
-注意：`function_def_number` 已经在 `define_routine_body` 里被使用，无需新增探针。
+「声明」与「定义」在 IL 里是**两条独立 routine 记录**，而 `declare_routine` 每次都
+`Function::Create` 一个新对象。原始实现下 `device_call.cu` 的 PTX 里会出现**两个同名
+`forward_use`**：一个是声明（`.func ... forward_use(...) ;`），一个有 body。
 
-### 验收方式
+**实测结论（避免夸大）**：ptxas 恰好把调用解析到有 body 的那份，所以**前向引用的数值
+本来就是正确的**——这不是一条错值缺陷，只是重复符号隐患。现在纯声明会复用同名定义的
+LLVM 函数（`declare_device_functions` 先建有定义的），重复符号消失。
 
-新增用例断言「不得静默返回 0」，二选一即可：
+### 验证
 
-- 编译失败且错误信息包含函数名与「只有声明」字样；或
-- （若走方案 2）`ptxas`/链接失败。
-
-**不接受**「编译链接运行都成功但结果恒为 0」。反向验证：故意把修复去掉，用例必须变红。
+- 负向：`undefined_device_fn.cu` → 编译失败，报
+  `调用了只有声明、没有定义的设备函数 sqrtf`
+- 正向：`declared_unused_device_fn.cu` → 编译通过，且 PTX 里没有 `sqrtf` / `cosf` 的 `.func`
+- 前向引用：`device_forward_ref.cu` → 真机数值 `out[i] == i*2 + 1`
+- 全量 `make check`：**222/222** 通过
+- **反向验证（如实记录）**：
+  - 去掉 `require_called_device_functions_defined` → 负向用例变红（编译又"成功"了）✅
+  - 禁用「纯声明复用同名定义」→ 前向引用用例**仍通过**（ptxas 本来就能把声明与定义配对）。
+    说明该用例锁的是「别退化成调到空函数」，而不是「修复前是坏的」——不要把它当作
+    重复符号缺陷的回归证据。

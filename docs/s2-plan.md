@@ -118,8 +118,9 @@ PTX 里生成的不是 `.extern .func` 外部引用，而是一个 `.visible .fu
 
 1. **绝不能只做 coolrt 声明**。当前 `identifier undefined` 是 fail loud；补声明却不加 hacc 映射，
    会把「编不过」降级成「静默返回 0」——严重退化。
-2. 因此 T3 必须**先修 KI-5**（让「仅声明」fail loud），再加 hacc 侧「内建名 → intrinsic」映射表，
-   两件事绑定做。
+2. **KI-5 已修复**（2026-10-25）：现在「只声明、却被调用」会在编译期 fail loud，不再静默
+   返回 0。T3 因此可以安全推进 —— coolrt 补声明 + hacc 侧「内建名 → intrinsic」映射表。
+   注意映射必须生效于调用之前，否则会命中 fail loud（属于预期的中间状态，不是故障）。
 3. 对照组已验证：带 body 的 `__device__` 函数正常生成真 `.func` + `call.uni`，所以问题精确定位在
    「有无定义」的判定，不是设备函数整体不可用。
 
