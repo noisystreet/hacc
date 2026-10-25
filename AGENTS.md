@@ -54,6 +54,13 @@ make lint       # clang-tidy（未安装时跳过）
 - 优先遵循仓库既有风格；格式化由 `.clang-format` 统一。
 - 公开前缀：hacc 自身工具/库符号用 `hacc`/`hacc::`；**生成的**主机代码符号用 `__cool_` 前缀，
   随附运行时头的符号置于 `hacc::` 命名空间。
+- 生成代码的符号命名（**外部契约**，改动即破坏兼容）：
+  - 内核注册描述 → `__cool_reg_<kernel>`；`__shared__` 内核内变量 → `__shared_<name>`；
+  - `__constant__` / `__device__` 文件作用域变量 → **原名**（运行时按名 `cuModuleGetGlobal` 解析）；
+  - 符号类 API 包装 → `__cool_sym_<name>` / `__cool_memcpy_to_symbol_<name>` /
+    `__cool_memcpy_from_symbol_<name>` / `__cool_get_symbol_address_<name>`。
+- **`COOL_ENABLE_CUDA_ALIAS`**：运行时头里那批 `#define cudaXxx coolXxx` 别名只在定义该宏时可见。
+  hacc 改写后的主机源不再依赖别名（都改写成包装调用），**不要指望别名默认可用**。
 - 优先 RAII（`std::unique_ptr` + 自定义 deleter）；使用固定宽度整型，避免隐式窄化。
 - 编译器诊断面向教学：错误信息应包含阶段、源位置与成因，避免只抛底层 LLVM/EDG 原始信息。
 - 行为变更必须有测试覆盖；对 golden 文件（PTX / 主机桩）的变更需显式说明。
@@ -69,3 +76,10 @@ make lint       # clang-tidy（未安装时跳过）
 - 语言范围变更更新 [ADR 0004](docs/adr/0004-cuda-cpp-subset-scope.md) 与方案 §9。
 - 架构/流水线变更更新 `docs/compiler-implementation-plan.md` 或新增 ADR。
 - 用户可见变更更新 `CHANGELOG.md`。
+
+## Workflow Conventions
+
+- **语言**：文档 / 注释 / 提交信息用中文；代码标识符用英文。
+- **提交信息**：Conventional Commits（如 `feat(device): ...`）。**未经要求不 push**。
+- **禁止破坏性 git 操作**：`reset --hard`、`checkout --`、强制推送等。
+- 新增源文件先 `clang-format -i`；提交前跑 `make check`（pre-commit 的 `project-check` 执行的也是它）。

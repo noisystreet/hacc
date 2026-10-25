@@ -371,7 +371,7 @@
       本轮实测到一个具体例证（2026-10-24，`nvidia_uvm` 未加载 → 宿主机 `modprobe` 前后各测一次）：
       - uvm 缺失时（`lsmod` 无 `nvidia_uvm`、`/dev/nvidia-uvm` 不存在、`/proc/devices` 无 510）：
         **coolrt 的 unit 测试是硬 FAIL**（`coolMalloc` 返回非 0），不是 SKIP —— 它没有 77 逃生口；
-        而 **hacc 的 GPU e2e 是 SKIP(77) → ctest 显绿**（即 m4-handoff §3.1 的假绿场景）。
+        而 **hacc 的 GPU e2e 是 SKIP(77) → ctest 显绿**（即 [dev-environment.md §1](dev-environment.md) 的假绿场景）。
       - 宿主机 `modprobe nvidia_uvm` 后（`/dev/nvidia-uvm` 于 22:02 出现、`cuInit` = 0、设备数 1）：
         两仓真机全绿（hacc 203/203、coolrt 15/15）。
       → C4 要分开的是**两件事**：hacc 侧「无设备 SKIP」必须与「初始化失败」区分，否则假绿；
