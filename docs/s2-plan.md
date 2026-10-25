@@ -1,9 +1,9 @@
 # S2 计划：进阶子集（模板 / 数学内建 / `__launch_bounds__`）
 
-> 状态：**进行中**（2026-10 立项；**T3、T4 已完成**；T1/T2 未开工）。
+> 状态：**进行中**（2026-10 立项；**T1、T3、T4 已完成**；T2 未开工）。
 > 上游：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) §S2 进阶（可选）。
 > 相关：[已知缺陷 KI-4](known-issues.md)（递归深度限制）、[ADR 0007](adr/0007-module-granularity-per-tu.md)（设备符号不跨 TU）。
-> 实测环境：RTX 4060 Laptop / sm_89 / 驱动 595.58.03 / `make check` 226/226。
+> 实测环境：RTX 4060 Laptop / sm_89 / 驱动 595.58.03 / `make check` 231/231。
 
 ## 1. 目标与范围
 
@@ -11,7 +11,7 @@ ADR 0004 的 S2 列了三块，本计划的判断是**它们的成本与收益�
 
 | 子项 | 决策 | 一句话理由 |
 | --- | --- | --- |
-| 模板 `__device__` 函数 | ✅ 做（T1） | EDG 已完成实例化，剩「跳过原型 + 处理重名」 |
+| 模板 `__device__` 函数 | ✅ **已完成**（T1） | 靠 `--instantiate=used` + 原型识别 + 签名唯一化 |
 | 数学内建 | ✅ 做（T3） | 真实代码高频使用，现状是直接编不过 |
 | `__launch_bounds__` | ✅ **已完成（T4）** | 实测原先**直接编不过**（非静默忽略）；已在 coolrt 头补空宏 |
 | 模板 kernel | ⚠️ 缓（T2，可砍） | 需改写器 + 桩注册 + mangling 三处联动，成本数倍 |
@@ -39,15 +39,21 @@ routine=twice ty_kind=8 ret_kind=2  p0_kind=2  device=1   ← twice<int>，已�
 `kind` 对照 `agent_space/edg/src/il_def.h` 的 `a_type_kind`：
 `1=tk_void`、`2=tk_integer`、`4=tk_float`、`7=tk_pointer`、`8=tk_routine`、**`15=tk_template_param`**。
 
-**三条关键结论：**
+**四条关键结论**（2026-10 实测复核；第 1 条推翻了立项时的判断）：
 
-1. **实例已经是普通函数**。`twice<float>` 的签名就是 `float(float)`，现有
-   `il_to_llvm` 管线完全能翻译它——不需要任何模板类型映射。
-2. **只有「模板原型」撞车**。它带着 `T`（`tk_template_param`）进入
-   [`map_type`](../src/device/il_to_llvm.cpp) 的 `default:` 分支，报
-   「不支持的类型 kind（M1.2.3 仅覆盖标量与指针）」。
-3. **同名的三个 routine 都叫 `twice`**。`device_functions` 用 `a_routine_ptr` 做 key
-   所以内部查询没事，但 **LLVM 函数名必须唯一**——这是 T1 的第二个工作点。
+1. **实例不是「普通函数」——它没有函数体**。`twice<float>` 的签名确实是 `float(float)`，
+   但 `function_def_number == 0`、`memory_region == 0`，即 IL 里只有声明。不加
+   `--instantiate=used` 时 `il_to_llvm` 根本翻不出它，会在调用点按 KI-5 报
+   「调用了只有声明、没有定义的设备函数」。加该选项后原型与实例都变成
+   `defno=1 region=1 defined=1`，正常路径即可发射。
+2. **模板原型靠两个 bit 识别**：`is_template_function` 对原型和实例**都为 TRUE**
+   （单用会误伤实例），再叠加 `is_prototype_instantiation`（只有原型为 TRUE）。
+   见 §6 的实测表。
+3. **原型的 `map_type` 撞车仍在**——`twice` 的签名含 `tk_template_param`（=15），
+   必须在声明阶段跳过。
+4. **同名冲突**：三个 routine 都叫 `twice`，`device_functions` 用 `a_routine_ptr` 做 key
+   所以内部查询没事，但 LLVM 名字必须唯一。现已按 LLVM 签名生成稳定后缀
+   （`twice__float_float` / `twice__i32_i32`），不再依赖 LLVM 自动改名。
 
 ### 2.2 模板 kernel：坑更隐蔽
 
@@ -139,22 +145,27 @@ PTX 里生成的不是 `.extern .func` 外部引用，而是一个 `.visible .fu
 
 **验收**：三项各有明确结论，写回本文件 §2.3，不留下「大概吧」。
 
-### T1 模板 `__device__` 函数（1–2d，收益/成本比最高）
+### T1 模板 `__device__` 函数 ✅ **已完成**（2026-10；`make check` 231/231）
 
-1. **找到 EDG 判定「模板原型」的可靠标志**（`a_routine` 或其 `extra_info`/`source_corresp`
-   里的字段），而非签名嗅探——理由见 §2.2。
-2. 在 [`emit_all_routines`](../src/device/il_to_llvm.cpp) 的三处遍历中跳过模板原型，
-   并给**明确诊断**：若某原型没有任何实例，提示「模板未被使用」，而不是静默跳过。
-3. **解决同名冲突**：device 函数按签名生成唯一 LLVM 名（mangled 或后缀）。
-   kernel 名**不能动**（是 `cuModuleGetFunction` 的外部契约）。
-4. `map_type` 遇到 `tk_template_param` 时给出可理解的错误（「模板原型未被实例化」），
-   替代现在的「不支持的类型 kind」。
+实际落地与立项时的任务分解对照：
 
-**风险**：第 1 点是唯一不确定项。若无可靠标志，退路是「签名含 `tk_template_param` 跳过」
-+「同名多签名按有无 body / 是否被调用判定」，但这属启发式，须先 spike 确认再动手。
+1. **可靠标志**：`is_template_function && is_prototype_instantiation`（spike 结论见 §6）。
+2. **跳过原型 + 明确诊断**：`emit_all_routines` 的三处遍历都跳过原型；
+   `warn_uninstantiated_templates` 对「一套实例都没有」的模板提示
+   `模板 X 在本 TU 内未被实例化（无具体类型的调用），已跳过`。
+3. **同名唯一化**：device 函数按 LLVM 签名生成稳定名（`twice__float_float` / `twice__i32_i32`），
+   不再依赖 LLVM 自动改名；**kernel 名不动**（`cuModuleGetFunction` 的外部契约）。
+4. **前提修正**：真正的开关是 **`coolfe++` 的 `--instantiate=used`**——不加它，EDG 只把
+   实例写成声明，就算过了 `map_type` 也没函数体可用。（`tk_template_param` 的 `map_type`
+   错误消息未改：原型现在在到达 `map_type` 之前就被跳过了。）
 
-**验收**：`tests/golden/e2e/template_device.cu`——`twice<float>` 与 `twice<int>` 同文件共存、
-真机数值正确；反向验证（改期望值或改实参）必须变红。
+**已覆盖**：`tests/golden/e2e/template_device.cu`（`twice<float>` 推导 + `twice<int>` 显式，真机 64 元素）、
+`device_template_instance_naming`（锁死实例命名）、`device_template_kernel_prototype_*`
+（模板 kernel 原型不再产空 `.entry`，改为提示 + 拒绝发射）。
+
+**反向验证**：去掉 `--instantiate=used` → `e2e_hacc_template_device_build` 与
+`device_template_instance_naming` 均变红（实测报告「调用了只有声明、没有定义的设备函数 twice」）；
+把期望值改成 `5.0f * i` → 数值 63/64 不匹配。
 
 ### T2 模板 kernel（2–4d，建议缓）
 
@@ -251,20 +262,25 @@ T0 摸底（0.5d）
 - **为支持模板而引入 C++ ABI mangling 库** —— device 函数名只需模块内唯一，
   自己定一套简单后缀即可，不引入 Itanium mangling 的复杂度。
 
-## 6. 开工前必须先做的事
+## 6. 开工前的 spike —— 已完成（2026-10）
 
-**唯一阻塞项：T1 的「模板原型识别」（spike，约 2h）。**
+T1 的「模板原型识别」spike 已做完，结论全部落地。**两处与立项预期相反**，留档备查：
 
-做法：临时在 `emit_all_routines` 打印 `a_routine` 的 `source_corresp` 与
-`extra_info` 中与模板相关的字段，对比以下三者的**稳定差异**：
+| routine | `defno` | `region` | `is_template_function` | `is_prototype_instantiation` | 签名 |
+| --- | --- | --- | --- | --- | --- |
+| `twice`（原型） | 0 → 1\* | 0 → 1\* | **1** | **1** | `ret=15 p=15` |
+| `twice<float>`（实例） | 0 → 1\* | 0 → 1\* | **1** | **0** | `ret=4 p=4` |
+| `kt`（模板 kernel 原型） | 0 | 0 | **1** | **1** | `ret=1 p=7` |
+| `k_tmpl`（普通 kernel） | 1 | 1 | **0** | 0 | `ret=1 p=7 p=2` |
 
-- `twice`（原型，签名含 `tk_template_param`）
-- `twice<float>`（实例，签名具体）
-- `kt`（原型，**签名被指针藏住，看起来正常**）
+\* 加 `--instantiate=used` 后的值。
 
-找不到可靠标志 → T1 从「小改」退化为「启发式」，需重新评估 T1 是否值得做。
-（同类教训：C11 的「递归设备函数前端拦截」就是基于未验证的假设立项，实测后发现
-前提根本不成立，见 KI-4。）
+1. **`--instantiate=used` 是前提**：不加时**实例也没有函数体**（`defno=0 region=0`），
+   §2.1 结论 1「实例已是普通函数、现有管线完全能翻译」因此被推翻。
+2. **可靠标志找到了**：`is_template_function && is_prototype_instantiation`。前者单独用
+   会误伤实例，后者只有原型为 TRUE；且 `kt` 命中同一组合，不需要签名嗅探。
+3. 教训与 C11 的 KI-4 同类：**立项时的「实例化已完成」只是看了签名、没看 body**。
+   探针必须打到 `function_def_number` / `memory_region`，否则「能翻」是错觉。
 
 ## 7. 验收总则
 

@@ -162,6 +162,11 @@ std::vector<std::string> build_cpfe_args(const EdgInvokeOptions& opts, bool for_
     // --g++：GNU C++ 扩展（__attribute__ 等）；-N：保留未降级 IL（信息最全）。
     args.push_back("--g++");
     args.push_back("-N");
+    // S2 T1：必须让 EDG 把**用到的**模板实例化出来。默认行为下，模板实例在 IL 里
+    // 只有声明（function_def_number == 0、memory_region == 0），coolicc 根本拿不到
+    // 函数体，会按 KI-5 报「调用了只有声明、没有定义的设备函数」。加 --instantiate=used
+    // 后原型与实例都带 body，模板 device 函数才有可能被翻译成 PTX。
+    args.push_back("--instantiate=used");
     // 设备编译标识宏（对标 nvcc 的 __CUDACC__）：让运行时头 device_builtins.h 暴露
     // 设备端内建（threadIdx / __syncthreads 等）。coolfe++ 是设备前端，故无条件定义。
     args.push_back("-D__COOLCC__");

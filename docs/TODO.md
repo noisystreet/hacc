@@ -19,9 +19,9 @@
 > **C12（MMA / Tensor Core）A0–A5 全部完成，ADR 0008 已批准**——编译路径通（PTX 5 条 `wmma.*` + ptxas 汇编）、
 > 真机数值验证通过（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
 > 并做了「把 A/B 传反必须变红」的反向验证）、三条红线已登记 KI-3；
-> **S2 进阶子集已开工：T3（16 个 f32 数学内建）、T4（`__launch_bounds__`）已完成**，
-> T1（模板 `__device__` 函数）/ T2（模板 kernel）未开工，见 [s2-plan.md](s2-plan.md)；
-> `make check` **226/226**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
+> **S2 进阶子集：T1（模板 `__device__` 函数）、T3（16 个 f32 数学内建）、T4（`__launch_bounds__`）已完成**，
+> T2（模板 kernel）未开工，见 [s2-plan.md](s2-plan.md)；
+> `make check` **231/231**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
 > **里程碑 M5 的阻塞项已清空**（C4 已落地；C5 决策为不设 CI、只用本地质量门）。
 
 ---
@@ -383,12 +383,15 @@
         两仓真机全绿（hacc 203/203、coolrt 15/15）。
       → C4 要分开的是**两件事**：hacc 侧「无设备 SKIP」必须与「初始化失败」区分，否则假绿；
         coolrt 侧硬 FAIL 本身安全，但错误信息应指向 uvm（现在只报 malloc 失败，指向错方向）。
-- [ ] **S2 进阶子集（可选）—— 已立项；T3 / T4 已完成，T1 / T2 未开工**（计划见 [s2-plan.md](s2-plan.md)）：
+- [ ] **S2 进阶子集（可选）—— 已立项；T1 / T3 / T4 已完成，T2 未开工**（计划见 [s2-plan.md](s2-plan.md)）：
       ADR 0004 的 S2 三块**成本差异极大**，已按实测拆分排期（砍掉 T2 约 3–5 天，含 T2 约 5–9 天）：
-      - **T1 模板 `__device__` 函数**（优先，收益/成本比最高）：实测 EDG **已完成实例化**——
-        `twice<float>` / `twice<int>` 在 IL 里已是普通函数（`float(float)` / `int(int)`），
-        现有管线能翻；**只有「模板原型」撞车**（参数类型 `tk_template_param`=15 → `map_type`
-        的 default 分支）。另需处理**同名冲突**：三个 routine 都叫 `twice`，LLVM 函数名须唯一。
+      - **T1 模板 `__device__` 函数**：✅ **已完成**。三条实测结论（与原判断不同）：
+        ① 前提是 `coolfe++` 加 `--instantiate=used`——**不加时实例也只有声明、没有 body**
+        （原先「EDG 已完成实例化、实例已是普通函数」的判断只比了签名，没看 `function_def_number`）；
+        ② 模板原型靠 `is_template_function && is_prototype_instantiation` 识别（单用前者会
+        误伤实例），同时覆盖签名被指针藏住的模板 kernel 原型；③ device 函数按 LLVM 签名唯一化
+        （`twice__float_float` / `twice__i32_i32`），kernel 名不动。模板 kernel 原型已从
+        「静默产出空 `.entry`」改为提示 + 跳过。详见 [s2-plan.md](s2-plan.md) §T1。
       - **T3 数学内建**：✅ **已完成**——16 个 f32 内建各自映射到**单条 PTX 指令**
         （`sqrt.rn` / `abs` / `min` / `max` / `cvt.rmi·rpi·rzi` / `fma.rn` / `rcp.rn` /
         `rsqrt.approx` / `div.approx` / `ex2·lg2·sin·cos.approx`）；精确档用 `==`、近似档容差 1e-4。

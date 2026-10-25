@@ -6,6 +6,30 @@
 
 ### Added
 
+- **模板 `__device__` 函数可用了（S2 T1）**：`template <typename T> __device__ T twice(T v)`
+  现在能编能跑，隐式推导（`twice(x)`）与显式实参（`twice<int>(3)`）都支持，同文件多个实例共存。
+  三个要点：
+
+  1. **前提是 `coolfe++` 加 `--instantiate=used`**。默认行为下 EDG 把模板实例只写成**声明**
+     （`function_def_number == 0`、`memory_region == 0`），coolicc 拿不到函数体，会在调用点
+     按 KI-5 报「调用了只有声明、没有定义的设备函数」。这一点推翻了 S2 立项时「实例已是
+     普通函数」的判断——那次摸底只比了签名、没看有没有 body。
+  2. **模板原型靠两个 bit 识别**：`is_template_function` 对原型与实例**都为真**，必须再叠加
+     `is_prototype_instantiation`（只有原型为真）。这条判定同时覆盖签名被指针藏住的
+     模板 kernel 原型（`kt(T*)`），不需要签名嗅探。
+  3. **同名唯一化**：device 函数按 LLVM 签名生成稳定名（`twice__float_float` /
+     `twice__i32_i32`），不再依赖 LLVM 自动改名（`twice` / `twice1` 顺序敏感且不可读）。
+     kernel 名不动——那是 `cuModuleGetFunction` 的外部契约。
+
+  另外把「模板 kernel 原型」从**静默产出空 `.entry`**（只有 `ret`，按名调用等于空实现）
+  改成：跳过发射 + 提示 `模板 kt 在本 TU 内未被实例化（无具体类型的调用），已跳过`。
+
+  回归：`tests/golden/e2e/template_device.cu`（真机 64 元素）+ `device_template_instance_naming`
+  （锁死实例命名）+ `device_template_kernel_prototype_{exit,message}`。
+  **反向验证已做**：去掉 `--instantiate=used` 后 `e2e_hacc_template_device_build` 与
+  `device_template_instance_naming` 双双变红（报「调用了只有声明、没有定义的设备函数 twice」）；
+  把期望值改成 `5.0f * i` 后数值 63/64 不匹配。`make check` **231/231**、零 SKIP。
+
 - **数学内建可用了（S2 T3）**：16 个 f32 内建全部映射到**单条 PTX 指令**，`--emit=ptx` 逐个
   核对过：`sqrtf`→`sqrt.rn.f32`、`fabsf`→`abs.f32`、`fminf`/`fmaxf`→`min`/`max.f32`、
   `floorf`/`ceilf`/`truncf`→`cvt.rmi`/`rpi`/`rzi`、`__fmaf_rn`→`fma.rn.f32`、

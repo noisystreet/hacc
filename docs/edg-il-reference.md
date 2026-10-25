@@ -62,9 +62,18 @@ M1.2 关心的核心表项：
 | `defined` | bit | 函数体是否已完整扫描 |
 | `has_been_defined` | bit | 是否曾定义 |
 | `is_inline` | bit | 是否 inline 候选 |
+| `is_template_function` | bit | 是函数模板的**原型或实例**（两者都为 TRUE，单用会误伤实例） |
+| `is_prototype_instantiation` | bit | **仅原型**为 TRUE；与上式叠加才是「模板原型」的可靠标志 |
+| `is_specialized` | bit | 是否显式特化 |
+| `explicit_instantiation` | bit | 显式实例化（`template ... twice<float>(...)`） |
 
 > **内核识别**：`a_routine` 的 `source_corresp.attributes` 链中是否有 `name == "cool_global"`。
 > **函数体**：经 `function_def_number` → `function_def_table` → 对应 `a_scope`（见 §2.6）。
+> **模板（S2 T1 实测）**：默认 cpfe 下，模板实例在 IL 里**只有声明**
+> （`function_def_number == 0`、`memory_region == 0`）；加 `--instantiate=used` 后原型与实例
+> 都变成 `defno=1 region=1 defined=1`。模板原型判定用
+> `is_template_function && is_prototype_instantiation`；注意 `kt(T*)` 这类模板 kernel 的
+> **签名看不出模板**（T 藏在指针里），只能靠这两个 bit。
 
 ### 2.2 `a_statement`（il_def.h:16516）—— 语句
 

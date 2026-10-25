@@ -62,8 +62,10 @@ PTX 产出 5 条 `wmma.*` 指令、`ptxas` 汇编通过；单 warp 的 `D = A×B
 `logf` / `powf` **一律不收录**——调用时明确报错并建议改用近似内建，绝不静默降级成 `.approx`。
 `__launch_bounds__(…)` 现在可编（coolrt 侧提供两端可见空宏），但**不映射**到 PTX
 `.maxntid` / `.minnctapersm`（`-O0`、不做寄存器压力优化，映射无收益）。
-**尚未支持**：模板 `__device__` 函数（T1——EDG 已完成实例化，只剩「跳过模板原型 + 同名
-routine 唯一化」）与模板 kernel（T2，计划建议缓/砍）。详见 [docs/s2-plan.md](docs/s2-plan.md)。
+**模板 `__device__` 函数支持了**：隐式推导与显式实参都行，同文件多个实例共存（实例按签名
+唯一化为 `twice__float_float` 这类名字，kernel 名不变）。前提是前端带 `--instantiate=used`
+（默认下 EDG 只把实例写成声明、没有函数体）；**模板 kernel（T2）仍未支持**。
+详见 [docs/s2-plan.md](docs/s2-plan.md)。
 
 主机编译默认调用 `g++`；可用 `--host-cxx <path>`（或 `$HACC_HOST_CXX`）切到 `clang++`
 （已验证可编）。**前端**系统头探测仍固定取 GCC 的头：EDG 按 GCC 语义解析，clang 的
@@ -96,7 +98,7 @@ build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
 | `<stem>.hacc.gen.cpp` | 桩 + host（主机编译的实际输入） | — |
 | `<stem>.ptx` | 设备映像 | `.ptx` |
 
-`make check`：**226/226 全绿、零 SKIP**（golden / e2e / samples / 诊断用例；`make check-strict` 让任何 SKIP 直接失败）。子集外的构造一律
+`make check`：**231/231 全绿、零 SKIP**（golden / e2e / samples / 诊断用例；`make check-strict` 让任何 SKIP 直接失败）。子集外的构造一律
 **fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `double` 等未覆盖的
 原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
 [known-issues.md](docs/known-issues.md)。

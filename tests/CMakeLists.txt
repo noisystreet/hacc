@@ -587,6 +587,46 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "launchBounds OK")
 
+        # S2 T1 e2e：模板 device 函数。两个实例同名不同签名（twice<float> / twice<int>）。
+        # 反向验证：去掉 edg_invoke.cpp 的 --instantiate=used，本用例在 coolicc 阶段报
+        # 「调用了只有声明、没有定义的设备函数 twice」；把期望值改成 5*i 则数值必须变红。
+        set(_e2e_tmpl_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_template_device_run")
+        add_test(NAME e2e_hacc_template_device_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/template_device.cu"
+                    -o "${_e2e_tmpl_exe}")
+        add_test(NAME e2e_hacc_template_device_run
+            COMMAND "${_e2e_tmpl_exe}")
+        set_tests_properties(e2e_hacc_template_device_run PROPERTIES
+            DEPENDS e2e_hacc_template_device_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "tmplDevice OK")
+
+        # S2 T1：实例命名必须**稳定**（不靠 LLVM 自动改名 twice/twice1）。
+        # 锁住两次：改回自动改名（出现 twice1）或丢失某一实例，都应该失败。
+        add_test(NAME device_template_instance_naming
+            COMMAND sh -c "\"$1\" --emit=ptx \"$2\" -o \"$3\" \
+                           && grep -q 'twice__float_float' \"$3\" \
+                           && grep -q 'twice__i32_i32' \"$3\" \
+                           && ! grep -q 'twice1' \"$3\""
+                    _ $<TARGET_FILE:hacc>
+                      "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/template_device.cu"
+                      "${CMAKE_CURRENT_BINARY_DIR}/template_device_naming.ptx")
+
+        # S2 T1 负向：模板 kernel 原型没有实例化上下文，必须提示并**不**发射空 entry
+        # （曾经（探针阶段）会得到一个只有 ret 的空 .entry）。
+        # 退出码与消息分开验证（WILL_FAIL 与 PASS_REGULAR_EXPRESSION 会互相翻转）。
+        set(_tmpl_kernel_proto
+            "${CMAKE_CURRENT_SOURCE_DIR}/golden/negative/template_kernel_prototype.cu")
+        add_test(NAME device_template_kernel_prototype_exit
+            COMMAND hacc --emit=ptx "${_tmpl_kernel_proto}"
+                    -o "${CMAKE_CURRENT_BINARY_DIR}/template_kernel_prototype.ptx")
+        set_tests_properties(device_template_kernel_prototype_exit PROPERTIES WILL_FAIL TRUE)
+        add_test(NAME device_template_kernel_prototype_message
+            COMMAND sh -c "\"$1\" --emit=ptx \"$2\" -o \"$3\" 2>&1 \
+                           | grep -q 'kt 在本 TU 内未被实例化'"
+                    _ $<TARGET_FILE:hacc> "${_tmpl_kernel_proto}"
+                      "${CMAKE_CURRENT_BINARY_DIR}/template_kernel_prototype_msg.ptx")
+
         # KI-5 回归：调用「只有声明、没有定义」的设备函数必须**在调用点报错**，
         # 不得静默生成返回 0 的空函数体（曾经的行为：编译链接运行全过、结果恒为 0）。
         # 注意：WILL_FAIL 与 PASS_REGULAR_EXPRESSION 会互相翻转，故退出码与消息分开验证。

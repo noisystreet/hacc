@@ -22,6 +22,7 @@
 //   未覆盖的构造一律报错（fail loud），不静默产出错误 IR。
 #include "device/il_to_llvm.hpp"
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -2470,6 +2471,40 @@ llvm::FunctionType* make_kernel_function_type(a_type_ptr fn_type, llvm::LLVMCont
     return llvm::FunctionType::get(ret_ty, param_tys, false);
 }
 
+// S2 T1：EDG 要用**两个** bit 才能区分模板原型与真实实例——
+//   is_template_function        对「原型」与「实例」都为 TRUE，单用会把实例一起误伤；
+//   is_prototype_instantiation  只有「原型」为 TRUE。
+// 这条判定同时覆盖两类原型：签名含 tk_template_param 的模板 device 函数，以及
+// **签名被指针藏住**的模板 kernel（`kt(T*)` 的参数是 tk_pointer，签名嗅探必然漏判）。
+bool is_template_prototype(a_routine_ptr r) {
+    return r->is_template_function && r->is_prototype_instantiation;
+}
+
+// S2 T1：模板实例在 IL 里都沿用源名（`twice<float>` 与 `twice<int>` 都叫 "twice"），
+// 而 LLVM 不允许同名不同类型——默认行为是自动改名（twice / twice1），既依赖遍历顺序
+// 又不可读。这里按 LLVM 签名生成稳定后缀：`twice__float_float` / `twice__i32_i32`。
+// 只用于设备函数：内核名是 cuModuleGetFunction 的外部契约，**不能改**。
+std::string template_instance_name(const char* base, llvm::FunctionType* fn_ty) {
+    std::string sig;
+    auto append_type = [&sig](llvm::Type* t) {
+        std::string text;
+        llvm::raw_string_ostream os(text);
+        t->print(os);
+        os.flush();
+        for (char c : text) {
+            if (std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_') {
+                sig.push_back(c);
+            }
+        }
+    };
+    append_type(fn_ty->getReturnType());
+    for (llvm::Type* p : fn_ty->params()) {
+        sig.push_back('_');
+        append_type(p);
+    }
+    return std::string(base) + "__" + sig;
+}
+
 // 为每个参数建 alloca 并 store 入参（便于取址与赋值），
 // 并把 EDG 参数变量与 alloca 关联（按声明顺序）。
 void bind_parameters(llvm::Function* fn, a_scope_ptr body_scope, KernelContext& kc) {
@@ -2580,8 +2615,12 @@ llvm::Function* declare_routine(a_routine_ptr r, llvm::Module& module, bool is_k
         fail(is_kernel ? "内核的 routine 类型无效" : "设备函数的 routine 类型无效");
     }
     llvm::FunctionType* llvm_fn_ty = make_kernel_function_type(fn_type, ctx);
+    // S2 T1：模板实例按签名唯一化；内核名保持不变（外部契约，见函数头注释）。
+    const std::string fn_name = (!is_kernel && r->is_template_function)
+                                    ? template_instance_name(name, llvm_fn_ty)
+                                    : std::string(name);
     llvm::Function* fn =
-        llvm::Function::Create(llvm_fn_ty, llvm::GlobalValue::ExternalLinkage, name, &module);
+        llvm::Function::Create(llvm_fn_ty, llvm::GlobalValue::ExternalLinkage, fn_name, &module);
     if (is_kernel) {
         fn->setCallingConv(llvm::CallingConv::PTX_Kernel);
         fn->addFnAttr("nvptx-kernel");
@@ -2649,6 +2688,11 @@ void declare_defined_device_functions(
         if (!has_attribute(r->source_corresp.attributes, kCoolDeviceAttributeName)) {
             continue;
         }
+        // S2 T1：模板原型跳过——签名含 tk_template_param，map_type 无法映射；
+        // 真正可发射的是同名的具体实例（is_template_function 但非 prototype）。
+        if (is_template_prototype(r)) {
+            continue;
+        }
         if (r->function_def_number == 0) {
             continue;  // 纯声明留到第二遍
         }
@@ -2669,6 +2713,11 @@ void declare_declared_only_device_functions(
     std::unordered_map<std::string, llvm::Function*>& by_name) {
     for (a_routine_ptr r = file_scope->routines; r != nullptr; r = r->next) {
         if (!has_attribute(r->source_corresp.attributes, kCoolDeviceAttributeName)) {
+            continue;
+        }
+        // S2 T1：模板原型跳过——签名含 tk_template_param，map_type 无法映射；
+        // 真正可发射的是同名的具体实例（is_template_function 但非 prototype）。
+        if (is_template_prototype(r)) {
             continue;
         }
         if (r->function_def_number != 0) {
@@ -2724,6 +2773,44 @@ void require_called_device_functions_defined(
     }
 }
 
+// 同一 file scope 内是否存在 `proto` 同名的**具体实例**（is_template_function 但非 prototype）。
+bool has_concrete_instance(a_scope_ptr file_scope, a_routine_ptr proto) {
+    for (a_routine_ptr q = file_scope->routines; q != nullptr; q = q->next) {
+        if (q == proto || q->source_corresp.name == nullptr) {
+            continue;
+        }
+        if (std::strcmp(q->source_corresp.name, proto->source_corresp.name) != 0) {
+            continue;
+        }
+        if (q->is_template_function && !q->is_prototype_instantiation) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 是否「设备侧」的模板原型（模板 device 函数或模板 kernel）——
+// 只管这两类：头文件里其它模板（类模板等）与设备编译无关，不该产生噪音。
+bool is_device_side_template_prototype(a_routine_ptr r) {
+    if (r == nullptr || r->source_corresp.name == nullptr || !is_template_prototype(r)) {
+        return false;
+    }
+    return has_attribute(r->source_corresp.attributes, kCoolDeviceAttributeName) ||
+           has_attribute(r->source_corresp.attributes, kKernelAttributeName);
+}
+
+// S2 T1：原型被跳过后，若某个模板**一套实例都没有**，提示一句——否则用户会疑惑
+// 「我写的模板为什么没出现在 PTX 里」。有实例时不打印（正常情形，不该有噪音）。
+void warn_uninstantiated_templates(a_scope_ptr file_scope) {
+    for (a_routine_ptr p = file_scope->routines; p != nullptr; p = p->next) {
+        if (!is_device_side_template_prototype(p) || has_concrete_instance(file_scope, p)) {
+            continue;
+        }
+        std::fprintf(stderr, "hacc: 模板 %s 在本 TU 内未被实例化（无具体类型的调用），已跳过\n",
+                     p->source_corresp.name);
+    }
+}
+
 // 发射文件作用域里的全部 routine（M5.4）：设备函数先声明再填 body，最后建内核。
 // 分遍的原因：设备函数之间可能前向/相互调用，必须先有全部声明才能解析调用目标。
 void emit_all_routines(
@@ -2751,10 +2838,17 @@ void emit_all_routines(
         if (!has_attribute(r->source_corresp.attributes, kKernelAttributeName)) {
             continue;
         }
+        // S2 T1：模板 kernel 的原型不发射。它没有实例化上下文，签名里的 T 无处落地；
+        // 照旧建函数会得到一个只有 `ret` 的空 .entry —— 按名调用它等于静默空实现。
+        // 真正可启动的是同名的具体实例（如 `kt<float>`），它们不是 prototype。
+        if (is_template_prototype(r)) {
+            continue;
+        }
         llvm::Function* fn = declare_routine(r, module, /*is_kernel=*/true);
         define_routine_body(r, fn, module, constant_globals, device_globals, device_functions);
         ++(*kernel_count);
     }
+    warn_uninstantiated_templates(file_scope);
     require_called_device_functions_defined(file_scope, device_functions);
 }
 
