@@ -16,10 +16,12 @@
 >   它们补的是 **ADR 0004 §S0「控制流」** 的缺口，**不是**里程碑 M5 的完成信号。
 >
 > 当前真实进度（2026-10 复核）：**M0–M4 完成**；C7–C10（M5.1–M5.4）、B9/B9-2 与 C11 前半完成；
-> C12（MMA / Tensor Core）的 **A1/A2/A4 已完成**——编译路径通（PTX 5 条 `wmma.*` + ptxas 汇编）
-> 且**真机数值验证通过**（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
-> 并做了「把 A/B 传反必须变红」的反向验证）；
-> `make check` **215/215**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
+> **C12（MMA / Tensor Core）A0–A5 全部完成，ADR 0008 已批准**——编译路径通（PTX 5 条 `wmma.*` + ptxas 汇编）、
+> 真机数值验证通过（`D = A×B + C` 与 CPU 参考逐元素一致、`worst abs diff = 0`，
+> 并做了「把 A/B 传反必须变红」的反向验证）、三条红线已登记 KI-3；
+> **S2 进阶子集已开工：T3（16 个 f32 数学内建）、T4（`__launch_bounds__`）已完成**，
+> T1（模板 `__device__` 函数）/ T2（模板 kernel）未开工，见 [s2-plan.md](s2-plan.md)；
+> `make check` **226/226**、零 SKIP（另有 `make check-strict`：SKIP 即失败）；
 > **里程碑 M5 的阻塞项已清空**（C4 已落地；C5 决策为不设 CI、只用本地质量门）。
 
 ---
@@ -301,7 +303,12 @@
       绿但有 `⚠ N 个测试被 SKIP` 不算全过。
       **若将来要接 CI**，最小路径：只跑 `fmt-check + ccn + build + test`，无 GPU 时接受 SKIP 但
       必须把警告打出来；GPU 用例留给本地 `check-strict`；EDG 用镜像预装而非每次拉取。
-- [ ] **C6 面向教学的诊断格式**：阶段 / 源位置 / 成因的**具体输出格式**（Coding Rules 仅有原则）。
+- [x] **C6 面向教学的诊断格式**：**已定——`<文件:行>: <成因>`**（M3.4 落地，见 CHANGELOG）。
+      原条目待定的「阶段 / 源位置 / 成因」中，源位置固定为 `<文件:行>`，成因由各 `diag_*` 用例
+      逐条锁住（`diag_position_bad_op` / `diag_position_bad_shared` / `diag_address_space_invalid` /
+      `diag_atomic_type_unsupported` 等）。「阶段」目前只出现在 driver 的 stderr 前行
+      （B8 的 `hacc: 主机编译器 = <path>`、`主机编译（clang++）失败: …`），未进入 `diag_` 格式；
+      若要统一成 `<文件:行>: <阶段>: <成因>` 需另立条目，不属 C6 的原始范围。
 - [x] **C7 ADR 0004 的 S0「控制流」与实现不符 → 已按路线 ② 补实现（M5.1 完成）**：ADR 0004 §S0 写明
       「语言子集：…控制流…」，而当时 `src/device/il_to_llvm.cpp` 的 `translate_statement` 只覆盖
       `block / expr / decl / init / if / return / empty`——**`while` / `for` / `switch` 全不支持**；
@@ -376,14 +383,18 @@
         两仓真机全绿（hacc 203/203、coolrt 15/15）。
       → C4 要分开的是**两件事**：hacc 侧「无设备 SKIP」必须与「初始化失败」区分，否则假绿；
         coolrt 侧硬 FAIL 本身安全，但错误信息应指向 uvm（现在只报 malloc 失败，指向错方向）。
-- [ ] **S2 进阶子集（可选）—— 已立项，计划见 [s2-plan.md](s2-plan.md)**：
+- [ ] **S2 进阶子集（可选）—— 已立项；T3 / T4 已完成，T1 / T2 未开工**（计划见 [s2-plan.md](s2-plan.md)）：
       ADR 0004 的 S2 三块**成本差异极大**，已按实测拆分排期（砍掉 T2 约 3–5 天，含 T2 约 5–9 天）：
       - **T1 模板 `__device__` 函数**（优先，收益/成本比最高）：实测 EDG **已完成实例化**——
         `twice<float>` / `twice<int>` 在 IL 里已是普通函数（`float(float)` / `int(int)`），
         现有管线能翻；**只有「模板原型」撞车**（参数类型 `tk_template_param`=15 → `map_type`
         的 default 分支）。另需处理**同名冲突**：三个 routine 都叫 `twice`，LLVM 函数名须唯一。
-      - **T3 数学内建**（`sqrtf`/`fabsf`/`__fmaf`…）：`hacc/src` 零处理，真实代码大概率直接编不过；
-        精度契约按 approx 指令 + **容差**测试（不用 `==`）。
+      - **T3 数学内建**：✅ **已完成**——16 个 f32 内建各自映射到**单条 PTX 指令**
+        （`sqrt.rn` / `abs` / `min` / `max` / `cvt.rmi·rpi·rzi` / `fma.rn` / `rcp.rn` /
+        `rsqrt.approx` / `div.approx` / `ex2·lg2·sin·cos.approx`）；精确档用 `==`、近似档容差 1e-4。
+        **有意偏离原计划**：`sinf` **不**映射成 `sin.approx` —— 精确档 `sinf` / `cosf` / `expf` /
+        `logf` / `powf` 一律不收录并明确报错（libdevice 属独立工作量），只收录「名字本身就是
+        approx」的 `__expf` 等，避免静默降精度。详见 [s2-plan.md](s2-plan.md) §T3。
       - **T4 `__launch_bounds__`**：✅ **已完成**——实测原先**直接编不过**（不是静默忽略：
         coolfe++ 把 `void __launch_bounds__(256, 4) k(...)` 当成 `void` 变量声明）。已在 coolrt
         `device_builtins.h` 补两端可见空宏；hacc 侧用例 `tests/golden/e2e/launch_bounds.cu`

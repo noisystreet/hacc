@@ -45,15 +45,25 @@ fallthrough 由顺序执行天然成立），**M5.4 补上自定义 `__device__`
 PTX 里是 `.func` + `call.uni`，前向/相互调用皆可）——此前内核体里连循环都写不了，
 只能写「一线程一元素」的演示 kernel。**逻辑运算 `&&` / `||` 按 C 语义短路求值**（条件分支 +
 PHI，左侧已决定结果时右值的副作用不执行），指针复合赋值 `p += i` / `p -= i` 一并支持。
-剩余边界见 `docs/TODO.md` C11（非阻塞：内联优化、range-for/asm/coroutine、递归设备函数需前端拦截）。
+剩余边界见 `docs/TODO.md` C11（非阻塞：内联优化、range-for/asm/coroutine）。递归设备函数**不做前端拦截**——实测可正常执行，真正的限制是默认 1 KiB 调用栈深度（约 30 层，见 [KI-4](docs/known-issues.md)）。
 
-**MMA / Tensor Core 已打通并做过真机数值验证（C12 的 A1/A2/A4）**：`cool_wmma_*` 五条内建
+**MMA / Tensor Core 已打通并做过真机数值验证（C12 的 A1–A5 全部完成，ADR 0008 已批准）**：`cool_wmma_*` 五条内建
 （load.a / load.b / load.c / mma / store.d，**出参 ABI**）→ `llvm.nvvm.wmma.m16n16k16.*`，
 PTX 产出 5 条 `wmma.*` 指令、`ptxas` 汇编通过；单 warp 的 `D = A×B + C` 与 CPU 参考
 逐元素一致（`worst abs diff = 0`），并把「A/B 传反」的反向验证跑过（必须变红才算数）。
 三条红线（整 warp 一致执行 / 缓冲 32B 对齐 / D = A×B + C 的顺序）写在
 `coolruntime/include/cool/device_builtins.h`，hacc 侧不设防 —— 它们的「静默出错」现状记为
 [KI-3](docs/known-issues.md)；范围与取舍见 [ADR 0008](docs/adr/0008-tensor-core-subset.md)。
+
+**S2 进阶子集：数学内建与 `__launch_bounds__` 已可用（T3 / T4）**：16 个 f32 数学内建
+（`sqrtf` / `fabsf` / `fminf` / `fmaxf` / `floorf` / `ceilf` / `truncf` / `rsqrtf` /
+`__fmaf_rn` / `__fsqrt_rn` / `__frcp_rn` / `__fdividef` / `__expf` / `__logf` / `__sinf` /
+`__cosf`）各自映射到**单条 PTX 指令**。需要 libdevice 精确实现的 `sinf` / `cosf` / `expf` /
+`logf` / `powf` **一律不收录**——调用时明确报错并建议改用近似内建，绝不静默降级成 `.approx`。
+`__launch_bounds__(…)` 现在可编（coolrt 侧提供两端可见空宏），但**不映射**到 PTX
+`.maxntid` / `.minnctapersm`（`-O0`、不做寄存器压力优化，映射无收益）。
+**尚未支持**：模板 `__device__` 函数（T1——EDG 已完成实例化，只剩「跳过模板原型 + 同名
+routine 唯一化」）与模板 kernel（T2，计划建议缓/砍）。详见 [docs/s2-plan.md](docs/s2-plan.md)。
 
 主机编译默认调用 `g++`；可用 `--host-cxx <path>`（或 `$HACC_HOST_CXX`）切到 `clang++`
 （已验证可编）。**前端**系统头探测仍固定取 GCC 的头：EDG 按 GCC 语义解析，clang 的
@@ -86,7 +96,7 @@ build/hacc samples/atomic_reduce.cu -o atomic_reduce && ./atomic_reduce
 | `<stem>.hacc.gen.cpp` | 桩 + host（主机编译的实际输入） | — |
 | `<stem>.ptx` | 设备映像 | `.ptx` |
 
-`make check`：**215/215 全绿**（golden / e2e / samples / 诊断用例）。子集外的构造一律
+`make check`：**226/226 全绿、零 SKIP**（golden / e2e / samples / 诊断用例；`make check-strict` 让任何 SKIP 直接失败）。子集外的构造一律
 **fail loud**（编译失败并给出源位置），不静默产出错误代码——例如 `double` 等未覆盖的
 原子类型、函数内的 `__device__` 声明；已确认的缺陷记录在
 [known-issues.md](docs/known-issues.md)。
@@ -150,8 +160,10 @@ pre-commit install  # 一次性：之后每次 commit 自动跑 make check 与 m
 | [m1.2-il-to-llvm-plan.md](docs/m1.2-il-to-llvm-plan.md) | M1.2 方案：EDG IL → LLVM IR（选型、翻译核心、分步实施） |
 | [m2-host-path-plan.md](docs/m2-host-path-plan.md) | M2 方案：主机路径（桩 + 内嵌映像 + `<<<>>>` 改写） |
 | [m3-subset-s0-plan.md](docs/m3-subset-s0-plan.md) | M3 方案：子集 S0 完成（`__shared__` / `__constant__` / 向量类型 / `dim3`） |
+| [m4-subset-s1-plan.md](docs/m4-subset-s1-plan.md) | M4 方案：子集 S1（原子 / `__threadfence*` / 设备全局 `__device__` / `__restrict__` / 地址空间传播） |
+| [s2-plan.md](docs/s2-plan.md) | S2 方案：进阶子集（模板 device 函数 / 数学内建 / `__launch_bounds__` / 模板 kernel），含 T0 实测结论 |
 | [edg-il-reference.md](docs/edg-il-reference.md) | EDG IL 表项速查（字段级参考，依据 `il_def.h`） |
-| [known-issues.md](docs/known-issues.md) | **已知缺陷登记**（症状 / 复现 / 根因 / 绕过 / 修复方向），当前含跨 kernel 设备全局失效 |
+| [known-issues.md](docs/known-issues.md) | **已知缺陷登记**（症状 / 复现 / 根因 / 绕过 / 修复方向），当前有 KI-3 / KI-4 / KI-5 |
 | [ADR 0001](docs/adr/0001-edg-cpp-frontend.md) | 前端采用开源 EDG C++ 前端 |
 | [ADR 0002](docs/adr/0002-llvm-nvptx-device-backend.md) | 设备端走 LLVM IR → NVPTX → PTX |
 | [ADR 0003](docs/adr/0003-host-stub-fatbin-registration.md) | 主机桩 + 内嵌映像注册，`<<<>>>` → `coolLaunchKernel` |
@@ -159,6 +171,7 @@ pre-commit install  # 一次性：之后每次 commit 自动跑 make check 与 m
 | [ADR 0005](docs/adr/0005-licensing-and-edg-distribution.md) | 许可证与 EDG 分发策略 |
 | [ADR 0006](docs/adr/0006-il-to-llvm-translation-route.md) | IL → LLVM IR 的翻译路线：链接 EDG 库内存遍历 |
 | [ADR 0007](docs/adr/0007-module-granularity-per-tu.md) | 模块粒度为编译单元（修订 ADR 0003，修复设备全局不跨 kernel 共享） |
+| [ADR 0008](docs/adr/0008-tensor-core-subset.md) | Tensor Core（MMA / wmma）子集范围与三条红线（Accepted） |
 
 ## 计划的目录结构
 
