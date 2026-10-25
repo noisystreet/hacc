@@ -273,3 +273,84 @@ cuCtxSetLimit(0x00, 64UL * 1024);   // 必须在 context 建好之后（比如�
 
 已做反向验证：把 kernel 实参改成 `n-1`（故意算错），用例报
 `FAILED[shallow]: n=10 sync_er=0 got=45 want=55` 并退出码 1。
+
+---
+
+## KI-5 「有声明、无定义」的 `__device__` 函数被静默编译成**返回 0 的空函数**
+
+- **状态**：❌ **未修复**（2026-10 由 S2 T3 的 T0 探针发现）
+- **发现于**：S2 数学内建的 T0 摸底（`docs/s2-plan.md` §2.3）
+- **影响面**：任何**只声明、未定义**的 `__device__` 函数。典型场景：用户自己写
+  `__device__ float sqrtf(float);` 想调设备端数学库；以及**将来 coolrt 补数学内建声明**时
+- **严重度**：**高**（编译、链接、运行全部成功，结果恒为 0 —— 纯静默错值）
+- **回归测试**：暂无（修复时补，见「验收方式」）
+
+### 症状
+
+```cuda
+__device__ float sqrtf(float);                  // 只有声明，没有任何实现
+__global__ void k(float* out, float x) { out[threadIdx.x] = sqrtf(x); }
+```
+
+`hacc` 编译链接全过、`ptxas` 通过、运行不报错，但 `sqrtf(4.0)` **返回 0**（应为 2）。
+
+PTX 里看到的不是外部引用，而是一个**定义**：
+
+```ptx
+.visible .func  (.param .b32 func_retval0) sqrtf(
+	.param .b32 sqrtf_param_0
+)
+{
+	mov.f32 	%f1, 0f00000000;      ← 直接返回 0.0
+	st.param.f32 	[func_retval0+0], %f1;
+	ret;
+}
+```
+
+注意是 `.visible .func` 而非 `.extern .func`：它不会在链接期暴露问题。
+
+### 根因
+
+[`emit_all_routines`](../src/device/il_to_llvm.cpp) 对**所有**带 `cool_device` 属性的 routine
+无条件调用 `define_routine_body`，不区分「有定义」和「仅声明」：
+
+1. `define_routine_body` 里仅当 `r->function_def_number != 0` 才去找函数体 scope；
+2. 只有声明时 `body_scope == nullptr`，跳过语句翻译；
+3. 随后走到末尾兜底（`il_to_llvm.cpp` 约 2503–2511 行）：非 void 函数补
+   `CreateRet(Constant::getNullValue(ty))` —— 本意是「C 里非 void 函数无 return 是 UB，
+   给确定性行为」，但它**无法区分**「函数体翻译完但没写 return」与「根本没有函数体」。
+
+于是「无定义」被伪装成「有定义但没 return」，生成一个合法的空函数体。
+
+### 为什么危险（比编不过严重得多）
+
+`__launch_bounds__` 那类问题（S2 T4）是**编不过**，用户立刻发现。本条是**编得过、跑得动、
+结果不对**，与 KI-1 / KI-4 同类，只有真机数值断言能抓。
+
+**直接后果**：S2 T3（数学内建）**绝不能只在 coolrt 补声明**。那样会把当前的
+`identifier "sqrtf" is undefined`（fail loud）降级成「静默返回 0」，是严重退化。
+
+### 当前绕过
+
+不使用「只声明无定义」的设备函数；数学内建等 hacc 侧映射表落地（T3）后再用。
+
+### 修复方向
+
+在 `emit_all_routines` / `define_routine_body` 里用**现成的可靠标志** `r->function_def_number == 0`
+判断「仅声明」，然后二选一：
+
+1. **fail loud（推荐）**：报「设备函数 `<name>` 只有声明、没有定义」并指向声明位置。
+   hacc 不做跨模块/跨 TU 链接（ADR 0007），外部设备函数无处可解析，报错是唯一诚实的结局。
+2. 退而求其次：不发射 body，保留 LLVM `declare`（`ExternalLinkage`），让 PTX 出
+   `.extern .func`，把问题推到 `ptxas`/链接期——但错误信息会远离源头。
+
+注意：`function_def_number` 已经在 `define_routine_body` 里被使用，无需新增探针。
+
+### 验收方式
+
+新增用例断言「不得静默返回 0」，二选一即可：
+
+- 编译失败且错误信息包含函数名与「只有声明」字样；或
+- （若走方案 2）`ptxas`/链接失败。
+
+**不接受**「编译链接运行都成功但结果恒为 0」。反向验证：故意把修复去掉，用例必须变红。

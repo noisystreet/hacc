@@ -89,10 +89,39 @@ $ ./build/hacc --emit=ptx lb_two.cu          # __global__ void __launch_bounds__
 
 处理（T4 已落地）：补两端可见的空宏 `#define __launch_bounds__(...)`。验收与反向验证见 §3 T4。
 
-#### 数学内建（T3）：仍需 T0 探针 3
+#### 数学内建（T3）：T0 探针已完成，**发现一个更严重的既有缺陷**（KI-5）
 
-`grep` 过 `hacc/src`：`sqrt` / `sinf` / `fmaf` **零命中**，即数学内建无任何专门处理，
-行为未知，仍需实测（编不过？编过但 PTX 里留未定义符号？）。
+探针做法：对 15 个函数（`sqrtf` `fabsf` `fminf` `fmaxf` `floorf` `ceilf` `sinf` `cosf`
+`expf` `logf` `powf` `rsqrtf` `fdividef` `__sinf` `__expf`）**逐个单独**编译，避免一个失败掩盖其余。
+
+**第一层结论（现状）**：全部 15 个都**编不过**，但原因不是「PTX 里留未定义符号」，而是更早：
+
+```text
+"p_sqrtf.cu", line 2: error: identifier "sqrtf" is undefined
+  __global__ void k_sqrtf(float* out, float x) { out[threadIdx.x] = sqrtf(x); }
+```
+
+即 **coolrt 的公开头里根本没有声明任何数学函数**。这层是 fail loud，尚属安全。
+
+**第二层结论（关键，反直觉）**：假如有人把声明补上（`__device__ float sqrtf(float);`），
+hacc 会让它**编译链接运行全部成功，但结果恒为 0**：
+
+```text
+编译+链接: OK
+sqrtf(4.0) 实际返回 = 0   （正确值应为 2）
+```
+
+PTX 里生成的不是 `.extern .func` 外部引用，而是一个 `.visible .func` **定义**，函数体是
+`mov.f32 %f1, 0f00000000; ret;`。已登记为 **[KI-5](known-issues.md)**（含根因与修复方向）。
+
+**对 T3 排期的直接影响**：
+
+1. **绝不能只做 coolrt 声明**。当前 `identifier undefined` 是 fail loud；补声明却不加 hacc 映射，
+   会把「编不过」降级成「静默返回 0」——严重退化。
+2. 因此 T3 必须**先修 KI-5**（让「仅声明」fail loud），再加 hacc 侧「内建名 → intrinsic」映射表，
+   两件事绑定做。
+3. 对照组已验证：带 body 的 `__device__` 函数正常生成真 `.func` + `call.uni`，所以问题精确定位在
+   「有无定义」的判定，不是设备函数整体不可用。
 
 ## 3. 任务分解
 
