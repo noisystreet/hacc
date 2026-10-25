@@ -1,6 +1,6 @@
 # S2 计划：进阶子集（模板 / 数学内建 / `__launch_bounds__`）
 
-> 状态：**计划中，未开工**（2026-10 立项）。本文件只记方案与实测现状，开工后按项更新状态。
+> 状态：**进行中**（2026-10 立项；**T4 已完成**，T0 剩数学内建探针，T1/T2/T3 未开工）。
 > 上游：[ADR 0004](adr/0004-cuda-cpp-subset-scope.md) §S2 进阶（可选）。
 > 相关：[已知缺陷 KI-4](known-issues.md)（递归深度限制）、[ADR 0007](adr/0007-module-granularity-per-tu.md)（设备符号不跨 TU）。
 > 实测环境：RTX 4060 Laptop / sm_89 / 驱动 595.58.03 / `make check` 215/215。
@@ -13,7 +13,7 @@ ADR 0004 的 S2 列了三块，本计划的判断是**它们的成本与收益�
 | --- | --- | --- |
 | 模板 `__device__` 函数 | ✅ 做（T1） | EDG 已完成实例化，剩「跳过原型 + 处理重名」 |
 | 数学内建 | ✅ 做（T3） | 真实代码高频使用，现状是直接编不过 |
-| `__launch_bounds__` | ✅ 做（T4，仅「不报错地忽略」） | 成本极低；映射到 PTX 无实际收益 |
+| `__launch_bounds__` | ✅ **已完成（T4）** | 实测原先**直接编不过**（非静默忽略）；已在 coolrt 头补空宏 |
 | 模板 kernel | ⚠️ 缓（T2，可砍） | 需改写器 + 桩注册 + mangling 三处联动，成本数倍 |
 | cubin / `cudaFuncGetAttributes` 元数据 | ❓ 摸底（T0） | `--emit=cubin`、`coolFuncGetAttributes` 均已在用，可能已完成 |
 
@@ -72,10 +72,27 @@ routine=main ty_kind=8 ret_kind=2  p0_kind=-1
 且**未被 launch 的模板 kernel 不产生实例**（EDG 以使用驱动实例化），所以模板 kernel
 必然依赖改写器先认出 launch 语法——这两件事是绑死的。
 
-### 2.3 其它两块（待 T0 摸底）
+### 2.3 其它两块
 
-`grep` 过 `hacc/src`：`template` / `sqrt` / `sinf` / `fmaf` / `launch_bounds` **零命中**。
-即数学内建与 `__launch_bounds__` 目前没有任何专门处理，行为未知，需实测（T0）。
+#### `__launch_bounds__`（T4）：此前不是「静默忽略」，而是**直接编不过**
+
+```text
+$ ./build/hacc --emit=ptx lb_two.cu          # __global__ void __launch_bounds__(256, 4) addk(...)
+"lb_two.cu", line 2: error: incomplete type "void" is not allowed
+  __global__ void __launch_bounds__(256, 4) addk(int* out) { ... }
+"lb_two.cu", line 2: error: expected a ";"
+```
+
+根因：CUDA 限定符靠 `coolrt/include/cool/device_builtins.h` 的宏转成 EDG 属性
+（`__global__` → `__attribute__((cool_global))`），而 `__launch_bounds__` **没有任何定义**，
+于是 `void __launch_bounds__(256, 4) addk(...)` 被当成「`void` 类型的变量声明」解析。
+
+处理（T4 已落地）：补两端可见的空宏 `#define __launch_bounds__(...)`。验收与反向验证见 §3 T4。
+
+#### 数学内建（T3）：仍需 T0 探针 3
+
+`grep` 过 `hacc/src`：`sqrt` / `sinf` / `fmaf` **零命中**，即数学内建无任何专门处理，
+行为未知，仍需实测（编不过？编过但 PTX 里留未定义符号？）。
 
 ## 3. 任务分解
 
@@ -139,14 +156,17 @@ routine=main ty_kind=8 ret_kind=2  p0_kind=-1
 
 **验收**：`tests/golden/e2e/math_builtins.cu`，容差比较；反向验证（改回精确相等）必须变红。
 
-### T4 `__launch_bounds__`（0.5d）
+### T4 `__launch_bounds__`（0.5d）✅ **已完成**
 
-目标只是**「不报错、不静默出错」**：
+原定目标只是「不报错、不静默出错」，实测后发现**连「不报错」都没做到**（见 §2.3）。
 
-- 若 EDG 直接忽略 → 文档写明「提示被忽略，无优化效果」，并加用例锁定「带
-  `__launch_bounds__` 的 kernel 能编能跑」。
-- 映射到 PTX `.maxntid` / `.minnctapersm` 属锦上添花，**不做**：它只影响寄存器分配与
-  occupancy，不影响正确性；而 hacc 目前 `-O0`、不做寄存器压力优化，映射了也无收益。
+- ✅ coolrt `device_builtins.h` 补 `#define __launch_bounds__(...)`（两端可见，展开为空）
+- ✅ 用例 `tests/golden/e2e/launch_bounds.cu`：单参 / 双参两种形态，真机数值校验，
+  无设备时返回 77 SKIP
+- ✅ **反向验证已做**：临时去掉该宏，用例在**编译阶段**失败（exit=1），不是静默跑错
+- ❌ 映射到 PTX `.maxntid` / `.minnctapersm`：**不做**（`-O0`、不做寄存器压力优化，映射无收益），
+  已列入 §5 Non-Goals
+- ✅ 文档写明「提示被接受但完全忽略，无优化效果」
 
 ## 4. 顺序与工作量
 
@@ -154,7 +174,7 @@ routine=main ty_kind=8 ret_kind=2  p0_kind=-1
 T0 摸底（0.5d）
   └─ T1 模板 device 函数（1–2d）      ← 收益/成本比最高
        └─ T3 数学内建（1–2d）         ← 现实收益最高
-            └─ T4 launch_bounds（0.5d）
+            └─ T4 launch_bounds（0.5d）✅ 已完成
                  └─ T2 模板 kernel（2–4d，可砍）
 ```
 

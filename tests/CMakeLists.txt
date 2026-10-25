@@ -574,6 +574,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "loopStride OK")
 
+        # S2 T4 e2e：__launch_bounds__ 被「接受但忽略」——单参 / 双参两种形式都能编能跑。
+        # 反向验证：去掉 coolrt device_builtins.h 里的空宏定义，本用例在编译阶段即失败。
+        set(_e2e_lb_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_launch_bounds_run")
+        add_test(NAME e2e_hacc_launch_bounds_run_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/launch_bounds.cu"
+                    -o "${_e2e_lb_exe}")
+        add_test(NAME e2e_hacc_launch_bounds_run
+            COMMAND "${_e2e_lb_exe}")
+        set_tests_properties(e2e_hacc_launch_bounds_run PROPERTIES
+            DEPENDS e2e_hacc_launch_bounds_run_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "launchBounds OK")
+
         # M5.2 golden：break / continue（EDG 降为 stmk_goto + stmk_label）→ PTX 跳转结构。
         if(HACC_COOLRUNTIME_INCLUDE)
             set(_lc_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_loop_control.cil")

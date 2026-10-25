@@ -384,7 +384,10 @@
         的 default 分支）。另需处理**同名冲突**：三个 routine 都叫 `twice`，LLVM 函数名须唯一。
       - **T3 数学内建**（`sqrtf`/`fabsf`/`__fmaf`…）：`hacc/src` 零处理，真实代码大概率直接编不过；
         精度契约按 approx 指令 + **容差**测试（不用 `==`）。
-      - **T4 `__launch_bounds__`**：只需「不报错地忽略」，**不映射**到 PTX（`-O0` 下无实际收益）。
+      - **T4 `__launch_bounds__`**：✅ **已完成**——实测原先**直接编不过**（不是静默忽略：
+        coolfe++ 把 `void __launch_bounds__(256, 4) k(...)` 当成 `void` 变量声明）。已在 coolrt
+        `device_builtins.h` 补两端可见空宏；hacc 侧用例 `tests/golden/e2e/launch_bounds.cu`
+        （单参 / 双参 + 真机校验，含反向验证）。**不映射**到 PTX（`-O0` 下无实际收益）。
       - **T2 模板 kernel**（建议缓/砍）：实测改写器认不出 `kt<float><<<...>>>`
         （报「`<<<` 前未找到内核名」），且**未 launch 不产生实例** → 需改写器 + 桩注册 +
         名字 mangling 三处联动，成本是 T1 的数倍。

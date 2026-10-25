@@ -6,6 +6,16 @@
 
 ### Added
 
+- **`__launch_bounds__` 可用了（S2 T4）**：此前**直接编不过**（不是静默忽略）——CUDA 限定符靠
+  coolrt 头里的宏转成 EDG 属性（`__global__` → `__attribute__((cool_global))`），而
+  `__launch_bounds__` 没有任何定义，于是 `void __launch_bounds__(256, 4) k(...)` 被当成
+  「`void` 类型的变量声明」，coolfe++ 报 `incomplete type "void" is not allowed` + `expected a ";"`。
+  修复落在 coolrt 侧（补 `#define __launch_bounds__(...)`，见该仓 CHANGELOG）；hacc 侧新增 e2e
+  `tests/golden/e2e/launch_bounds.cu`：单参 / 双参两种形态、真机数值校验，无设备返回 77 SKIP。
+  **反向验证已做**：临时去掉该宏，用例在**编译阶段**失败（exit=1），而不是静默跑错。
+  不映射到 PTX `.maxntid` / `.minnctapersm`（`-O0`、不做寄存器压力优化，映射无收益），
+  即「接受但完全忽略，无优化效果」。
+
 - **S2 计划文档与现状摸底**（[docs/s2-plan.md](docs/s2-plan.md)）：把 ADR 0004 的 S2 三块按
   实测拆开排期，而不是当整体做。关键实测结论：**模板 `__device__` 函数的实例化 EDG 已经做完了**
   ——`twice<float>` / `twice<int>` 在 IL 里就是普通函数（`float(float)` / `int(int)`），
