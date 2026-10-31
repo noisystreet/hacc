@@ -6,6 +6,26 @@
 
 ### Added
 
+- **设备内建第二批：整数位操作与核内计时（P6 R5 第一批）**：`il_to_llvm.cpp` 新增
+  `try_translate_int_call`，把 `__popc` / `__clz` / `__ffs` / `__brev` / `clock()` / `clock64()`
+  映射到 `llvm.ctpop.i32` / `ctlz` / `cttz` / `bitreverse` 与
+  `llvm.nvvm.read.ptx.sreg.{clock,clock64}`。`__ffs` 按 CUDA 语义实现为 `cttz + 1`
+  **并对 0 特判**（否则 `__ffs(0)` 静默返回 33，属「能编译、跑得动、数值错」）。
+
+  新增 `tests/golden/e2e/int_builtins.cu`：12 项数值断言 + 3 项计时断言；PTX 侧断言
+  `popc.b32` / `clz.b32` / `brev.b32` / `%clock` / `%clock64`（三条位操作要求**同时**出现）。
+
+  **操作数一律走主机传入的 `seed`，不用字面量**：全常量时 LLVM 会把 intrinsic 常量折叠掉、
+  PTX 里根本不出现指令，golden 断言就成空转 —— 首次实现正是这么踩的（断言当场变红才发现）。
+  同理**不比较 `clock()` 与 `clock64()` 的差值大小**：实测同一区间 38 vs 7，两者读数刻度
+  不保证可比，只各自断言「非零」。
+
+  **反向验证**：去掉 `__ffs` 的 0 特判后，e2e 报 `__ffs(seed&1) = 0x21`（33），
+  证明边界断言抓得住静默错值。`make check` **237/237**、零 SKIP。
+
+  `__ldg` **本批不做**：需先 spike「NVPTX 如何生成 `ld.global.nc`」与「按实参类型重载」，
+  两条不确定性叠在一起，不混进这一批。
+
 - **模板 `__device__` 函数可用了（S2 T1）**：`template <typename T> __device__ T twice(T v)`
   现在能编能跑，隐式推导（`twice(x)`）与显式实参（`twice<int>(3)`）都支持，同文件多个实例共存。
   三个要点：

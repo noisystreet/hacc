@@ -675,6 +675,49 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "mathBuiltins OK")
 
+        # P6/R5 第一批：整数单指令内建（__popc/__clz/__ffs/__brev）+ clock/clock64。
+        # 边界值（__clz(0)=32、__ffs(0)=0）在用例里逐个断言，见文件头说明。
+        set(_e2e_int_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_int_builtins_run")
+        add_test(NAME e2e_hacc_int_builtins_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/int_builtins.cu"
+                    -o "${_e2e_int_exe}")
+        add_test(NAME e2e_hacc_int_builtins_run
+            COMMAND "${_e2e_int_exe}")
+        set_tests_properties(e2e_hacc_int_builtins_run PROPERTIES
+            DEPENDS e2e_hacc_int_builtins_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "intBuiltins OK")
+
+        # P6/R5 golden：整数内建的 PTX 指令形态。只断言确定的四条
+        # （popc / clz / brev + clock / clock64）；__ffs 走 cttz→bfind 序列，
+        # 形态不是契约，交给上面的 e2e 数值验证（别硬断言会被改写的指令）。
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_ib_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_int_builtins.cil")
+            set(_ib_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_int_builtins.ptx")
+            add_test(NAME golden_frontend_int_builtins
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_ib_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/int_builtins.cu")
+            add_test(NAME golden_device_il_to_ptx_int_builtins
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_ib_ptx}" "${_ib_cil}")
+            set_tests_properties(golden_device_il_to_ptx_int_builtins PROPERTIES
+                DEPENDS golden_frontend_int_builtins)
+            # 三条位操作指令必须**同时**出现（&& 而不是「任一命中」）。
+            add_test(NAME golden_device_il_to_ptx_int_builtins_instr
+                COMMAND sh -c "grep -q 'popc\\.b32' \"$1\" && grep -q 'clz\\.b32' \"$1\" && grep -q 'brev\\.b32' \"$1\""
+                        _ "${_ib_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_int_builtins_instr PROPERTIES
+                DEPENDS golden_device_il_to_ptx_int_builtins)
+            # 计时读数：%clock 与 %clock64 各自出现（用分号区分，避免前缀互相匹配）。
+            add_test(NAME golden_device_il_to_ptx_int_builtins_clock
+                COMMAND sh -c "grep -q '%clock64;' \"$1\" && grep -q '%clock;' \"$1\""
+                        _ "${_ib_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_int_builtins_clock PROPERTIES
+                DEPENDS golden_device_il_to_ptx_int_builtins)
+        endif()
+
         # S2 T3 负向：需要 libdevice 的精确数学函数必须明确报错，不得静默降级为 .approx。
         # 退出码与消息分开验证（WILL_FAIL 与 PASS_REGULAR_EXPRESSION 会互相翻转）。
         set(_math_unsup "${CMAKE_CURRENT_SOURCE_DIR}/golden/negative/unsupported_math.cu")

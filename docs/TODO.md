@@ -416,6 +416,14 @@
       是当前最容易继续恶化的一处。每清掉一个就从 `whitelizard.txt` 删一行，`make ccn` 保持绿。
       （来源：原 `agent_space/m5-handoff.md` §5 的「CCN 债务」项，此前只在工作区文档里记，未落到本清单。）
 
+- [x] **C14 设备内建第二批（P6 R5 第一批）**：`__popc` / `__clz` / `__ffs` / `__brev` /
+      `clock()` / `clock64()` 已映射到 PTX（`try_translate_int_call`）。边界值
+      `__clz(0)=32`、`__ffs(0)=0`、`__ffs` 1-based 在 `tests/golden/e2e/int_builtins.cu`
+      逐个断言（**反向验证**：去掉 0 特判后 e2e 报 `0x21`＝33）。
+      **`__ldg` 未做**：需先 spike（PTX 侧 `ld.global.nc` 的生成方式 + 按类型重载）。
+      **踩坑**：e2e 操作数若全为字面量，LLVM 会常量折叠掉 intrinsic，PTX 里没有指令 →
+      golden 断言空转；改为走主机传入的 seed。
+
 ---
 
 ## D. 已知缺陷（待排期修复）

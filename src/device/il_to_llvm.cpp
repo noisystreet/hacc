@@ -1512,6 +1512,126 @@ llvm::Value* try_translate_math_call(an_expr_node_ptr expr, KernelContext& kc) {
     return emit_math_builtin(*mapping, args, kc);
 }
 
+// ---------------------------------------------------------------------------
+// 整数单指令内建 + 内核内计时（P6/R5 第一批）
+// ---------------------------------------------------------------------------
+// 与数学内建同一套纪律：名字 → 一条（或明确几步）PTX 指令。
+// 边界值语义（__clz(0)=32、__ffs(0)=0、__ffs 是 1-based）见 coolrt 的
+// device_builtins.h；这几条是「能编译、看着跑通、数值不对」的高发区，故 e2e 里
+// 对边界逐个断言。
+enum class IntBuiltinOp {
+    Popc,     // llvm.ctpop.i32        → popc.b32
+    Clz,      // llvm.ctlz.i32         → clz.b32
+    Ffs,      // llvm.cttz.i32 + 1     → bfind 序列（x==0 特判 0）
+    Brev,     // llvm.bitreverse.i32   → brev.b32
+    Clock,    // read.ptx.sreg.clock   → %clock
+    Clock64,  // read.ptx.sreg.clock64 → %clock64
+};
+
+struct IntBuiltinMapping {
+    const char* name;
+    IntBuiltinOp op;
+    unsigned arity;
+};
+
+constexpr IntBuiltinMapping kIntBuiltins[] = {
+    {"__popc", IntBuiltinOp::Popc, 1}, {"__clz", IntBuiltinOp::Clz, 1},
+    {"__ffs", IntBuiltinOp::Ffs, 1},   {"__brev", IntBuiltinOp::Brev, 1},
+    {"clock", IntBuiltinOp::Clock, 0}, {"clock64", IntBuiltinOp::Clock64, 0},
+};
+
+const IntBuiltinMapping* find_int_builtin(const char* name) {
+    for (const IntBuiltinMapping& m : kIntBuiltins) {
+        if (std::strcmp(name, m.name) == 0) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+// 一元整数内建（Popc / Clz / Ffs / Brev）的发射。
+llvm::Value* emit_int_unary_builtin(IntBuiltinOp op, llvm::Value* x, KernelContext& kc) {
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    llvm::Type* i32 = llvm::Type::getInt32Ty(kc.ctx);
+
+    switch (op) {
+        case IntBuiltinOp::Popc: {
+            llvm::Function* fn = get_or_declare_intrinsic(module, "llvm.ctpop.i32", i32, {i32});
+            return kc.builder.CreateCall(fn, {x});
+        }
+        case IntBuiltinOp::Brev: {
+            llvm::Function* fn =
+                get_or_declare_intrinsic(module, "llvm.bitreverse.i32", i32, {i32});
+            return kc.builder.CreateCall(fn, {x});
+        }
+        case IntBuiltinOp::Clz: {
+            // ctlz 的第二个实参是 is_zero_undef；传 false 才是「ctlz(0) 定义为 32」。
+            llvm::Type* i1 = llvm::Type::getInt1Ty(kc.ctx);
+            llvm::Function* fn = get_or_declare_intrinsic(module, "llvm.ctlz.i32", i32, {i32, i1});
+            return kc.builder.CreateCall(fn, {x, llvm::ConstantInt::getFalse(kc.ctx)});
+        }
+        case IntBuiltinOp::Ffs: {
+            // CUDA 语义 1-based 且 __ffs(0) == 0；而 cttz(0, false) == 32。
+            // 少写这个特判，__ffs(0) 会静默返回 33 —— 典型的「数值不对但不报错」。
+            llvm::Type* i1 = llvm::Type::getInt1Ty(kc.ctx);
+            llvm::Function* fn = get_or_declare_intrinsic(module, "llvm.cttz.i32", i32, {i32, i1});
+            llvm::Value* ctz = kc.builder.CreateCall(fn, {x, llvm::ConstantInt::getFalse(kc.ctx)});
+            llvm::Value* plus_one = kc.builder.CreateAdd(ctz, llvm::ConstantInt::get(i32, 1));
+            llvm::Value* is_zero = kc.builder.CreateICmpEQ(x, llvm::ConstantInt::get(i32, 0));
+            return kc.builder.CreateSelect(is_zero, llvm::ConstantInt::get(i32, 0), plus_one);
+        }
+        default:
+            fail("内部错误：非一元整数内建进入了 emit_int_unary_builtin");
+    }
+    return nullptr;
+}
+
+llvm::Value* emit_int_builtin(const IntBuiltinMapping& m, std::vector<llvm::Value*>& args,
+                              KernelContext& kc) {
+    llvm::Module* module = kc.builder.GetInsertBlock()->getParent()->getParent();
+    switch (m.op) {
+        case IntBuiltinOp::Clock: {
+            llvm::Type* i32 = llvm::Type::getInt32Ty(kc.ctx);
+            llvm::Function* fn =
+                get_or_declare_intrinsic(module, "llvm.nvvm.read.ptx.sreg.clock", i32, {});
+            return kc.builder.CreateCall(fn);
+        }
+        case IntBuiltinOp::Clock64: {
+            llvm::Type* i64 = llvm::Type::getInt64Ty(kc.ctx);
+            llvm::Function* fn =
+                get_or_declare_intrinsic(module, "llvm.nvvm.read.ptx.sreg.clock64", i64, {});
+            return kc.builder.CreateCall(fn);
+        }
+        default:
+            return emit_int_unary_builtin(m.op, args[0], kc);
+    }
+}
+
+// 翻译整数内建调用。返回 nullptr 表示「不是整数内建」，交由调用方继续判定。
+llvm::Value* try_translate_int_call(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr callee = expr->variant.operation.operands;
+    if (callee == nullptr || callee->kind != enk_routine) {
+        return nullptr;
+    }
+    a_routine_ptr r = callee->variant.routine.ptr;
+    const char* name = (r != nullptr) ? r->source_corresp.name : nullptr;
+    if (name == nullptr) {
+        return nullptr;
+    }
+    const IntBuiltinMapping* mapping = find_int_builtin(name);
+    if (mapping == nullptr) {
+        return nullptr;
+    }
+    std::vector<llvm::Value*> args = translate_builtin_args(callee, kc);
+    // 先校验个数再 CreateCall：个数不符时 CreateCall 会直接断言崩，用户看不到诊断。
+    if (args.size() != mapping->arity) {
+        fail(std::string(name) + " 需要 " + std::to_string(mapping->arity) + " 个实参（实际 " +
+                 std::to_string(args.size()) + " 个）",
+             expr->position);
+    }
+    return emit_int_builtin(*mapping, args, kc);
+}
+
 // 翻译对同模块自定义 __device__ 函数的调用（M5.4）。
 // 返回 nullptr 表示「不是设备函数调用」，交由调用方继续判定。
 llvm::Value* try_translate_device_call(an_expr_node_ptr expr, KernelContext& kc) {
@@ -1957,6 +2077,9 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
                 v = try_translate_math_call(expr, kc);
             }
             if (v == nullptr) {
+                v = try_translate_int_call(expr, kc);
+            }
+            if (v == nullptr) {
                 v = try_translate_builtin_call(expr, kc);
             }
             if (v == nullptr) {
@@ -1965,8 +2088,8 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
             if (v == nullptr) {
                 fail(
                     "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic*/"
-                    "数学内建（sqrtf/fabsf/__fmaf_rn 等）/cool_wmma_* 与同模块的 __device__ "
-                    "函数）");
+                    "数学内建（sqrtf/fabsf/__fmaf_rn 等）/整数内建（__popc/__clz/__ffs/"
+                    "__brev/clock/clock64）/cool_wmma_* 与同模块的 __device__ 函数）");
             }
             return v;
         }
