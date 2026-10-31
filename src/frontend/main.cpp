@@ -259,37 +259,25 @@ bool write_device_source(const std::string& input_path, const std::string& outpu
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    Options o;
-    const int parse_rc = parse_args(argc, argv, &o);
-    if (parse_rc >= 0) {
-        return parse_rc;
-    }
-
-    if (o.input_path.empty()) {
-        std::fprintf(stderr, "coolfe++: 缺少输入文件。用 -h 查看用法。\n");
-        return 2;
-    }
-
-    resolve_outputs(&o);
-
-    // M2.1：先产主机源（纯文本改写，不依赖 cpfe）。
-    if (o.want_host) {
-        std::string err;
-        if (!write_host_source(o.input_path, o.host_output, &err)) {
-            std::fprintf(stderr, "coolfe++: %s\n", err.c_str());
-            return 1;
-        }
-        std::fprintf(stderr, "coolfe++: 主机源 → %s\n", o.host_output.c_str());
-    }
-
-    // --emit-host-only：仅产主机源，不调用 cpfe（纯文本，无需 EDG）。
-    if (o.host_only) {
+// 主机源阶段（--emit-host）：纯文本改写，不依赖 cpfe。
+// 返回 0 表示成功；非 0 为 main 应直接返回的退出码。
+int emit_host_source(const Options& o) {
+    if (!o.want_host) {
         return 0;
     }
+    std::string err;
+    if (!write_host_source(o.input_path, o.host_output, &err)) {
+        std::fprintf(stderr, "coolfe++: %s\n", err.c_str());
+        return 1;
+    }
+    std::fprintf(stderr, "coolfe++: 主机源 → %s\n", o.host_output.c_str());
+    return 0;
+}
 
-    // M2.1：cpfe 吃 **device 改写源**（`<<<>>>` → haccLaunch，保留内核体 + 注入声明），
-    // 因为 cpfe 无法解析原始 `<<<>>>`。device 源写到 IL 输出旁的临时文件，用完删除。
+// cpfe 阶段：吃 **device 改写源**（`<<<>>>` → haccLaunch，保留内核体 + 注入声明），
+// 因为 cpfe 无法解析原始 `<<<>>>`。device 源写到 IL 输出旁的临时文件，用完删除。
+// 返回 0 表示成功；非 0 为 main 应直接返回的退出码。
+int invoke_frontend(Options& o) {
     const std::string device_src = o.il_output + ".hacc_device.cu";
     {
         std::string err;
@@ -319,11 +307,45 @@ int main(int argc, char** argv) {
         }
         return 1;
     }
+    return 0;
+}
 
+// 打印 IL 产出位置（stderr 进度信息）。
+void report_il_output(const Options& o) {
     std::fprintf(stderr, "coolfe++: IL → %s", o.il_output.c_str());
     if (o.want_text) {
         std::fprintf(stderr, "（文本 %s）", o.il_text.c_str());
     }
     std::fputc('\n', stderr);
+}
+
+int main(int argc, char** argv) {
+    Options o;
+    const int parse_rc = parse_args(argc, argv, &o);
+    if (parse_rc >= 0) {
+        return parse_rc;
+    }
+
+    if (o.input_path.empty()) {
+        std::fprintf(stderr, "coolfe++: 缺少输入文件。用 -h 查看用法。\n");
+        return 2;
+    }
+
+    resolve_outputs(&o);
+
+    if (emit_host_source(o) != 0) {
+        return 1;
+    }
+
+    // --emit-host-only：仅产主机源，不调用 cpfe（纯文本，无需 EDG）。
+    if (o.host_only) {
+        return 0;
+    }
+
+    if (invoke_frontend(o) != 0) {
+        return 1;
+    }
+
+    report_il_output(o);
     return 0;
 }

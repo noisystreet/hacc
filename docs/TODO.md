@@ -408,12 +408,27 @@
       - **开工前必须 spike**：EDG 判定「模板原型」的**可靠标志**。不能用签名嗅探——
         `__global__ void kt(T*)` 的指针把 `T` 藏住了，签名看起来完全正常。
 
-- [ ] **C13 CCN / 函数长度债务（`whitelizard.txt`）**：当前 **10 个函数 / 4 个文件**在豁免清单里
-      （`map_type` / `classify_operator` / `translate_operation` / `emit_ptx_from_il` / `launch_rewrite` 三件 /
-      `parse_args` / 前端 `main`）。门限为 CCN ≤ 10、函数长度 ≤ 200 行（`Makefile` 的
-      `CCN_THRESHOLD` / `FUNC_LENGTH_THRESHOLD`）。**增量清理，不一次性重写**：优先拆
-      `il_to_llvm.cpp` 的 `translate_operation` dispatch——S2 T3（数学内建）又往里加了分支，
-      是当前最容易继续恶化的一处。每清掉一个就从 `whitelizard.txt` 删一行，`make ccn` 保持绿。
+- [x] **C13 CCN / 函数长度债务（`whitelizard.txt`）——已清零**：豁免清单由 **10 个函数 / 4 个文件**
+      降为 **0 条**；门限不变（CCN ≤ 10、函数长度 ≤ 200 行，见 `Makefile` 的
+      `CCN_THRESHOLD` / `FUNC_LENGTH_THRESHOLD`），`make ccn` 不再依赖任何豁免。全部为
+      **行为等价**重构，前后 `make check` 均 **242/242**、零 SKIP。逐个处置：
+
+      | 函数 | CCN 前 → 后 | 手法 |
+      | --- | --- | --- |
+      | `device::translate_operation` | 21 → 3 | 类别 → 处理函数查表（原 12 路 `switch` 的 case 就吃满预算） |
+      | `host::rewrite_source` | 53 → 5 | 主循环 + 规则分派，每条规则一个返回 `RewriteStep` 的函数 |
+      | `host::rewrite_launch` | 13 → 8 | 配置段解析抽成 `parse_launch_config` |
+      | `driver::parse_args` | 13 → 9 | 抽 `take_stop_flag` / `is_keep_flag` / `take_inline_value_option` |
+      | `device::classify_operator` | 12 → 3 | 谓词函数 + 优先级表（表序即优先级） |
+      | 前端 `main` | 12 → 6 | 按阶段拆 `emit_host_source` / `invoke_frontend` / `report_il_output` |
+      | `host::split_top_level` | 11 → 7 | 抽 `is_open_bracket` / `is_close_bracket` |
+      | `device::map_type` | 11 → 4 | kind → 映射函数查表（聚合三 kind 共用 `map_struct_type`） |
+      | `device::emit_pointer_arith` | 9（**早已达标**） | 只删清单行 |
+      | `device::emit_ptx_from_il` | 4（**早已达标**） | 只删清单行 |
+
+      **反向验证**：同一组 lizard 参数喂一份 CCN 12 的临时文件，退出码 1 —— 确认空清单没有
+      把门禁放哑。`whitelizard.txt` 保留（`make ccn` 的 `-W` 指向它），文件头写明「新增条目 =
+      登记新债务，先确认是不是查表/抽函数就能消」。
       （来源：原 `agent_space/m5-handoff.md` §5 的「CCN 债务」项，此前只在工作区文档里记，未落到本清单。）
 
 - [x] **C14 设备内建第二批（P6 R5 第一批）**：`__popc` / `__clz` / `__ffs` / `__brev` /

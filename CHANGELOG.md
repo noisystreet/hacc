@@ -422,6 +422,29 @@
 
 ### Changed
 
+- **CCN 债务清零：`whitelizard.txt` 由 10 条降为 0 条**（TODO C13 收尾）。全部**行为等价**重构，
+  `make check` 前后均为 **242/242**、零 SKIP：
+
+  1. `il_to_llvm.cpp` 的类型/运算符分派改为**查表**：`map_type`（11 → 4）、`classify_operator`
+     （12 → 3）、`translate_operation`（21 → 3）。最后一个原本是 12 路 `switch` + 7 级
+     `if (v == nullptr)` 链——`switch` 的 case 本身就吃满 CCN 预算，只有改表能真正降下来；
+     调用翻译器链（atomic → wmma → math → int → builtin → ldg → device）保留原顺序
+     （内建识别必须先于同模块 `__device__` 函数，顺序有语义）。顺带发现
+     `emit_pointer_arith`（CCN 9）与 `emit_ptx_from_il`（CCN 4）**早已达标**，此前只是清单
+     没跟着更新。
+  2. `launch_rewrite.cpp`：`rewrite_source`（53 → 5）改为「主循环 + 规则分派」——主循环只剩
+     逐字符扫描，每条改写规则（`<<<>>>` / `__global__` / `__constant__` / 三个符号 API）各成
+     一个返回 `RewriteStep` 的函数，按首字符 `switch` 分派；`cudaXxx` 与 `coolXxx` 合并成一张
+     规则表。`rewrite_launch`（13 → 8）把配置段解析抽成 `parse_launch_config`；
+     `split_top_level`（11 → 7）抽出 `is_open_bracket` / `is_close_bracket`。
+  3. `driver/main.cpp` 的 `parse_args`（13 → 9）：抽出 `take_stop_flag` / `is_keep_flag` /
+     `take_inline_value_option`（`-arch=` 与 `--emit=` 共用一处）。`frontend/main.cpp` 的 `main`
+     （12 → 6）按阶段拆成 `emit_host_source` / `invoke_frontend` / `report_il_output`。
+
+  **反向验证**：把一份 CCN 12 的临时文件喂给同一组 lizard 参数，退出码为 1 —— 确认清空清单没有
+  把门禁放成哑的。`whitelizard.txt` 保留（`make ccn` 的 `-W` 指向它），文件头写明「新增条目 =
+  登记新债务，先确认是不是查表/抽函数就能消」。
+
 - **默认链接的 coolrt 静态库名改为 `libcoolrt_static.a`**（coolruntime 侧同步改名，对齐 CUDA 的
   `libcudart_static.a` 风格；另新增共享库 `libcoolrt.so`）。默认路径仍按 `<coolrt>/build/` 推导，
   `--coolrt-lib` 显式指定不受影响。

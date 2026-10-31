@@ -380,38 +380,53 @@ llvm::Type* map_struct_type(a_type_ptr t, llvm::LLVMContext& ctx) {
     return llvm::StructType::get(ctx, member_tys);
 }
 
-// 把 EDG 类型翻译为 LLVM 类型。M1.2.3 只覆盖标量（整型/浮点）与指针。
+// tk_void：空类型（内核返回 void）。
+llvm::Type* map_void_type(a_type_ptr /*t*/, llvm::LLVMContext& ctx) {
+    return llvm::Type::getVoidTy(ctx);
+}
+
+// tk_pointer：统一用不透明指针（LLVM 15+ 默认），指向类型不参与 IR 文本。
+// 地址空间由指针类型承载（M4.5）：带 cool_address_space(n) 标注时为 n，
+// 否则为 0（generic，即 M4.5 之前的行为）。
+llvm::Type* map_pointer_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    return llvm::PointerType::get(ctx, pointer_address_space(t));
+}
+
+// tk_typeref：typedef / 限定符，解引用到目标类型。
+llvm::Type* map_typeref_type(a_type_ptr t, llvm::LLVMContext& ctx) {
+    return map_type(t->variant.typeref.type, ctx);
+}
+
+using TypeMapper = llvm::Type* (*)(a_type_ptr, llvm::LLVMContext&);
+
+struct TypeMapping {
+    a_type_kind kind;
+    TypeMapper map;
+};
+
+// kind → 映射函数。查表分派而不是 switch：加一个 kind 只改表一行，
+// map_type 的圈复杂度也不随 kind 数上涨（CCN 门禁 ≤10）。
+// 聚合类型（M3.0）的 tk_struct/tk_class/tk_union 共用 map_struct_type
+// （向量类型 float4 等即 tk_struct）；tk_array 见 M3.1。
+constexpr TypeMapping kTypeMappings[] = {
+    {tk_void, map_void_type},     {tk_integer, map_integer_type},  // int_kind 决定位宽
+    {tk_float, map_float_type},   {tk_pointer, map_pointer_type}, {tk_typeref, map_typeref_type},
+    {tk_struct, map_struct_type}, {tk_class, map_struct_type},    {tk_union, map_struct_type},
+    {tk_array, map_array_type},  // [N x T]，仅常量上界
+};
+
+// 把 EDG 类型翻译为 LLVM 类型。覆盖范围即 kTypeMappings 的条目，
+// 未列出的 kind 一律 fail loud（与 kStmtTable 同口径）。
 llvm::Type* map_type(a_type_ptr t, llvm::LLVMContext& ctx) {
     if (t == nullptr) {
         fail("类型为空指针");
     }
-    switch (t->kind) {
-        case tk_void:
-            return llvm::Type::getVoidTy(ctx);
-        case tk_integer:
-            // int_kind 决定位宽；explicitly_signed 与 int_kind 共同决定符号。
-            return map_integer_type(t, ctx);
-        case tk_float:
-            return map_float_type(t, ctx);
-        case tk_pointer:
-            // 统一用不透明指针（LLVM 15+ 默认），指向类型不参与 IR 文本。
-            // 地址空间由指针类型承载（M4.5）：带 cool_address_space(n) 标注时为 n，
-            // 否则为 0（generic，即 M4.5 之前的行为）。
-            return llvm::PointerType::get(ctx, pointer_address_space(t));
-        case tk_typeref:
-            // typedef / 限定符：解引用到目标类型。
-            return map_type(t->variant.typeref.type, ctx);
-        case tk_struct:
-        case tk_class:
-        case tk_union:
-            // 聚合类型（M3.0）：向量类型（float4 等）即 tk_struct。
-            return map_struct_type(t, ctx);
-        case tk_array:
-            // 数组类型（M3.1）：[N x T]。仅支持常量上界（VLA 不支持）。
-            return map_array_type(t, ctx);
-        default:
-            fail("不支持的类型 kind（M1.2.3 仅覆盖标量与指针）");
+    for (const TypeMapping& m : kTypeMappings) {
+        if (m.kind == t->kind) {
+            return m.map(t, ctx);
+        }
     }
+    fail("不支持的类型 kind（M1.2.3 仅覆盖标量与指针）");
 }
 
 // 剥掉 typedef / 限定符包装，取到底层类型（不改语义，只为读 kind）。
@@ -2048,113 +2063,151 @@ llvm::Value* emit_binop_by_base_op(an_expr_operator_kind base, a_type_ptr type, 
     return emit_int_arith(base, is_unsigned_integer(type), va, vb, kc);
 }
 
-// 把 EDG 运算符 kind 归类。
+// 单值运算符的判定：只认一个 kind，写成谓词是为了能进 kOperatorClasses 表。
+bool is_cast_operator(an_expr_operator_kind op) {
+    return op == eok_cast;
+}
+bool is_dot_field_operator(an_expr_operator_kind op) {
+    return op == eok_dot_field;
+}
+bool is_call_operator(an_expr_operator_kind op) {
+    return op == eok_call;
+}
+bool is_array_to_pointer_operator(an_expr_operator_kind op) {
+    return op == eok_array_to_pointer;
+}
+bool is_subscript_operator(an_expr_operator_kind op) {
+    return op == eok_subscript;
+}
+
+using OperatorPredicate = bool (*)(an_expr_operator_kind);
+
+struct OperatorClassRule {
+    OperatorPredicate matches;
+    OpClass cls;
+};
+
+// kind → 类别。**表中顺序即判定优先级**：复合赋值（`+=` 等）只被
+// is_assign_operator 认，必须先于其余谓词；加一个运算符只需改表一行，
+// classify_operator 的圈复杂度不随运算符数上涨（CCN 门禁 ≤10）。
+constexpr OperatorClassRule kOperatorClasses[] = {
+    {is_assign_operator, OpClass::Assign},
+    {is_arith_operator, OpClass::Arith},
+    {is_compare_operator, OpClass::Compare},
+    {is_bitwise_operator, OpClass::Bitwise},
+    {is_logical_operator, OpClass::Logical},
+    {is_cast_operator, OpClass::Cast},
+    {is_unary_operator, OpClass::Unary},
+    {is_dot_field_operator, OpClass::DotField},
+    {is_call_operator, OpClass::Call},
+    {is_array_to_pointer_operator, OpClass::ArrayToPointer},
+    {is_subscript_operator, OpClass::Subscript},
+};
+
+// 把 EDG 运算符 kind 归类。未命中任何规则即 Unsupported（由调用方 fail loud）。
 OpClass classify_operator(an_expr_operator_kind op) {
-    if (is_assign_operator(op)) {
-        return OpClass::Assign;
-    }
-    if (is_arith_operator(op)) {
-        return OpClass::Arith;
-    }
-    if (is_compare_operator(op)) {
-        return OpClass::Compare;
-    }
-    if (is_bitwise_operator(op)) {
-        return OpClass::Bitwise;
-    }
-    if (is_logical_operator(op)) {
-        return OpClass::Logical;
-    }
-    if (op == eok_cast) {
-        return OpClass::Cast;
-    }
-    if (is_unary_operator(op)) {
-        return OpClass::Unary;
-    }
-    if (op == eok_dot_field) {
-        return OpClass::DotField;
-    }
-    if (op == eok_call) {
-        return OpClass::Call;
-    }
-    if (op == eok_array_to_pointer) {
-        return OpClass::ArrayToPointer;
-    }
-    if (op == eok_subscript) {
-        return OpClass::Subscript;
+    for (const OperatorClassRule& rule : kOperatorClasses) {
+        if (rule.matches(op)) {
+            return rule.cls;
+        }
     }
     return OpClass::Unsupported;
 }
 
+// 运算符类别 → 翻译函数。查表分派（与 kStmtTable 同口径）：新增一个类别只改表一行，
+// translate_operation 的圈复杂度不随类别数上涨（CCN 门禁 ≤10）。
+using OperationHandler = llvm::Value* (*)(an_expr_operator_kind op, an_expr_node_ptr expr,
+                                          KernelContext& kc);
+
+llvm::Value* op_assign(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    return translate_assign(op, expr->variant.operation.operands, kc);
+}
+llvm::Value* op_arith(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    return translate_arith(op, expr, kc);
+}
+llvm::Value* op_compare(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    return translate_compare(op, expr, kc);
+}
+llvm::Value* op_bitwise(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    return translate_bitwise(op, expr, kc);
+}
+llvm::Value* op_logical(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    return translate_logical(op, expr, kc);
+}
+llvm::Value* op_cast(an_expr_operator_kind /*op*/, an_expr_node_ptr expr, KernelContext& kc) {
+    return translate_cast(expr, kc);
+}
+llvm::Value* op_unary(an_expr_operator_kind op, an_expr_node_ptr expr, KernelContext& kc) {
+    return translate_unary(op, expr, kc);
+}
+llvm::Value* op_dot_field(an_expr_operator_kind /*op*/, an_expr_node_ptr expr, KernelContext& kc) {
+    // 先试内建变量成员（threadIdx.x 等），再试普通结构体成员（向量类型 a.x）。
+    if (llvm::Value* v = try_translate_builtin_field(expr, kc)) {
+        return v;
+    }
+    if (llvm::Value* v = try_translate_struct_field(expr, kc)) {
+        return v;
+    }
+    fail("不支持的成员访问（仅覆盖内建变量与结构体成员）");
+}
+
+// 函数调用的翻译器链：依次尝试，全不命中才报错。
+// **顺序有语义**（内建识别先于同模块 `__device__` 函数），不要随手重排。
+using CallTranslator = llvm::Value* (*)(an_expr_node_ptr expr, KernelContext& kc);
+
+constexpr CallTranslator kCallTranslators[] = {
+    try_translate_atomic_call, try_translate_wmma_call,    try_translate_math_call,
+    try_translate_int_call,    try_translate_builtin_call, try_translate_ldg_call,
+    try_translate_device_call,
+};
+
+llvm::Value* op_call(an_expr_operator_kind /*op*/, an_expr_node_ptr expr, KernelContext& kc) {
+    for (CallTranslator translate : kCallTranslators) {
+        if (llvm::Value* v = translate(expr, kc)) {
+            return v;
+        }
+    }
+    fail(
+        "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic*/"
+        "数学内建（sqrtf/fabsf/__fmaf_rn 等）/整数内建（__popc/__clz/__ffs/"
+        "__brev/clock/clock64）/__ldg/cool_wmma_* 与同模块的 __device__ 函数）");
+}
+
+llvm::Value* op_array_to_pointer(an_expr_operator_kind /*op*/, an_expr_node_ptr expr,
+                                 KernelContext& kc) {
+    return translate_array_to_pointer(expr, kc);
+}
+llvm::Value* op_subscript(an_expr_operator_kind /*op*/, an_expr_node_ptr expr, KernelContext& kc) {
+    // 下标表达式作为 rvalue：取元素地址后 load。
+    llvm::Value* elem_addr = translate_subscript(expr, kc);
+    return kc.builder.CreateLoad(map_type(expr->type, kc.ctx), elem_addr);
+}
+
+struct OperationEntry {
+    OpClass cls;
+    OperationHandler handler;
+};
+
+constexpr OperationEntry kOperationTable[] = {
+    {OpClass::Assign, op_assign},       {OpClass::Arith, op_arith},
+    {OpClass::Compare, op_compare},     {OpClass::Bitwise, op_bitwise},
+    {OpClass::Logical, op_logical},     {OpClass::Cast, op_cast},
+    {OpClass::Unary, op_unary},         {OpClass::DotField, op_dot_field},
+    {OpClass::Call, op_call},           {OpClass::ArrayToPointer, op_array_to_pointer},
+    {OpClass::Subscript, op_subscript},
+};
+
 // 运算符翻译主入口：按运算符类别分派到具体翻译函数。
+// 覆盖范围即 kOperationTable 的条目；Unsupported（未归类）一律 fail loud。
 llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
     const an_expr_operator_kind op = expr->variant.operation.kind;
-    switch (classify_operator(op)) {
-        case OpClass::Assign:
-            return translate_assign(op, expr->variant.operation.operands, kc);
-        case OpClass::Arith:
-            return translate_arith(op, expr, kc);
-        case OpClass::Compare:
-            return translate_compare(op, expr, kc);
-        case OpClass::Bitwise:
-            return translate_bitwise(op, expr, kc);
-        case OpClass::Logical:
-            return translate_logical(op, expr, kc);
-        case OpClass::Cast:
-            return translate_cast(expr, kc);
-        case OpClass::Unary:
-            return translate_unary(op, expr, kc);
-        case OpClass::DotField: {
-            // 先试内建变量成员（threadIdx.x 等），再试普通结构体成员（向量类型 a.x）。
-            llvm::Value* v = try_translate_builtin_field(expr, kc);
-            if (v == nullptr) {
-                v = try_translate_struct_field(expr, kc);
-            }
-            if (v == nullptr) {
-                fail("不支持的成员访问（仅覆盖内建变量与结构体成员）");
-            }
-            return v;
+    const OpClass cls = classify_operator(op);
+    for (const OperationEntry& entry : kOperationTable) {
+        if (entry.cls == cls) {
+            return entry.handler(op, expr, kc);
         }
-        case OpClass::Call: {
-            // 依次尝试：原子内建 → wmma 内建 → 数学内建 → 无参内建 → 自定义 __device__ 函数；
-            // 都不是则报错。
-            llvm::Value* v = try_translate_atomic_call(expr, kc);
-            if (v == nullptr) {
-                v = try_translate_wmma_call(expr, kc);
-            }
-            if (v == nullptr) {
-                v = try_translate_math_call(expr, kc);
-            }
-            if (v == nullptr) {
-                v = try_translate_int_call(expr, kc);
-            }
-            if (v == nullptr) {
-                v = try_translate_builtin_call(expr, kc);
-            }
-            if (v == nullptr) {
-                v = try_translate_ldg_call(expr, kc);
-            }
-            if (v == nullptr) {
-                v = try_translate_device_call(expr, kc);
-            }
-            if (v == nullptr) {
-                fail(
-                    "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic*/"
-                    "数学内建（sqrtf/fabsf/__fmaf_rn 等）/整数内建（__popc/__clz/__ffs/"
-                    "__brev/clock/clock64）/__ldg/cool_wmma_* 与同模块的 __device__ 函数）");
-            }
-            return v;
-        }
-        case OpClass::ArrayToPointer:
-            return translate_array_to_pointer(expr, kc);
-        case OpClass::Subscript: {
-            // 下标表达式作为 rvalue：取元素地址后 load。
-            llvm::Value* elem_addr = translate_subscript(expr, kc);
-            return kc.builder.CreateLoad(map_type(expr->type, kc.ctx), elem_addr);
-        }
-        default:
-            fail("不支持的运算符（M1.2.3 仅覆盖算术/比较/赋值/取址/解引用/转换）");
     }
+    fail("不支持的运算符（M1.2.3 仅覆盖算术/比较/赋值/取址/解引用/转换）");
 }
 
 // 表达式翻译主体：按 kind 分派（不含位置补全，见 translate_expr）。

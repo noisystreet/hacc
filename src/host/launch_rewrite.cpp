@@ -114,6 +114,15 @@ std::size_t match_paren(const std::string& s, std::size_t i) {
     return std::string::npos;
 }
 
+// 左/右括号各一组，供「顶层切分」与配对逻辑复用。
+bool is_open_bracket(char c) {
+    return c == '(' || c == '[' || c == '{';
+}
+
+bool is_close_bracket(char c) {
+    return c == ')' || c == ']' || c == '}';
+}
+
 // 按顶层逗号切分（跳过嵌套括号/方括号/花括号与字面量/注释）；空串返回单元素列表。
 std::vector<std::string> split_top_level(const std::string& s) {
     std::vector<std::string> parts;
@@ -126,9 +135,9 @@ std::vector<std::string> split_top_level(const std::string& s) {
             continue;
         }
         char c = s[j];
-        if (c == '(' || c == '[' || c == '{') {
+        if (is_open_bracket(c)) {
             ++depth;
-        } else if (c == ')' || c == ']' || c == '}') {
+        } else if (is_close_bracket(c)) {
             --depth;
         } else if (c == ',' && depth == 0) {
             parts.push_back(s.substr(start, j - start));
@@ -177,6 +186,39 @@ struct LaunchRewrite {
     std::string error;
 };
 
+// `<<<grid, block, smem?, stream?>>>` 配置段的解析结果（未给的可选项取默认值）。
+struct LaunchConfig {
+    bool ok = false;
+    std::string grid;
+    std::string block;
+    std::string smem = "0";
+    std::string stream = "nullptr";
+    std::string error;
+};
+
+LaunchConfig parse_launch_config(const std::string& cfg) {
+    LaunchConfig c;
+    const std::vector<std::string> parts = split_top_level(cfg);
+    if (parts.size() < 2 || parts.size() > 4) {
+        c.error = "`<<<...>>>` 配置参数个数应为 2/3/4，实际 " + std::to_string(parts.size());
+        return c;
+    }
+    c.grid = trim(parts[0]);
+    c.block = trim(parts[1]);
+    if (parts.size() >= 3) {
+        c.smem = trim(parts[2]);
+    }
+    if (parts.size() >= 4) {
+        c.stream = trim(parts[3]);
+    }
+    if (c.grid.empty() || c.block.empty()) {
+        c.error = "`<<<...>>>` 的 grid/block 不能为空";
+        return c;
+    }
+    c.ok = true;
+    return c;
+}
+
 LaunchRewrite rewrite_launch(const std::string& s, std::size_t lt) {
     LaunchRewrite r;
     // 内核名回溯。
@@ -185,27 +227,15 @@ LaunchRewrite rewrite_launch(const std::string& s, std::size_t lt) {
         r.error = "`<<<` 前未找到内核名（疑似歧义或非法启动语法）";
         return r;
     }
-    r.name_start = lt - name.size();
-    r.kernel_name = name;
     // 定位 `<<<` 后的配置段，直到 `>>>`。
-    std::size_t cfg_begin = lt + 3;
-    std::size_t gt = s.find(">>>", cfg_begin);
+    std::size_t gt = s.find(">>>", lt + 3);
     if (gt == std::string::npos) {
         r.error = "`<<<` 未找到配对的 `>>>`";
         return r;
     }
-    std::string cfg = s.substr(cfg_begin, gt - cfg_begin);
-    std::vector<std::string> cfg_parts = split_top_level(cfg);
-    if (cfg_parts.size() < 2 || cfg_parts.size() > 4) {
-        r.error = "`<<<...>>>` 配置参数个数应为 2/3/4，实际 " + std::to_string(cfg_parts.size());
-        return r;
-    }
-    std::string grid = trim(cfg_parts[0]);
-    std::string block = trim(cfg_parts[1]);
-    std::string smem = (cfg_parts.size() >= 3) ? trim(cfg_parts[2]) : "0";
-    std::string stream = (cfg_parts.size() >= 4) ? trim(cfg_parts[3]) : "nullptr";
-    if (grid.empty() || block.empty()) {
-        r.error = "`<<<...>>>` 的 grid/block 不能为空";
+    const LaunchConfig cfg = parse_launch_config(s.substr(lt + 3, gt - lt - 3));
+    if (!cfg.ok) {
+        r.error = cfg.error;
         return r;
     }
     // 紧随的 `(...)` 实参。
@@ -221,8 +251,10 @@ LaunchRewrite rewrite_launch(const std::string& s, std::size_t lt) {
     }
     std::string args_trim = trim(s.substr(after + 1, close - after - 1));
 
-    r.text =
-        "haccLaunch(__cool_reg_" + name + ", " + grid + ", " + block + ", " + smem + ", " + stream;
+    r.name_start = lt - name.size();
+    r.kernel_name = name;
+    r.text = "haccLaunch(__cool_reg_" + name + ", " + cfg.grid + ", " + cfg.block + ", " +
+             cfg.smem + ", " + cfg.stream;
     if (!args_trim.empty()) {
         r.text += ", " + args_trim;
     }
@@ -415,6 +447,218 @@ SymbolCopyRewrite rewrite_get_symbol_address(const std::string& s, std::size_t i
     return r;
 }
 
+// s[i..] 是否以 lit 开头（lit_len 为 lit 的字面长度；i 越界返回 false）。
+bool starts_with_at(const std::string& s, std::size_t i, const char* lit, std::size_t lit_len) {
+    return i < s.size() && s.compare(i, lit_len, lit, lit_len) == 0;
+}
+
+// 追加去重：空名忽略，保持首次出现顺序。
+void add_unique(std::vector<std::string>& names, const std::string& name) {
+    if (name.empty()) {
+        return;
+    }
+    if (std::find(names.begin(), names.end(), name) == names.end()) {
+        names.push_back(name);
+    }
+}
+
+// M3.2 预扫描：收集文件作用域 `__constant__` / `__device__` 变量名
+// （供改写符号拷贝/取址 API）。预扫描而非依赖「声明先于使用」，顺序无关更稳妥。
+void collect_symbol_names(const std::string& src, RewriteResult& result) {
+    for (std::size_t k = 0; k + 12 <= src.size();) {
+        std::size_t sk = skip_trivia(src, k);
+        if (sk != k) {
+            k = sk;
+            continue;
+        }
+        if (starts_with_at(src, k, "__constant__", 12)) {
+            add_unique(result.constant_names, symbol_name_after(src, k, 12));
+            k += 12;
+            continue;
+        }
+        // `__device__` 变量（函数已由 symbol_name_after 排除）。
+        if (starts_with_at(src, k, "__device__", 10)) {
+            add_unique(result.device_names, symbol_name_after(src, k, 10));
+            k += 10;
+            continue;
+        }
+        ++k;
+    }
+}
+
+// 一次改写动作：命中则 handled=true，调用方用 text 替换 [当前位置, next)。
+// undo 是从已输出缓冲末尾需回退的字节数（内核名已随主循环逐字符写出）；
+// error 非空表示「命中但出错」，调用方应终止整体改写并透传。
+struct RewriteStep {
+    bool handled = false;
+    std::size_t undo = 0;
+    std::string text;
+    std::size_t next = 0;
+    std::string error;
+};
+
+// `<<<...>>>` 启动语法 → haccLaunch(...)。
+RewriteStep step_launch(const std::string& s, std::size_t i, RewriteResult& result) {
+    RewriteStep step;
+    const LaunchRewrite lr = rewrite_launch(s, i);
+    if (!lr.ok) {
+        step.error = lr.error;
+        return step;
+    }
+    // 记录内核名（去重、按首次出现顺序）。
+    add_unique(result.kernel_names, lr.kernel_name);
+    // 内核名已随主循环逐字符写入 out，需回退（改写文本自带 `__cool_reg_<name>`）。
+    step.handled = true;
+    step.undo = i - lr.name_start;
+    step.text = lr.text;
+    step.next = lr.next;
+    return step;
+}
+
+// `__global__`：host 源剥关键字并剔除函数体（只留声明）；
+// device 源（keep_global_bodies）**不动**（cpfe 需其属性识别内核）。
+RewriteStep step_global(const std::string& s, std::size_t i, bool keep_global_bodies) {
+    if (keep_global_bodies) {
+        return RewriteStep{};
+    }
+    const GlobalStrip g = strip_global(s, i);
+    RewriteStep step;
+    if (!g.ok) {
+        step.error = g.error;
+        return step;
+    }
+    step.handled = true;
+    step.text = g.text;
+    step.next = g.next;
+    return step;
+}
+
+// `__constant__`（host 源）：剔除整条声明（g++ 不认识该关键字）；device 源原样保留。
+RewriteStep step_constant_decl(const std::string& s, std::size_t i, bool keep_global_bodies) {
+    if (keep_global_bodies) {
+        return RewriteStep{};
+    }
+    // 跳到声明末尾 `;`（跳过括号/字面量），连同 `;` 一起剔除。
+    const std::size_t n = s.size();
+    std::size_t j = i + 12;
+    while (j < n && s[j] != ';') {
+        const std::size_t skipped = skip_trivia(s, j);
+        j = (skipped != j) ? skipped : j + 1;
+    }
+    RewriteStep step;
+    step.handled = true;
+    step.next = (j < n) ? j + 1 : n;
+    return step;
+}
+
+// device 源里的 host-only API 调用：整段（含实参）替换为 `coolSuccess`。
+// 不能用 `(void)0`：这些调用常出现在 `coolError_t e = ...` 这类表达式位置。
+// 实参括号缺失/不配对时返回 false，调用方按普通字符原样输出。
+bool replace_with_cool_success(const std::string& s, std::size_t i, std::size_t name_len,
+                               RewriteStep* step) {
+    const std::size_t paren = skip_ws(s, i + name_len);
+    if (paren >= s.size() || s[paren] != '(') {
+        return false;
+    }
+    const std::size_t close = match_paren(s, paren);
+    if (close == std::string::npos) {
+        return false;
+    }
+    step->handled = true;
+    step->text = "coolSuccess";
+    step->next = close + 1;
+    return true;
+}
+
+// 把 rewrite_*_symbol 的结果转成改写步（未命中即 handled=false）。
+RewriteStep step_from_symbol_copy(const SymbolCopyRewrite& sr) {
+    RewriteStep step;
+    if (!sr.ok) {
+        return step;
+    }
+    step.handled = true;
+    step.text = sr.text;
+    step.next = sr.next;
+    return step;
+}
+
+// 符号类 API：`cudaXxx` 与 `coolXxx` 只差首字母，名字长度相同，共用一条规则。
+struct SymbolApiRule {
+    const char* name;
+    std::size_t name_len;
+    SymbolCopyRewrite (*rewrite)(const std::string&, std::size_t, const std::vector<std::string>&);
+    bool try_constant_first;  // to-symbol 的符号可能是 __constant__ 或 __device__ 变量
+};
+
+constexpr SymbolApiRule kSymbolApiRules[] = {
+    {"cudaMemcpyToSymbol", 18, rewrite_memcpy_to_symbol, true},
+    {"coolMemcpyToSymbol", 18, rewrite_memcpy_to_symbol, true},
+    {"cudaMemcpyFromSymbol", 20, rewrite_memcpy_from_symbol, false},
+    {"coolMemcpyFromSymbol", 20, rewrite_memcpy_from_symbol, false},
+    {"cudaGetSymbolAddress", 20, rewrite_get_symbol_address, false},
+    {"coolGetSymbolAddress", 20, rewrite_get_symbol_address, false},
+};
+
+// 应用一条符号 API 规则：device 源整段替换为 `coolSuccess`；
+// host 源改写为 `__cool_*_symbol_<sym>(...)` 包装调用（未收集到该符号则不改写）。
+RewriteStep apply_symbol_api(const std::string& s, std::size_t i, const SymbolApiRule& rule,
+                             bool keep_global_bodies, const RewriteResult& result) {
+    RewriteStep step;
+    if (keep_global_bodies) {
+        if (replace_with_cool_success(s, i, rule.name_len, &step)) {
+            return step;
+        }
+        return RewriteStep{};
+    }
+    if (rule.try_constant_first) {
+        const SymbolCopyRewrite sr = rule.rewrite(s, i + rule.name_len, result.constant_names);
+        if (sr.ok) {
+            return step_from_symbol_copy(sr);
+        }
+    }
+    return step_from_symbol_copy(rule.rewrite(s, i + rule.name_len, result.device_names));
+}
+
+// 符号拷贝/取址 API（`cuda|cool` × ToSymbol/FromSymbol/GetSymbolAddress）。
+RewriteStep step_symbol_api(const std::string& s, std::size_t i, bool keep_global_bodies,
+                            const RewriteResult& result) {
+    for (const SymbolApiRule& rule : kSymbolApiRules) {
+        if (starts_with_at(s, i, rule.name, rule.name_len)) {
+            return apply_symbol_api(s, i, rule, keep_global_bodies, result);
+        }
+    }
+    return RewriteStep{};
+}
+
+// 下划线开头的两条规则：`__global__` 与 `__constant__`。
+RewriteStep step_underscore_keyword(const std::string& s, std::size_t i, bool keep_global_bodies) {
+    if (starts_with_at(s, i, "__global__", 10)) {
+        return step_global(s, i, keep_global_bodies);
+    }
+    if (starts_with_at(s, i, "__constant__", 12)) {
+        return step_constant_decl(s, i, keep_global_bodies);
+    }
+    return RewriteStep{};
+}
+
+// 在 i 处尝试所有改写规则（按首字符快速分派，避免每条规则都做一遍字符串比较）。
+RewriteStep rewrite_at(const std::string& s, std::size_t i, const RewriteOptions& options,
+                       RewriteResult& result) {
+    switch (s[i]) {
+        case '<':
+            if (starts_with_at(s, i, "<<<", 3)) {
+                return step_launch(s, i, result);
+            }
+            return RewriteStep{};
+        case '_':
+            return step_underscore_keyword(s, i, options.keep_global_bodies);
+        case 'c':
+            return step_symbol_api(s, i, options.keep_global_bodies, result);
+        default:
+            return RewriteStep{};
+    }
+}
+
 }  // namespace
 
 RewriteResult rewrite_source(const std::string& src, const RewriteOptions& options) {
@@ -423,35 +667,8 @@ RewriteResult rewrite_source(const std::string& src, const RewriteOptions& optio
     out.reserve(src.size());
 
     // M3.2 预扫描：收集文件作用域 `__constant__` / `__device__` 变量名
-    // （供改写符号拷贝/取址 API）。单趟主循环中声明通常先于使用，但预扫描更稳妥
-    // （顺序无关）。
-    for (std::size_t k = 0; k + 12 <= src.size();) {
-        std::size_t sk = skip_trivia(src, k);
-        if (sk != k) {
-            k = sk;
-            continue;
-        }
-        if (src.compare(k, 12, "__constant__") == 0) {
-            std::string nm = symbol_name_after(src, k, 12);
-            if (!nm.empty() && std::find(result.constant_names.begin(), result.constant_names.end(),
-                                         nm) == result.constant_names.end()) {
-                result.constant_names.push_back(nm);
-            }
-            k += 12;
-            continue;
-        }
-        // `__device__` 变量（函数已由 symbol_name_after 排除）。
-        if (src.compare(k, 10, "__device__") == 0) {
-            std::string nm = symbol_name_after(src, k, 10);
-            if (!nm.empty() && std::find(result.device_names.begin(), result.device_names.end(),
-                                         nm) == result.device_names.end()) {
-                result.device_names.push_back(nm);
-            }
-            k += 10;
-            continue;
-        }
-        ++k;
-    }
+    // （供改写符号拷贝/取址 API）。
+    collect_symbol_names(src, result);
 
     std::size_t i = 0;
     const std::size_t n = src.size();
@@ -464,141 +681,22 @@ RewriteResult rewrite_source(const std::string& src, const RewriteOptions& optio
             continue;
         }
 
-        char c = src[i];
-
-        // `<<<` 启动语法。
-        if (c == '<' && i + 2 < n && src[i + 1] == '<' && src[i + 2] == '<') {
-            LaunchRewrite lr = rewrite_launch(src, i);
-            if (!lr.ok) {
-                result.ok = false;
-                result.error = lr.error;
-                return result;
-            }
-            // 记录内核名（去重、按首次出现顺序）。
-            if (std::find(result.kernel_names.begin(), result.kernel_names.end(), lr.kernel_name) ==
-                result.kernel_names.end()) {
-                result.kernel_names.push_back(lr.kernel_name);
-            }
-            // 内核名已随主循环逐字符写入 out，需回退（改写文本自带 `__cool_reg_<name>`）。
-            out.resize(out.size() - (i - lr.name_start));
-            out += lr.text;
-            i = lr.next;
+        // 改写规则（`<<<>>>` / `__global__` / `__constant__` / 符号类 API）：命中则用
+        // step.text 替换 [i, step.next)；未命中则原样输出当前字符。
+        const RewriteStep step = rewrite_at(src, i, options, result);
+        if (!step.error.empty()) {
+            result.ok = false;
+            result.error = step.error;
+            return result;
+        }
+        if (step.handled) {
+            out.resize(out.size() - step.undo);
+            out += step.text;
+            i = step.next;
             continue;
         }
 
-        // `__global__`：剥关键字；host 源（keep_global_bodies=false）再剔除函数体。
-        // device 源（keep_global_bodies=true）**不动** `__global__`（cpfe 需其属性识别内核）。
-        if (!options.keep_global_bodies && c == '_' && src.compare(i, 10, "__global__") == 0) {
-            GlobalStrip g = strip_global(src, i);
-            if (!g.ok) {
-                result.ok = false;
-                result.error = g.error;
-                return result;
-            }
-            out += g.text;
-            i = g.next;
-            continue;
-        }
-
-        // M3.2 `__constant__`：host 源剔除声明（g++ 不认识该关键字）；device 源原样保留。
-        if (!options.keep_global_bodies && c == '_' && src.compare(i, 12, "__constant__") == 0) {
-            // 跳到声明末尾 `;`（跳过括号/字面量）。
-            std::size_t j = i + 12;
-            while (j < n && src[j] != ';') {
-                std::size_t sj = skip_trivia(src, j);
-                if (sj != j) {
-                    j = sj;
-                    continue;
-                }
-                ++j;
-            }
-            i = (j < n) ? j + 1 : n;  // 连同 `;` 一起剔除
-            continue;
-        }
-
-        // `cudaMemcpyToSymbol` / `coolMemcpyToSymbol`（主机 → 设备符号）：
-        //   host 源 → 改写为 hacc 包装调用（__cool_memcpy_to_symbol_<sym>）；
-        //   device 源 → 整体替换为 `coolSuccess`（该调用只在 host 侧执行，device 源仅需
-        //     能解析；用 `coolSuccess` 而非 `(void)0`，因为调用常出现在
-        //     `coolError_t e = ...` 这类表达式位置，`(void)0` 无法初始化 coolError_t）。
-        if (c == 'c' && (src.compare(i, 18, "cudaMemcpyToSymbol") == 0 ||
-                         src.compare(i, 18, "coolMemcpyToSymbol") == 0)) {
-            if (options.keep_global_bodies) {
-                std::size_t paren = skip_ws(src, i + 18);
-                if (paren < n && src[paren] == '(') {
-                    std::size_t close = match_paren(src, paren);
-                    if (close != std::string::npos) {
-                        out += "coolSuccess";
-                        i = close + 1;
-                        continue;
-                    }
-                }
-            } else {
-                // 符号可能是 __constant__ 或 __device__ 变量：两张表都要查
-                // （两者互斥，故按序尝试即可）。
-                SymbolCopyRewrite sr = rewrite_memcpy_to_symbol(src, i + 18, result.constant_names);
-                if (!sr.ok) {
-                    sr = rewrite_memcpy_to_symbol(src, i + 18, result.device_names);
-                }
-                if (sr.ok) {
-                    out += sr.text;
-                    i = sr.next;
-                    continue;
-                }
-            }
-        }
-
-        // `cudaMemcpyFromSymbol` / `coolMemcpyFromSymbol`（设备符号 → 主机/设备）：
-        //   host 源 → 改写为 hacc 包装调用（__cool_memcpy_from_symbol_<sym>）;
-        //   device 源 → 替换为 `coolSuccess`。不用 `(void)0` 是因为该 API 有返回值，
-        //     常出现在 `coolError_t e = ...` 这类表达式位置，`(void)0` 无法赋给 coolError_t。
-        if (c == 'c' && (src.compare(i, 20, "cudaMemcpyFromSymbol") == 0 ||
-                         src.compare(i, 20, "coolMemcpyFromSymbol") == 0)) {
-            if (options.keep_global_bodies) {
-                std::size_t paren = skip_ws(src, i + 20);
-                if (paren < n && src[paren] == '(') {
-                    std::size_t close = match_paren(src, paren);
-                    if (close != std::string::npos) {
-                        out += "coolSuccess";
-                        i = close + 1;
-                        continue;
-                    }
-                }
-            } else {
-                SymbolCopyRewrite sr = rewrite_memcpy_from_symbol(src, i + 20, result.device_names);
-                if (sr.ok) {
-                    out += sr.text;
-                    i = sr.next;
-                    continue;
-                }
-            }
-        }
-
-        // `cudaGetSymbolAddress` / `coolGetSymbolAddress`：同上，host 源改写为
-        // __cool_get_symbol_address_<sym>(devPtr)，device 源替换为 `coolSuccess`。
-        if (c == 'c' && (src.compare(i, 20, "cudaGetSymbolAddress") == 0 ||
-                         src.compare(i, 20, "coolGetSymbolAddress") == 0)) {
-            if (options.keep_global_bodies) {
-                std::size_t paren = skip_ws(src, i + 20);
-                if (paren < n && src[paren] == '(') {
-                    std::size_t close = match_paren(src, paren);
-                    if (close != std::string::npos) {
-                        out += "coolSuccess";
-                        i = close + 1;
-                        continue;
-                    }
-                }
-            } else {
-                SymbolCopyRewrite sr = rewrite_get_symbol_address(src, i + 20, result.device_names);
-                if (sr.ok) {
-                    out += sr.text;
-                    i = sr.next;
-                    continue;
-                }
-            }
-        }
-
-        out += c;
+        out += src[i];
         ++i;
     }
 

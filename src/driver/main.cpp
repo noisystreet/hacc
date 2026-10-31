@@ -111,6 +111,39 @@ bool parse_emit_value(const char* a, hacc::driver::EmitMode* out) {
     return false;
 }
 
+// 处理「命中即结束解析」的开关（--version / -h / --help）。返回 true 表示应直接返回 0。
+// 抽成函数只为压住 parse_args 的分支数（lizard CCN 门限 10）。
+bool take_stop_flag(const char* a, Options* out) {
+    if (std::strcmp(a, "--version") == 0) {
+        out->want_version = true;
+        return true;
+    }
+    if (std::strcmp(a, "-h") == 0 || std::strcmp(a, "--help") == 0) {
+        out->want_help = true;
+        return true;
+    }
+    return false;
+}
+
+// `-keep` / `--keep`：保留中间产物。返回 true 表示命中。
+bool is_keep_flag(const char* a) {
+    return std::strcmp(a, "-keep") == 0 || std::strcmp(a, "--keep") == 0;
+}
+
+// 处理 `前缀=值` 形式的选项（`-arch=<arch>` / `--emit=<mode>`）。
+// 返回 0 = 未命中，1 = 已处理，2 = 值非法（调用方应返回退出码 2）。
+// 集中在一处：每加一个这类选项不必在 parse_args 里再多两个分支。
+int take_inline_value_option(const char* a, Options* out) {
+    if (std::strncmp(a, "-arch=", 6) == 0) {
+        out->pipeline.arch = a + 6;
+        return 1;
+    }
+    if (std::strncmp(a, "--emit=", 7) == 0) {
+        return parse_emit_value(a, &out->pipeline.emit) ? 1 : 2;
+    }
+    return 0;
+}
+
 // 解析命令行。返回 0 表示继续；非 0 为应直接返回的退出码。
 int parse_args(int argc, char** argv, Options* out) {
     // argv[0] 用于推导同目录子工具。
@@ -119,29 +152,21 @@ int parse_args(int argc, char** argv, Options* out) {
     }
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
-        if (std::strcmp(a, "--version") == 0) {
-            out->want_version = true;
-            return 0;
-        }
-        if (std::strcmp(a, "-h") == 0 || std::strcmp(a, "--help") == 0) {
-            out->want_help = true;
+        if (take_stop_flag(a, out)) {
             return 0;
         }
         if (take_value_option(a, &i, argc, argv, out)) {
             continue;
         }
-        if (std::strncmp(a, "-arch=", 6) == 0) {
-            out->pipeline.arch = a + 6;
+        const int inline_rc = take_inline_value_option(a, out);
+        if (inline_rc == 2) {
+            return 2;
+        }
+        if (inline_rc == 1) {
             continue;
         }
-        if (std::strcmp(a, "-keep") == 0 || std::strcmp(a, "--keep") == 0) {
+        if (is_keep_flag(a)) {
             out->pipeline.keep = true;
-            continue;
-        }
-        if (std::strncmp(a, "--emit=", 7) == 0) {
-            if (!parse_emit_value(a, &out->pipeline.emit)) {
-                return 2;
-            }
             continue;
         }
         if (a[0] == '-') {
