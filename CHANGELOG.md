@@ -6,6 +6,24 @@
 
 ### Added
 
+- **`__ldg`：只读数据缓存加载（P6 R5 第二批）**：新增 `try_translate_ldg_call`，把
+  `__ldg(&a[i])` 映射为 `ld.global.nc`（非相干只读缓存）。
+
+  **两个条件缺一不可**（spike 实测，详见 TODO C15）：指针在 **global 地址空间** +
+  带 `!invariant.load` metadata。load 类型直接取调用表达式的类型，
+  **不需要**按指针类型另做重载分派 —— 这条推翻了立项时「`__ldg` 需要类型重载机制」
+  的判断（那本是 warp 原语的阻塞点，现只剩地址空间一项）。
+
+  新增 `tests/golden/e2e/ldg.cu`（数值 128 项断言）+ PTX 断言 `cvta.to.global` 与
+  `ld.global.nc` 必须**同时**出现。`make check` **242/242**、零 SKIP。
+
+  **反向验证暴露了一个重要事实**：删掉 `setMetadata` 后，PTX 退回 `ld.global.f32`，
+  而 e2e 的**数值断言全部照常通过** —— 一个「根本没走只读缓存」的假实现，数值测试
+  完全无感，**只有 PTX 形态断言能抓住**。这是「数值 + 形态」双档断言必须并存的实证，
+  已写进代码注释。
+  （另注：去掉 `addrspacecast` 则测不出差别 —— hacc 的指针参数本来就带 global 语义，
+  该 cast 目前是 no-op，保留只为不依赖这个实现细节。）
+
 - **设备内建第二批：整数位操作与核内计时（P6 R5 第一批）**：`il_to_llvm.cpp` 新增
   `try_translate_int_call`，把 `__popc` / `__clz` / `__ffs` / `__brev` / `clock()` / `clock64()`
   映射到 `llvm.ctpop.i32` / `ctlz` / `cttz` / `bitreverse` 与

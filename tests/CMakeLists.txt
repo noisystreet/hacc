@@ -718,6 +718,41 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_il_to_ptx_int_builtins)
         endif()
 
+        # P6/R5 第二批：__ldg（只读数据缓存加载）。
+        # 数值上应与普通 load 一致；PTX 上必须出 ld.global.nc —— 只加 metadata、
+        # 不做地址空间转换时，PTX 会静默退回普通 ld.global（spike 实测）。
+        set(_e2e_ldg_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_ldg_run")
+        add_test(NAME e2e_hacc_ldg_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/ldg.cu"
+                    -o "${_e2e_ldg_exe}")
+        add_test(NAME e2e_hacc_ldg_run
+            COMMAND "${_e2e_ldg_exe}")
+        set_tests_properties(e2e_hacc_ldg_run PROPERTIES
+            DEPENDS e2e_hacc_ldg_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "ldg OK")
+
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_ldg_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_ldg.cil")
+            set(_ldg_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_ldg.ptx")
+            add_test(NAME golden_frontend_ldg
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_ldg_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/ldg.cu")
+            add_test(NAME golden_device_il_to_ptx_ldg
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_ldg_ptx}" "${_ldg_cil}")
+            set_tests_properties(golden_device_il_to_ptx_ldg PROPERTIES
+                DEPENDS golden_frontend_ldg)
+            # 两个条件缺一不可：cvta.to.global（地址空间）+ ld.global.nc（metadata）。
+            add_test(NAME golden_device_il_to_ptx_ldg_nc
+                COMMAND sh -c "grep -q 'cvta.to.global' \"$1\" && grep -q 'ld.global.nc' \"$1\""
+                        _ "${_ldg_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_ldg_nc PROPERTIES
+                DEPENDS golden_device_il_to_ptx_ldg)
+        endif()
+
         # S2 T3 负向：需要 libdevice 的精确数学函数必须明确报错，不得静默降级为 .approx。
         # 退出码与消息分开验证（WILL_FAIL 与 PASS_REGULAR_EXPRESSION 会互相翻转）。
         set(_math_unsup "${CMAKE_CURRENT_SOURCE_DIR}/golden/negative/unsupported_math.cu")

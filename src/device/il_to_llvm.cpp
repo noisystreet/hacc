@@ -1632,6 +1632,55 @@ llvm::Value* try_translate_int_call(an_expr_node_ptr expr, KernelContext& kc) {
     return emit_int_builtin(*mapping, args, kc);
 }
 
+// ---------------------------------------------------------------------------
+// __ldg：只读数据缓存加载（P6 R5 第二批）
+// ---------------------------------------------------------------------------
+// 语义：声明「这块数据在 kernel 内只读」，让 load 走非相干缓存（`ld.global.nc`）。
+//
+// **两个条件缺一不可**（spike 结论见 docs/TODO.md C15，llc 19.1.7 + ptxas sm_89 实测）：
+//   1. 指针必须在 **global 地址空间** —— hacc 的指针是 generic(0)，单加 metadata
+//      仍会出普通 `ld.f32`，必须 addrspacecast 到 1（PTX 出 `cvta.to.global`）；
+//   2. 必须带 `!invariant.load` metadata。
+// 任一缺失，PTX 都会静默退回普通 `ld.global` —— 能编、能跑、但根本没走只读缓存，
+// 正是本项目最忌讳的「假实现」。
+//
+// load 类型直接取调用表达式的类型：`__ldg(&a[i])` 的返回类型就是 load 类型，
+// **不需要**按指针类型另做一套重载分派。
+//
+// 实测补充：hacc 的指针参数在 IR 里已带 global 语义（PTX 里本来就有一条
+// `cvta.to.global`），所以这里的 addrspacecast 目前是 **no-op**（会被优化掉）。
+// 保留它是不想依赖这个实现细节 —— 将来若有 generic 指针流入 __ldg，它才真正起作用。
+//
+// **反向验证（重要）**：去掉 setMetadata 后 PTX 退回 `ld.global.f32`，而 e2e 的
+// 数值断言**全部照常通过** —— 一个「没走只读缓存」的假实现，数值测试完全无感，
+// 只有 PTX 形态断言能抓住。这是本项目坚持「数值 + 形态」双档断言的实证。
+llvm::Value* try_translate_ldg_call(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr callee = expr->variant.operation.operands;
+    if (callee == nullptr || callee->kind != enk_routine) {
+        return nullptr;
+    }
+    a_routine_ptr r = callee->variant.routine.ptr;
+    const char* name = (r != nullptr) ? r->source_corresp.name : nullptr;
+    if (name == nullptr || std::strcmp(name, "__ldg") != 0) {
+        return nullptr;
+    }
+
+    std::vector<llvm::Value*> args = translate_builtin_args(callee, kc);
+    if (args.size() != 1) {
+        fail("__ldg 需要 1 个实参（指向全局内存的指针），实际 " + std::to_string(args.size()) +
+                 " 个",
+             expr->position);
+    }
+
+    llvm::Type* elem_ty = map_type(expr->type, kc.ctx);
+    llvm::Type* global_ptr_ty = llvm::PointerType::get(kc.ctx, /*AddressSpace=*/1);
+    llvm::Value* global_ptr = kc.builder.CreateAddrSpaceCast(args[0], global_ptr_ty);
+    llvm::LoadInst* load = kc.builder.CreateLoad(elem_ty, global_ptr);
+    load->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                      llvm::MDNode::get(kc.ctx, llvm::ArrayRef<llvm::Metadata*>()));
+    return load;
+}
+
 // 翻译对同模块自定义 __device__ 函数的调用（M5.4）。
 // 返回 nullptr 表示「不是设备函数调用」，交由调用方继续判定。
 llvm::Value* try_translate_device_call(an_expr_node_ptr expr, KernelContext& kc) {
@@ -2083,13 +2132,16 @@ llvm::Value* translate_operation(an_expr_node_ptr expr, KernelContext& kc) {
                 v = try_translate_builtin_call(expr, kc);
             }
             if (v == nullptr) {
+                v = try_translate_ldg_call(expr, kc);
+            }
+            if (v == nullptr) {
                 v = try_translate_device_call(expr, kc);
             }
             if (v == nullptr) {
                 fail(
                     "不支持的函数调用（仅覆盖内建 __syncthreads/__threadfence*/atomic*/"
                     "数学内建（sqrtf/fabsf/__fmaf_rn 等）/整数内建（__popc/__clz/__ffs/"
-                    "__brev/clock/clock64）/cool_wmma_* 与同模块的 __device__ 函数）");
+                    "__brev/clock/clock64）/__ldg/cool_wmma_* 与同模块的 __device__ 函数）");
             }
             return v;
         }
