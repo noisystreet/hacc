@@ -9,11 +9,11 @@ CLANG_FORMAT ?= clang-format
 CLANG_TIDY ?= clang-tidy
 LIZARD ?= lizard
 
-# lizard 阈值（见 whitelizard.txt 的历史债务白名单）
+# lizard 阈值。**没有豁免清单**：超标就改代码（2026-10-31 删除 whitelizard.txt，
+# C13 的 10 条存量已全部重构清零；再需要「手写豁免」时先问是不是查表/抽函数就能消）。
 CCN_THRESHOLD ?= 10
 FUNC_LENGTH_THRESHOLD ?= 200
 LIZARD_PATHS := src include tests
-LIZARD_WHITELIST := whitelizard.txt
 
 SRC_DIRS := src tests samples include
 FMT_FILES := $(shell find $(SRC_DIRS) -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \) 2>/dev/null)
@@ -65,12 +65,14 @@ lint: configure
 		echo "clang-tidy not found; skipping"; \
 	fi
 
-# 圈复杂度（CCN）与函数长度门禁；历史债务见 $(LIZARD_WHITELIST)。
+# 圈复杂度（CCN）与函数长度门禁。**无豁免清单**：任何超标都必须改代码，
+# 不要恢复「白名单文件」这条路 —— 上一版 10 条豁免最终全部被「查表分派 / 抽小函数」
+# 消掉，说明豁免只是拖延（处置见 docs/TODO.md C13）。
 ccn:
 	@if command -v $(LIZARD) >/dev/null 2>&1; then \
 		$(LIZARD) $(LIZARD_PATHS) -l cpp \
 			-C $(CCN_THRESHOLD) -L $(FUNC_LENGTH_THRESHOLD) \
-			-W $(LIZARD_WHITELIST) -w; \
+			-w; \
 	else \
 		echo "lizard not found; skipping"; \
 	fi
