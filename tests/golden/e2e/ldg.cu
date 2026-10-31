@@ -21,23 +21,38 @@ __global__ void ldg_k(const float* in, const int* in_i, float* out, int* out_i) 
 // （`__ldg(&v4[i])` 的类型是 float4 → 一条 `ld.global.nc.v4.f32`），
 // 不需要另做重载分派机制。标量与向量走同一条翻译路径。
 //
-// 写法约束（本轮实测）：hacc 目前**不支持成员左值**（`out4[i].x = ...` 会报
-// 「不支持的左值表达式」），所以向量值只能整体赋值、成员只作右值读取。
-// 这是语言子集缺口，已登记在 docs/TODO.md C16。
+// 这里同时是**成员左值**的回归用例（原本 `out4[i].x = ...` 会报
+// 「不支持的左值表达式」，C17 之后支持）：三种写法各覆盖一条通路 ——
+//   ① 下标基的成员写入      out4[i].x = ...   （基是 eok_subscript）
+//   ② 变量基的成员写入       r.x = ...         （基是 enk_variable）
+//   ③ 成员上的复合赋值       r.x += 1.0f       （读-改-写，地址只求值一次）
 __global__ void ldg_vec_k(const float4* in4, float4* out4, float* out_scal,
                           const int4* in_i4, int4* out_i4, int* out_iscal) {
     const int i = threadIdx.x;
 
-    // 聚合整体拷贝：验证 v4 load 的结果能作为 float4 值流转。
-    out4[i] = __ldg(&in4[i]);
+    // ① 下标结果的成员写入。
+    float4 v = __ldg(&in4[i]);
+    out4[i].x = v.x * 2.0f;
+    out4[i].y = v.y * 2.0f;
+    out4[i].z = v.z * 2.0f;
+    out4[i].w = v.w * 2.0f;
+
+    // ② 局部向量的成员写入 + ③ 成员复合赋值。
+    float4 r;
+    r.x = v.x;
+    r.y = v.y;
+    r.z = v.z;
+    r.w = v.w;
+    r.x += 1.0f;
+
+    // 聚合整体赋值（与成员写入并存，验证两条路不打架）。
     out_i4[i] = __ldg(&in_i4[i]);
 
     // 成员只读：验证 v4 load 的 4 个分量真的是内存里那 4 个值。
-    float4 v = __ldg(&in4[i]);
-    out_scal[i * 4 + 0] = v.x;
-    out_scal[i * 4 + 1] = v.y;
-    out_scal[i * 4 + 2] = v.z;
-    out_scal[i * 4 + 3] = v.w;
+    out_scal[i * 4 + 0] = r.x;
+    out_scal[i * 4 + 1] = r.y;
+    out_scal[i * 4 + 2] = r.z;
+    out_scal[i * 4 + 3] = r.w;
 
     int4 w = __ldg(&in_i4[i]);
     out_iscal[i * 4 + 0] = w.x;
@@ -152,12 +167,12 @@ int main() {
     coolFree(d_out_iscal);
 
     for (int i = 0; i < VN; ++i) {
-        // 聚合整体拷贝：逐分量等于输入。
-        if (h_out4[i].x != h_in4[i].x || h_out4[i].y != h_in4[i].y ||
-            h_out4[i].z != h_in4[i].z || h_out4[i].w != h_in4[i].w) {
+        // ① 下标基成员写入：每个分量都是输入的 2 倍。
+        if (h_out4[i].x != h_in4[i].x * 2.0f || h_out4[i].y != h_in4[i].y * 2.0f ||
+            h_out4[i].z != h_in4[i].z * 2.0f || h_out4[i].w != h_in4[i].w * 2.0f) {
             printf("ldg FAIL: vec[%d] = {%g,%g,%g,%g}, want {%g,%g,%g,%g}\n", i, h_out4[i].x,
-                   h_out4[i].y, h_out4[i].z, h_out4[i].w, h_in4[i].x, h_in4[i].y, h_in4[i].z,
-                   h_in4[i].w);
+                   h_out4[i].y, h_out4[i].z, h_out4[i].w, h_in4[i].x * 2.0f, h_in4[i].y * 2.0f,
+                   h_in4[i].z * 2.0f, h_in4[i].w * 2.0f);
             ++failed;
         }
         if (h_out_i4[i].x != i || h_out_i4[i].y != i * 2 || h_out_i4[i].z != i * 3 ||
@@ -166,9 +181,8 @@ int main() {
                    h_out_i4[i].y, h_out_i4[i].z, h_out_i4[i].w, i, i * 2, i * 3, -i);
             ++failed;
         }
-        // 成员读取：4 个分量各自与内存一致（证明 v4 load 真的按 128 位取，
-        // 且分量顺序没有错位）。
-        const float want_scal[4] = {h_in4[i].x, h_in4[i].y, h_in4[i].z, h_in4[i].w};
+        // ②③ 变量基成员写入 + 复合赋值：只有 .x 被 +1，其余原值。
+        const float want_scal[4] = {h_in4[i].x + 1.0f, h_in4[i].y, h_in4[i].z, h_in4[i].w};
         const int want_iscal[4] = {i, i * 2, i * 3, -i};
         for (int k = 0; k < 4; ++k) {
             if (h_out_scal[i * 4 + k] != want_scal[k]) {

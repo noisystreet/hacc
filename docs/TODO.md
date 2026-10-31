@@ -427,8 +427,11 @@
       | `device::emit_ptx_from_il` | 4（**早已达标**） | 只删清单行 |
 
       **反向验证**：同一组 lizard 参数喂一份 CCN 12 的临时文件，退出码 1 —— 确认空清单没有
-      把门禁放哑。`whitelizard.txt` 保留（`make ccn` 的 `-W` 指向它），文件头写明「新增条目 =
-      登记新债务，先确认是不是查表/抽函数就能消」。
+      把门禁放哑。
+      ~~`whitelizard.txt` 保留（`make ccn` 的 `-W` 指向它）~~ → **2026-10-31 已删除该文件**：
+      清单既已为空、`make ccn` 也不再传 `-W`，「豁免」这条路彻底关掉（超标只能改代码）。
+      删除时重做了反向验证（喂 CCN 12 探针 → `make ccn` 报 Error 1 → 删探针 → 绿），
+      确认拿掉 `-W` 后门禁没有变哑。
       （来源：原 `agent_space/m5-handoff.md` §5 的「CCN 债务」项，此前只在工作区文档里记，未落到本清单。）
 
 - [x] **C14 设备内建第二批（P6 R5 第一批）**：`__popc` / `__clz` / `__ffs` / `__brev` /
@@ -494,6 +497,39 @@
       例子上全都错**（bar.red 无 intrinsic、roundf 无单条指令、__ldg 向量零改动）。
       开工前的 spike 不是形式主义。
 
+- [x] **C18 成员左值（`v.x = ...` / `out4[i].x = ...` / `p->f = ...`）** ——
+      `make check` **254/254**（252 → 254，+2 个 test）。纯表达式层改动，
+      coolrt 侧**零改动**（无新声明、无 ABI 变化）。
+
+      **做法（关键，值得记住）**：没有为「成员左值」写第二套实现，而是把
+      「成员访问」统一成**成员地址**：
+      - `try_translate_member_address()` 算成员指针，基可以是变量、下标
+        （`out4[i]`）、解引用（`*p`）或嵌套成员，递归复用 `translate_expr_address`；
+      - 右值 = 成员地址 + `load`；左值 = 直接把成员地址交给
+        `translate_assign` / 复合赋值 / 取址，**这些通路一行没改**。
+
+      **向量为什么能共用这套**：`float4` 映射成 `<4 x float>`，而 **LLVM 允许对
+      向量类型做 GEP**（`gep <4 x float>, ptr %p, i64 0, i64 2`）。spike 实测
+      （`build/spike_bar_red/gepvec.ll` + llc）直接落成 `st.f32 [%rd1+8]` ——
+      即「GEP 第二下标取元素地址」与 struct 的 `CreateStructGEP` 等价，
+      不需要 load/insertelement 的读-改-写。**原以为要写两套，实测一套就够。**
+
+      **踩坑**：`p->f` 不是 `eok_dot_field`，是 **`eok_points_to_field`**（基是
+      *指针值*而非对象地址），且成员索引要在 **pointee** 的 field_list 里查。
+      把它并进 `is_dot_field_operator` 一类（差别只在基怎么求）比另写 handler 省一半代码。
+
+      **反向验证（两次，都选真正破坏语义的注入）**：
+      1. 向量成员 GEP 的**两个下标写反**（`{zero, idx}` → `{idx, zero}`）→
+         `ldg` 数值红在「分量错位」（`v[0].c1 = 0, want 0.5`），而 **PTX 形态断言
+         毫无反应** —— 印证「取错偏移」这类错误只有数值能抓；
+      2. 箭头基退化成「取地址」（`translate_expr` → `translate_expr_address`）→
+         `struct_member` 精确红在 `p->f` / `p->i` 两条，局部成员断言仍绿（分层正确）。
+
+      **用例**：`ldg.cu` 向量段改为成员左值写法（下标基写入 / 变量基写入 /
+      成员复合赋值三条通路），新增 `struct_member.cu`（混合字段结构体 +
+      `p->f` 箭头 + `s.f += 1`）。后者**只做数值断言**，理由写在文件头：
+      该功能的失效模式是算错偏移，PTX 形态上看不出来（上面反向验证 ① 已证实）。
+
 - [ ] **C16 表达力缺口盘点（本轮登记，未开工）**：与 coolrt 的 R4–R7 **成对推进**。
       **声明与主机侧的状态以 `coolruntime/docs/TODO.md` A 段 +
       [runtime-api-plan.md](../../coolruntime/docs/runtime-api-plan.md) 为准**，
@@ -505,7 +541,7 @@
       | **动态共享内存** `extern __shared__ T s[]` | 目前**只有静态路径**（`cool_shared` 属性 → `addrspace(3)` internal 全局；已核实 `src/` 内无 extern 分支）。需按启动参数 `sharedMem` 生成 extern 全局 + 正确对齐 | **S2 spike**：EDG IL 里 extern 数组的长度/对齐如何表达 | R7（`coolLaunchKernel(sharedMem)` 已有） |
       | `__syncthreads_count` / `_and` / `_or` | ✅ **已完成**：`bar.red.*` 一条指令。**两个坑**：① LLVM 19 无 `llvm.nvvm.bar.red.*` intrinsic（生成未定义 call）→ 改用 `llvm::InlineAsm`（全仓唯一一处）；② `bar.red` 是**三个**操作数 `d, a, c`（中间是参与线程数，`0` = 取块大小），少一个只在 ptxas 阶段报 `Arguments mismatch`。用例 `sync_red.cu` | 无 | R7 |
       | `__ldg` **向量重载**（`float4` / `int4` / `uint4`） | ✅ **已完成**：hacc 侧**零改动**（load 宽度由 `expr->type` 决定），只加声明 + 用例。golden 追加 `ld.global.nc.v4` | 无 | A.4 |
-      | **成员左值** `v.x = ...` / `out4[i].x = ...` | ❌ **新发现（本轮实测）**：报「不支持的左值表达式」——赋值左值只认变量与 `*p`。向量/结构体代码里极常见（`make_*` 与向量构造做完后用户第一件事就是写分量），建议优先于 `make_*` 排期 | 无（纯表达式左值判定，改 `translate_assign` 左值分支） | — |
+      | **成员左值** `v.x = ...` / `out4[i].x = ...` / `p->f = ...` | ✅ **已完成（C18）**：统一成「成员地址」——右值 = 地址 + load，左值 = 地址直交赋值通路。向量走 GEP 第二下标，与 struct 共用一套；`p->f` 是 `eok_points_to_field` 且须在 pointee 查成员 | 无 | — |
       | `__byte_perm` / `__funnelshift_l`·`_r` | `prmt.b32` / `shf.l`·`shf.r` | 无 | R5 |
       | `atomicInc` / `atomicDec` | **`atomicrmw` 表达不了**环形计数（`old >= val ? 0 : old+1`），须 `llvm.nvvm.atomic.load.inc/dec.32` | 无 | A.1 |
       | `make_float3` 等向量构造 + `char4`/`short2`/`longlong2` 等类型 | 需先确认**聚合（struct）值返回**能否翻译——wmma 走的是**出参 ABI**，值返回从未验证 | **S3 spike**（另一半是可变参）；若不支持则退化为「构造后字段赋值」并改文档，**不硬上** | R5 / A.4 |
@@ -515,8 +551,9 @@
       1. ~~`__syncthreads_count/and/or` + `__ldg` 向量重载 + `roundf`~~ —— ✅ **已全部完成**
          （`make check` 242 → **252**）。三项的反向验证都已做，`roundf` 那一条同时
          修掉了 coolrt TODO 里「`roundf` = `cvt.rni`」的错误判断（`.rni` 是 rint 语义）。
-      2. **`成员左值`**（本轮新发现，见上表）：挡在所有向量/结构体写法前面，成本小、
-         收益直接 —— 建议先于 `make_*` 做；
+      2. ~~**`成员左值`**~~ —— ✅ **已完成（C18）**，254/254。做法是把成员访问统一成
+         「成员地址」，左值/右值共用一套（向量走 GEP 第二下标，不需要
+         insertelement 读-改-写）；
       3. `stmk_range_based_for`（见 C11）：`translate_statement` 已是 `kStmtTable` 查表分派，
          理论上「一个 handler + 表里一行」，正好验证该扩展点是否真如设计那样可扩展；
       4. 三个 spike（S1/S2/S3，各自半天量级）→ 按结论给 R4/R6/R7 及 `make_*` 排序。

@@ -513,6 +513,9 @@ llvm::Value* translate_address_constant(a_constant_ptr c, an_expr_node_ptr expr,
 // 表达式翻译主体（不含 M3.4 的位置补全包装，见 translate_expr）。
 llvm::Value* translate_expr_inner(an_expr_node_ptr expr, KernelContext& kc);
 llvm::Value* translate_subscript(an_expr_node_ptr expr, KernelContext& kc);
+// 成员访问的地址（v.x / out4[i].x / a.b.c）：定义在结构体成员一节，
+// 但左值翻译（translate_expr_address）要用它，故前置声明。两者互相递归。
+llvm::Value* try_translate_member_address(an_expr_node_ptr expr, KernelContext& kc);
 
 // 取变量的「地址」（alloca）。参数在函数入口已 alloca。
 llvm::Value* variable_address(a_variable_ptr var, KernelContext& kc) {
@@ -523,7 +526,7 @@ llvm::Value* variable_address(a_variable_ptr var, KernelContext& kc) {
     fail("引用了未声明的变量（M1.2.3 仅支持参数与函数内局部变量）");
 }
 
-// 把表达式翻译为「地址」（lvalue）。仅 enk_variable / eok_indirect 支持。
+// 把表达式翻译为「地址」（lvalue）。支持变量、*p、a[i] 与成员访问（含嵌套）。
 llvm::Value* translate_expr_address(an_expr_node_ptr expr, KernelContext& kc) {
     if (expr == nullptr) {
         fail("取地址时表达式为空");
@@ -531,15 +534,30 @@ llvm::Value* translate_expr_address(an_expr_node_ptr expr, KernelContext& kc) {
     if (expr->kind == enk_variable) {
         return variable_address(expr->variant.variable.ptr, kc);
     }
-    if (expr->kind == enk_operation && expr->variant.operation.kind == eok_indirect) {
-        // *p 的地址就是 p 的值。
-        return translate_expr(expr->variant.operation.operands, kc);
+    if (expr->kind != enk_operation) {
+        fail("不支持的左值表达式（仅支持变量、*p、a[i] 与成员）");
     }
-    if (expr->kind == enk_operation && expr->variant.operation.kind == eok_subscript) {
-        // a[i] 的地址即 GEP 结果（translate_subscript 返回元素地址）。
-        return translate_subscript(expr, kc);
+    switch (expr->variant.operation.kind) {
+        case eok_indirect:
+            // *p 的地址就是 p 的值。
+            return translate_expr(expr->variant.operation.operands, kc);
+        case eok_subscript:
+            // a[i] 的地址即 GEP 结果（translate_subscript 返回元素地址）。
+            return translate_subscript(expr, kc);
+        case eok_dot_field:
+        case eok_points_to_field: {
+            // 成员访问：v.x / out4[i].x / a.b.c（定义在结构体成员一节）。
+            // 取不到地址（基不是聚合）就直接报错 —— 这里不能返回 nullptr：
+            // 左值路径的调用方会把它当指针用。
+            llvm::Value* addr = try_translate_member_address(expr, kc);
+            if (addr == nullptr) {
+                fail("成员左值的基对象不是聚合类型");
+            }
+            return addr;
+        }
+        default:
+            fail("不支持的左值表达式（仅支持变量、*p、a[i] 与成员）");
     }
-    fail("不支持的左值表达式（M1.2.3 仅支持变量与 *p）");
 }
 
 // 常量 → LLVM 常量。
@@ -1068,17 +1086,41 @@ bool find_field_index(a_type_ptr agg_ty, const char* field_name, unsigned* out_i
     return false;
 }
 
-// 翻译普通结构体成员访问（如向量类型 a.x）。
-// 返回 nullptr 表示「不是普通结构体成员访问」，交由调用方走其它路径。
-//
-// 实现：基对象（enk_variable，struct 类型）取地址 → GEP 到成员索引 → load。
-// 成员索引按名字在 struct 的 field_list 中查找（与 map_struct_type 的成员顺序一致）。
-llvm::Value* try_translate_struct_field(an_expr_node_ptr expr, KernelContext& kc) {
-    an_expr_node_ptr base = expr->variant.operation.operands;
-    if (base == nullptr || base->kind != enk_variable) {
+// 指针类型的「指向聚合」：p->f 的基是指针，成员索引须在 pointee 的 field_list 里查。
+a_type_ptr resolve_pointee_aggregate_type(a_type_ptr ty) {
+    a_type_ptr pointee = resolve_aggregate_type(ty);
+    if (pointee != nullptr || ty == nullptr) {
+        return pointee;  // 基本身已是聚合（不是箭头）或类型缺失
+    }
+    a_type_ptr plain = ty;
+    while (plain != nullptr && plain->kind == tk_typeref) {
+        plain = plain->variant.typeref.type;
+    }
+    if (plain == nullptr || plain->kind != tk_pointer) {
         return nullptr;
     }
-    a_type_ptr base_ty = resolve_aggregate_type(base->type);
+    return resolve_aggregate_type(plain->variant.pointer.type);
+}
+
+// 成员访问的「地址」：v.x / out4[i].x / a.b.c / p->f → 成员指针。返回 nullptr 表示
+// 基不是聚合类型（可能是内建变量 threadIdx 等），交由调用方走其它路径。
+//
+// 基可以是变量、下标、解引用或嵌套成员 —— 递归复用 translate_expr_address，
+// 于是「成员左值」不再需要单独的实现：赋值 / 复合赋值 / 取址全都走同一条通路。
+//
+// **向量类型走 GEP 的第二个下标**：float4 这类「2/4 个同型成员」的聚合被
+// map_struct_type 映射成 `<4 x float>`，而 LLVM **允许对向量类型做 GEP**
+// （`gep <4 x float>, ptr %p, i64 0, i64 2`，spike 实测在 sm_89 上直接落成
+// `st.f32 [%rd1+8]`）。所以向量成员与普通结构体成员共用同一段代码，
+// 不需要 load/insertelement 那一套读-改-写。
+llvm::Value* try_translate_member_address(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr base = expr->variant.operation.operands;
+    if (base == nullptr) {
+        return nullptr;
+    }
+    const bool is_arrow = expr->variant.operation.kind == eok_points_to_field;
+    a_type_ptr base_ty =
+        is_arrow ? resolve_pointee_aggregate_type(base->type) : resolve_aggregate_type(base->type);
     if (base_ty == nullptr) {
         return nullptr;  // 非聚合：交回调用方（可能是内建变量等）。
     }
@@ -1094,16 +1136,25 @@ llvm::Value* try_translate_struct_field(an_expr_node_ptr expr, KernelContext& kc
     if (!find_field_index(base_ty, field_name, &idx)) {
         fail("结构体成员名未在类型中找到");
     }
-    llvm::Value* base_addr = variable_address(base->variant.variable.ptr, kc);
+    // 基的求法按运算符区分：x.f 要**对象地址**，p->f 的基本身就是**指针值**
+    // （EDG 的 eok_points_to_field 第一个操作数就是 rvalue pointer）。
+    llvm::Value* base_addr = is_arrow ? translate_expr(base, kc) : translate_expr_address(base, kc);
     llvm::Type* agg_ty = map_type(base_ty, kc.ctx);
-    // 向量类型（<N x T>）：load 整个向量后 extractelement。
     if (agg_ty->isVectorTy()) {
-        llvm::Value* vec = kc.builder.CreateLoad(agg_ty, base_addr);
-        return kc.builder.CreateExtractElement(vec, idx);
+        llvm::Value* zero = kc.builder.getInt64(0);
+        return kc.builder.CreateGEP(agg_ty, base_addr, {zero, kc.builder.getInt64(idx)});
     }
-    // 普通聚合（struct）：GEP 到成员地址后 load。
-    llvm::Value* member_addr = kc.builder.CreateStructGEP(agg_ty, base_addr, idx, field_name);
-    return kc.builder.CreateLoad(map_type(field->type, kc.ctx), member_addr);
+    return kc.builder.CreateStructGEP(agg_ty, base_addr, idx, field_name);
+}
+
+// 翻译成员访问（右值）：成员地址 → load。
+// 返回 nullptr 表示「不是普通结构体成员访问」，交由调用方走其它路径。
+llvm::Value* try_translate_struct_field(an_expr_node_ptr expr, KernelContext& kc) {
+    llvm::Value* addr = try_translate_member_address(expr, kc);
+    if (addr == nullptr) {
+        return nullptr;
+    }
+    return kc.builder.CreateLoad(map_type(expr->type, kc.ctx), addr);
 }
 
 // 数组→指针退化（eok_array_to_pointer）：数组名 → 指向首元素的指针。
@@ -2174,7 +2225,10 @@ bool is_cast_operator(an_expr_operator_kind op) {
     return op == eok_cast;
 }
 bool is_dot_field_operator(an_expr_operator_kind op) {
-    return op == eok_dot_field;
+    // x.y 与 p->y 归同一类：两者都只是「成员访问」，差别仅在于基是对象还是指针
+    // （eok_dot_field 的第一个操作数是对象，eok_points_to_field 是指针**值**）。
+    // 分成两个 handler 只会让两条路径各写一遍成员索引查找。
+    return op == eok_dot_field || op == eok_points_to_field;
 }
 bool is_call_operator(an_expr_operator_kind op) {
     return op == eok_call;

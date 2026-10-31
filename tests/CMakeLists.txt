@@ -711,6 +711,19 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 DEPENDS golden_device_il_to_ptx_round_fma)
         endif()
 
+        # 成员左值（C18）：s.f = ... / p->f = ... / 成员复合赋值。
+        # 覆盖普通聚合分支（CreateStructGEP）——向量分支在 ldg.cu 的向量段里。
+        set(_e2e_smem_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_struct_member_run")
+        add_test(NAME e2e_hacc_struct_member_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/struct_member.cu"
+                    -o "${_e2e_smem_exe}")
+        add_test(NAME e2e_hacc_struct_member_run
+            COMMAND "${_e2e_smem_exe}")
+        set_tests_properties(e2e_hacc_struct_member_run PROPERTIES
+            DEPENDS e2e_hacc_struct_member_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "structMember OK")
+
         # P6/R5 第一批：整数单指令内建（__popc/__clz/__ffs/__brev）+ clock/clock64。
         # 边界值（__clz(0)=32、__ffs(0)=0）在用例里逐个断言，见文件头说明。
         set(_e2e_int_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_int_builtins_run")

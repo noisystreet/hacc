@@ -6,6 +6,19 @@
 
 ### Added
 
+- **成员左值（`v.x = ...` / `out4[i].x = ...` / `p->f = ...`，C18）**：赋值左边不再只认
+  变量与 `*p`。实现上没有另写一套左值逻辑，而是把「成员访问」统一成**成员地址**
+  （`try_translate_member_address`）：右值 = 地址 + load，左值 = 地址直接交给
+  `translate_assign` / 复合赋值 / 取址，这些通路一行未改。基可以是变量、下标、
+  解引用或嵌套成员。
+  向量类型（`float4` → `<4 x float>`）走 GEP 的**第二个下标**取元素地址
+  （LLVM 允许对向量类型做 GEP，实测直接落成 `st.f32 [%rd1+8]`），因此不需要
+  `load`/`insertelement` 那套读-改-写。
+  `p->f` 在 IL 里是 `eok_points_to_field`（基是指针**值**，成员索引在 pointee 上查），
+  与 `x.f` 归为同一类，差别仅在基怎么求。
+  用例：`ldg.cu` 向量段改为成员左值写法，新增 `struct_member.cu`。
+  反向验证：向量 GEP 两个下标写反 → 数值红、形态断言无反应（此类错误只有数值能抓）；
+  箭头基退化成取地址 → 精确红在 `p->f` / `p->i`。
 - **块级归约栅栏 `__syncthreads_count` / `_and` / `_or`（P6 R7）**：新增
   `try_translate_sync_red_call`，映射到 PTX `bar.red.{popc,and,or}` —— 一条指令完成
   「栅栏 + 块内归约」，比「shared + 两次 `__syncthreads` + 树形归约」少一次栅栏。
@@ -474,6 +487,14 @@
 
 ### Changed
 
+- **删除 `whitelizard.txt`（lizard 豁免清单），`make ccn` 不再有白名单**：C13 已把 10 条存量
+  债务全部重构清零，清单本身成了空文件；留着它就等于留一条「超标了往这儿写一行」的后门。
+  现在 `make ccn` 不传 `-W`，**任何 CCN 超标 / 函数超长都必须改代码**。
+
+  **删除时重做了反向验证**（否则「门禁变哑」无从察觉）：往 `tests/` 喂一个 CCN 12 的探针
+  → `make ccn` 报 `warning: probe has ... 12 CCN` 并以 `Error 1` 退出 → 删掉探针 → 复绿。
+  道理与 C13 一致：门禁改完必须证明它**还会红**，只证明「现在是绿的」没有意义。
+
 - **CCN 债务清零：`whitelizard.txt` 由 10 条降为 0 条**（TODO C13 收尾）。全部**行为等价**重构，
   `make check` 前后均为 **242/242**、零 SKIP：
 
@@ -496,6 +517,7 @@
   **反向验证**：把一份 CCN 12 的临时文件喂给同一组 lizard 参数，退出码为 1 —— 确认清空清单没有
   把门禁放成哑的。`whitelizard.txt` 保留（`make ccn` 的 `-W` 指向它），文件头写明「新增条目 =
   登记新债务，先确认是不是查表/抽函数就能消」。
+  （后续：该文件已于 2026-10-31 删除，见本节开头「删除 `whitelizard.txt`」条。）
 
 - **默认链接的 coolrt 静态库名改为 `libcoolrt_static.a`**（coolruntime 侧同步改名，对齐 CUDA 的
   `libcudart_static.a` 风格；另新增共享库 `libcoolrt.so`）。默认路径仍按 `<coolrt>/build/` 推导，
