@@ -458,6 +458,35 @@
 
       **遗留**：向量重载（`float4` / `int4` 等）未做，已在 coolrt TODO A.4 登记。
 
+- [ ] **C16 表达力缺口盘点（本轮登记，未开工）**：与 coolrt 的 R4–R7 **成对推进**。
+      **声明与主机侧的状态以 `coolruntime/docs/TODO.md` A 段 +
+      [runtime-api-plan.md](../../coolruntime/docs/runtime-api-plan.md) 为准**，
+      本清单只记 **hacc 侧要做的事**，不复制对端条目（复制必然漂移）。按「解锁哪类程序」排序：
+
+      | 缺口 | hacc 侧要做 | 前置 | coolrt 对应 |
+      | --- | --- | --- | --- |
+      | **warp 原语**（`__shfl_*_sync` / `__ballot_sync` / `__any·all_sync` / `__syncwarp` / `__activemask`） | 新增 `try_translate_warp_call`，挂进 `kCallTranslators`；**难点是按实参类型选 intrinsic**（`i32`/`f32`/`b32` 变体），不在声明 | **S1 spike**：`llvm.nvvm.shfl.sync.*` 的准确名、`mask` 是否为显式操作数 | R4 / A.3 |
+      | **动态共享内存** `extern __shared__ T s[]` | 目前**只有静态路径**（`cool_shared` 属性 → `addrspace(3)` internal 全局；已核实 `src/` 内无 extern 分支）。需按启动参数 `sharedMem` 生成 extern 全局 + 正确对齐 | **S2 spike**：EDG IL 里 extern 数组的长度/对齐如何表达 | R7（`coolLaunchKernel(sharedMem)` 已有） |
+      | `__syncthreads_count` / `_and` / `_or` | 映射 `bar.red.*`，一条指令 + 一个 e2e | 无 | R7 |
+      | `__ldg` **向量重载**（`float4` / `int4` / `uint4`） | 标量 4 个重载已随 C15 落地，向量版沿用同一路径 | 无 | A.4 |
+      | `__byte_perm` / `__funnelshift_l`·`_r` | `prmt.b32` / `shf.l`·`shf.r` | 无 | R5 |
+      | `atomicInc` / `atomicDec` | **`atomicrmw` 表达不了**环形计数（`old >= val ? 0 : old+1`），须 `llvm.nvvm.atomic.load.inc/dec.32` | 无 | A.1 |
+      | `make_float3` 等向量构造 + `char4`/`short2`/`longlong2` 等类型 | 需先确认**聚合（struct）值返回**能否翻译——wmma 走的是**出参 ABI**，值返回从未验证 | **S3 spike**（另一半是可变参）；若不支持则退化为「构造后字段赋值」并改文档，**不硬上** | R5 / A.4 |
+      | 设备端 `printf` / `assert` | 与「宁可编不过、不要静默错值」的口径直接相关：**没有 assert 就没有运行期不变量检查** | **S3 spike**：EDG IL 是否保留可变参实参；拿不到即降级 Non-Goal | R6 |
+
+      **建议起手顺序**（低成本高收益优先，不必按上表顺序）：
+      1. `__syncthreads_count/and/or` + `__ldg` 向量重载 + `roundf`（后者声明在 coolrt A.2）——
+         都属「一条 PTX 指令 + 一个 e2e」，风险接近零；
+      2. `stmk_range_based_for`（见 C11）：`translate_statement` 已是 `kStmtTable` 查表分派，
+         理论上「一个 handler + 表里一行」，正好验证该扩展点是否真如设计那样可扩展；
+      3. 三个 spike（S1/S2/S3，各自半天量级）→ 按结论给 R4/R6/R7 及 `make_*` 排序。
+         spike 结论写回 [edg-il-reference.md](edg-il-reference.md) 与
+         `coolruntime/docs/runtime-api-plan.md` §5。
+
+      （登记依据：对两仓 TODO / plan 与 `il_to_llvm.cpp` 实际分派路径的盘点；
+      另核实 `coolMallocPitch` / `coolMemcpy2D` / `coolDeviceSetLimit` / `coolModuleLoadDataEx`
+      在 coolrt 头文件 **0 命中**，均未提供。）
+
 ---
 
 ## D. 已知缺陷（待排期修复）
