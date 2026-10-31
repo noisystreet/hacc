@@ -456,7 +456,43 @@
       （去掉 `addrspacecast` 则测不出差别：hacc 指针参数本已带 global 语义，
       该 cast 是 no-op。）
 
-      **遗留**：向量重载（`float4` / `int4` 等）未做，已在 coolrt TODO A.4 登记。
+      **遗留**：向量重载（`float4` / `int4` 等）**已随 C17 完成**。
+
+- [x] **C17 表达力缺口第一批（`bar.red` / `__ldg` 向量 / 取整两档）** —— 三件套齐备，
+      `make check` **252/252**（242 → 252，+10 个 test）。与 coolrt 同轮提交。
+
+      **① `__syncthreads_count/_and/_or` → `bar.red.{popc,and,or}`**：
+      全仓**唯一**一处内联汇编（`llvm::InlineAsm`）。原因是 LLVM 19 没有
+      `llvm.nvvm.bar.red.*` intrinsic —— spike 实测（`build/spike_bar_red/barred.ll`）
+      声明后 llc 只当普通外部函数，PTX 出 `.extern .func` + `call.uni`，ptxas 阶段
+      因未定义符号失败。
+      **踩坑（价值最高）**：`bar.red` 是**三个**操作数 `d, a, c`，中间 `a` 是参与
+      线程数（`0` = 取块大小）。只写两个操作数时 PTX 文本看着完全正常、llc 不报错、
+      golden 的 `grep bar.red` 也照样通过，**只有 ptxas / 真机才暴露**
+      （`Arguments mismatch`）。正确形态是拿 `nvcc -ptx` 生成同一语义的 PTX 对照
+      出来的 —— 这类「grep 级形态断言看不见的错误」值得记住。
+      **反向验证**：把 `and`/`or` 的 asm 互换 → 数值红在 `and(tid==0)` / `or(tid==0)`
+      两条，形态仍绿（说明两档断言各管一件事）。
+
+      **② `__ldg` 向量重载**：hacc 侧**零改动**（load 宽度取 `expr->type`），只加
+      coolrt 声明 + 用例；golden 追加 `ld.global.nc.v4`。删 `!invariant.load` 的反向
+      验证在新向量路径上复现了 C15 的结论：**数值全绿、仅形态红**。
+      **顺带发现**：`out4[i].x = ...`（成员左值）不支持，已作为 C16 表新增一行。
+
+      **③ `roundf` / `rintf` / `fmaf`**：**原判断是错的**，必须留档 ——
+      coolrt TODO A.2 原写「`roundf`（`cvt.rni.f32`）」，但 spike 实测 NVPTX 把
+      `llvm.rint`/`llvm.nearbyint` 都降到 `cvt.rni`，即 `.rni` 是 **rint 语义
+      （.5 到偶数）**，而 CUDA `roundf` 是 **.5 远离零**。照原判断实现，
+      `roundf(2.5)` 返回 2 而非 3，且能编、能跑、自测全绿。改用 `llvm.round.f32`
+      （软件序列，约 8 条指令）。用例 `round_fma.cu` 的输入**全取 .5 边界**，
+      让 round / rint / trunc 三者两两可分；`fmaf` 用
+      `fmaf(1+2^-23, 1-2^-23, -1) = -2^-46` 区分「真 fma」与「先乘后加」。
+      反向验证：把 `roundf` 改映射成 `llvm.rint.f32` → 数值 + 形态**双红**，
+      报错点正是 0.5 / 2.5 / -0.5 / -2.5。
+
+      三者共同的一条教训：**「一条 PTX 指令 + 一个 e2e」这种直觉估算，在这三个
+      例子上全都错**（bar.red 无 intrinsic、roundf 无单条指令、__ldg 向量零改动）。
+      开工前的 spike 不是形式主义。
 
 - [ ] **C16 表达力缺口盘点（本轮登记，未开工）**：与 coolrt 的 R4–R7 **成对推进**。
       **声明与主机侧的状态以 `coolruntime/docs/TODO.md` A 段 +
@@ -467,21 +503,27 @@
       | --- | --- | --- | --- |
       | **warp 原语**（`__shfl_*_sync` / `__ballot_sync` / `__any·all_sync` / `__syncwarp` / `__activemask`） | 新增 `try_translate_warp_call`，挂进 `kCallTranslators`；**难点是按实参类型选 intrinsic**（`i32`/`f32`/`b32` 变体），不在声明 | **S1 spike**：`llvm.nvvm.shfl.sync.*` 的准确名、`mask` 是否为显式操作数 | R4 / A.3 |
       | **动态共享内存** `extern __shared__ T s[]` | 目前**只有静态路径**（`cool_shared` 属性 → `addrspace(3)` internal 全局；已核实 `src/` 内无 extern 分支）。需按启动参数 `sharedMem` 生成 extern 全局 + 正确对齐 | **S2 spike**：EDG IL 里 extern 数组的长度/对齐如何表达 | R7（`coolLaunchKernel(sharedMem)` 已有） |
-      | `__syncthreads_count` / `_and` / `_or` | 映射 `bar.red.*`，一条指令 + 一个 e2e | 无 | R7 |
-      | `__ldg` **向量重载**（`float4` / `int4` / `uint4`） | 标量 4 个重载已随 C15 落地，向量版沿用同一路径 | 无 | A.4 |
+      | `__syncthreads_count` / `_and` / `_or` | ✅ **已完成**：`bar.red.*` 一条指令。**两个坑**：① LLVM 19 无 `llvm.nvvm.bar.red.*` intrinsic（生成未定义 call）→ 改用 `llvm::InlineAsm`（全仓唯一一处）；② `bar.red` 是**三个**操作数 `d, a, c`（中间是参与线程数，`0` = 取块大小），少一个只在 ptxas 阶段报 `Arguments mismatch`。用例 `sync_red.cu` | 无 | R7 |
+      | `__ldg` **向量重载**（`float4` / `int4` / `uint4`） | ✅ **已完成**：hacc 侧**零改动**（load 宽度由 `expr->type` 决定），只加声明 + 用例。golden 追加 `ld.global.nc.v4` | 无 | A.4 |
+      | **成员左值** `v.x = ...` / `out4[i].x = ...` | ❌ **新发现（本轮实测）**：报「不支持的左值表达式」——赋值左值只认变量与 `*p`。向量/结构体代码里极常见（`make_*` 与向量构造做完后用户第一件事就是写分量），建议优先于 `make_*` 排期 | 无（纯表达式左值判定，改 `translate_assign` 左值分支） | — |
       | `__byte_perm` / `__funnelshift_l`·`_r` | `prmt.b32` / `shf.l`·`shf.r` | 无 | R5 |
       | `atomicInc` / `atomicDec` | **`atomicrmw` 表达不了**环形计数（`old >= val ? 0 : old+1`），须 `llvm.nvvm.atomic.load.inc/dec.32` | 无 | A.1 |
       | `make_float3` 等向量构造 + `char4`/`short2`/`longlong2` 等类型 | 需先确认**聚合（struct）值返回**能否翻译——wmma 走的是**出参 ABI**，值返回从未验证 | **S3 spike**（另一半是可变参）；若不支持则退化为「构造后字段赋值」并改文档，**不硬上** | R5 / A.4 |
       | 设备端 `printf` / `assert` | 与「宁可编不过、不要静默错值」的口径直接相关：**没有 assert 就没有运行期不变量检查** | **S3 spike**：EDG IL 是否保留可变参实参；拿不到即降级 Non-Goal | R6 |
 
       **建议起手顺序**（低成本高收益优先，不必按上表顺序）：
-      1. `__syncthreads_count/and/or` + `__ldg` 向量重载 + `roundf`（后者声明在 coolrt A.2）——
-         都属「一条 PTX 指令 + 一个 e2e」，风险接近零；
-      2. `stmk_range_based_for`（见 C11）：`translate_statement` 已是 `kStmtTable` 查表分派，
+      1. ~~`__syncthreads_count/and/or` + `__ldg` 向量重载 + `roundf`~~ —— ✅ **已全部完成**
+         （`make check` 242 → **252**）。三项的反向验证都已做，`roundf` 那一条同时
+         修掉了 coolrt TODO 里「`roundf` = `cvt.rni`」的错误判断（`.rni` 是 rint 语义）。
+      2. **`成员左值`**（本轮新发现，见上表）：挡在所有向量/结构体写法前面，成本小、
+         收益直接 —— 建议先于 `make_*` 做；
+      3. `stmk_range_based_for`（见 C11）：`translate_statement` 已是 `kStmtTable` 查表分派，
          理论上「一个 handler + 表里一行」，正好验证该扩展点是否真如设计那样可扩展；
-      3. 三个 spike（S1/S2/S3，各自半天量级）→ 按结论给 R4/R6/R7 及 `make_*` 排序。
+      4. 三个 spike（S1/S2/S3，各自半天量级）→ 按结论给 R4/R6/R7 及 `make_*` 排序。
          spike 结论写回 [edg-il-reference.md](edg-il-reference.md) 与
          `coolruntime/docs/runtime-api-plan.md` §5。
+         **S1 已提前拿到一条实测**：`llvm.nvvm.bar.red.*` 不存在（见上表），
+         说明「NVVM intrinsic 名先验后写」这条纪律对 warp 原语同样适用。
 
       （登记依据：对两仓 TODO / plan 与 `il_to_llvm.cpp` 实际分派路径的盘点；
       另核实 `coolMallocPitch` / `coolMemcpy2D` / `coolDeviceSetLimit` / `coolModuleLoadDataEx`

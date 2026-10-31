@@ -17,6 +17,35 @@ __global__ void ldg_k(const float* in, const int* in_i, float* out, int* out_i) 
     out_i[i] = __ldg(&in_i[i]) + 1;
 }
 
+// 向量重载（P6 R5 第二批续）：load 宽度直接由调用表达式的类型决定
+// （`__ldg(&v4[i])` 的类型是 float4 → 一条 `ld.global.nc.v4.f32`），
+// 不需要另做重载分派机制。标量与向量走同一条翻译路径。
+//
+// 写法约束（本轮实测）：hacc 目前**不支持成员左值**（`out4[i].x = ...` 会报
+// 「不支持的左值表达式」），所以向量值只能整体赋值、成员只作右值读取。
+// 这是语言子集缺口，已登记在 docs/TODO.md C16。
+__global__ void ldg_vec_k(const float4* in4, float4* out4, float* out_scal,
+                          const int4* in_i4, int4* out_i4, int* out_iscal) {
+    const int i = threadIdx.x;
+
+    // 聚合整体拷贝：验证 v4 load 的结果能作为 float4 值流转。
+    out4[i] = __ldg(&in4[i]);
+    out_i4[i] = __ldg(&in_i4[i]);
+
+    // 成员只读：验证 v4 load 的 4 个分量真的是内存里那 4 个值。
+    float4 v = __ldg(&in4[i]);
+    out_scal[i * 4 + 0] = v.x;
+    out_scal[i * 4 + 1] = v.y;
+    out_scal[i * 4 + 2] = v.z;
+    out_scal[i * 4 + 3] = v.w;
+
+    int4 w = __ldg(&in_i4[i]);
+    out_iscal[i * 4 + 0] = w.x;
+    out_iscal[i * 4 + 1] = w.y;
+    out_iscal[i * 4 + 2] = w.z;
+    out_iscal[i * 4 + 3] = w.w;
+}
+
 int main() {
     float* d_in = nullptr;
     int* d_in_i = nullptr;
@@ -67,6 +96,91 @@ int main() {
         if (h_out_i[i] != i * 3 + 1) {
             printf("ldg FAIL: out_i[%d] = %d, want %d\n", i, h_out_i[i], i * 3 + 1);
             ++failed;
+        }
+    }
+
+    // ---- 向量重载：float4 / int4 ----
+    const int VN = 8;
+    float4* d_in4 = nullptr;
+    float4* d_out4 = nullptr;
+    float* d_out_scal = nullptr;
+    int4* d_in_i4 = nullptr;
+    int4* d_out_i4 = nullptr;
+    int* d_out_iscal = nullptr;
+    if (coolMalloc((void**)&d_in4, sizeof(float4) * VN) != coolSuccess ||
+        coolMalloc((void**)&d_out4, sizeof(float4) * VN) != coolSuccess ||
+        coolMalloc((void**)&d_out_scal, sizeof(float) * VN * 4) != coolSuccess ||
+        coolMalloc((void**)&d_in_i4, sizeof(int4) * VN) != coolSuccess ||
+        coolMalloc((void**)&d_out_i4, sizeof(int4) * VN) != coolSuccess ||
+        coolMalloc((void**)&d_out_iscal, sizeof(int) * VN * 4) != coolSuccess) {
+        printf("ldg FAIL: vector device alloc failed\n");
+        return 1;
+    }
+    float4 h_in4[VN];
+    int4 h_in_i4[VN];
+    for (int i = 0; i < VN; ++i) {
+        h_in4[i].x = (float)i;
+        h_in4[i].y = (float)i + 0.5f;
+        h_in4[i].z = (float)i + 0.25f;
+        h_in4[i].w = (float)i - 1.0f;
+        h_in_i4[i].x = i;
+        h_in_i4[i].y = i * 2;
+        h_in_i4[i].z = i * 3;
+        h_in_i4[i].w = -i;
+    }
+    coolMemcpy(d_in4, h_in4, sizeof(h_in4), coolMemcpyHostToDevice);
+    coolMemcpy(d_in_i4, h_in_i4, sizeof(h_in_i4), coolMemcpyHostToDevice);
+
+    ldg_vec_k<<<1, VN>>>(d_in4, d_out4, d_out_scal, d_in_i4, d_out_i4, d_out_iscal);
+    if (coolDeviceSynchronize() != coolSuccess) {
+        printf("ldg FAIL: vector kernel sync failed\n");
+        return 1;
+    }
+    float4 h_out4[VN];
+    float h_out_scal[VN * 4];
+    int4 h_out_i4[VN];
+    int h_out_iscal[VN * 4];
+    coolMemcpy(h_out4, d_out4, sizeof(h_out4), coolMemcpyDeviceToHost);
+    coolMemcpy(h_out_scal, d_out_scal, sizeof(h_out_scal), coolMemcpyDeviceToHost);
+    coolMemcpy(h_out_i4, d_out_i4, sizeof(h_out_i4), coolMemcpyDeviceToHost);
+    coolMemcpy(h_out_iscal, d_out_iscal, sizeof(h_out_iscal), coolMemcpyDeviceToHost);
+    coolFree(d_in4);
+    coolFree(d_out4);
+    coolFree(d_out_scal);
+    coolFree(d_in_i4);
+    coolFree(d_out_i4);
+    coolFree(d_out_iscal);
+
+    for (int i = 0; i < VN; ++i) {
+        // 聚合整体拷贝：逐分量等于输入。
+        if (h_out4[i].x != h_in4[i].x || h_out4[i].y != h_in4[i].y ||
+            h_out4[i].z != h_in4[i].z || h_out4[i].w != h_in4[i].w) {
+            printf("ldg FAIL: vec[%d] = {%g,%g,%g,%g}, want {%g,%g,%g,%g}\n", i, h_out4[i].x,
+                   h_out4[i].y, h_out4[i].z, h_out4[i].w, h_in4[i].x, h_in4[i].y, h_in4[i].z,
+                   h_in4[i].w);
+            ++failed;
+        }
+        if (h_out_i4[i].x != i || h_out_i4[i].y != i * 2 || h_out_i4[i].z != i * 3 ||
+            h_out_i4[i].w != -i) {
+            printf("ldg FAIL: veci[%d] = {%d,%d,%d,%d}, want {%d,%d,%d,%d}\n", i, h_out_i4[i].x,
+                   h_out_i4[i].y, h_out_i4[i].z, h_out_i4[i].w, i, i * 2, i * 3, -i);
+            ++failed;
+        }
+        // 成员读取：4 个分量各自与内存一致（证明 v4 load 真的按 128 位取，
+        // 且分量顺序没有错位）。
+        const float want_scal[4] = {h_in4[i].x, h_in4[i].y, h_in4[i].z, h_in4[i].w};
+        const int want_iscal[4] = {i, i * 2, i * 3, -i};
+        for (int k = 0; k < 4; ++k) {
+            if (h_out_scal[i * 4 + k] != want_scal[k]) {
+                printf("ldg FAIL: v[%d].c%d = %g, want %g\n", i, k, h_out_scal[i * 4 + k],
+                       want_scal[k]);
+                ++failed;
+            }
+            if (h_out_iscal[i * 4 + k] != want_iscal[k]) {
+                printf("ldg FAIL: vi[%d].c%d = %d, want %d\n", i, k, h_out_iscal[i * 4 + k],
+                       want_iscal[k]);
+                ++failed;
+            }
         }
     }
 

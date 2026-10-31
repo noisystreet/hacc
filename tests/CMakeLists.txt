@@ -675,6 +675,42 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
             SKIP_RETURN_CODE 77
             PASS_REGULAR_EXPRESSION "mathBuiltins OK")
 
+        # 取整两档（roundf = .5 远离零 / rintf = .5 到偶数）+ fmaf 别名。
+        # 输入走主机传入的 .5 边界值（字面量会被常量折叠，golden 断言就空转）。
+        set(_e2e_rf_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_round_fma_run")
+        add_test(NAME e2e_hacc_round_fma_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/round_fma.cu"
+                    -o "${_e2e_rf_exe}")
+        add_test(NAME e2e_hacc_round_fma_run
+            COMMAND "${_e2e_rf_exe}")
+        set_tests_properties(e2e_hacc_round_fma_run PROPERTIES
+            DEPENDS e2e_hacc_round_fma_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "roundFma OK")
+
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_rf_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_round_fma.cil")
+            set(_rf_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_round_fma.ptx")
+            add_test(NAME golden_frontend_round_fma
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_rf_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/round_fma.cu")
+            add_test(NAME golden_device_il_to_ptx_round_fma
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_rf_ptx}" "${_rf_cil}")
+            set_tests_properties(golden_device_il_to_ptx_round_fma PROPERTIES
+                DEPENDS golden_frontend_round_fma)
+            # 三者必须同时出现：fma.rn.f32（fmaf）、cvt.rni（rintf 一条指令）、
+            # -2147483648（roundf 展开里的符号位掩码 → 证明确实走了 software 序列，
+            # 而不是被悄悄换成 cvt.rni/cvt.rzi）。
+            add_test(NAME golden_device_il_to_ptx_round_fma_instr
+                COMMAND sh -c "grep -q 'fma\\.rn\\.f32' \"$1\" && grep -q 'cvt\\.rni\\.f32\\.f32' \"$1\" && grep -q -- '-2147483648' \"$1\""
+                        _ "${_rf_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_round_fma_instr PROPERTIES
+                DEPENDS golden_device_il_to_ptx_round_fma)
+        endif()
+
         # P6/R5 第一批：整数单指令内建（__popc/__clz/__ffs/__brev）+ clock/clock64。
         # 边界值（__clz(0)=32、__ffs(0)=0）在用例里逐个断言，见文件头说明。
         set(_e2e_int_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_int_builtins_run")
@@ -745,12 +781,50 @@ if(HACC_WITH_EDG AND EXISTS "${HACC_DEFAULT_CPFE}")
                 COMMAND coolicc --from-il -arch=sm_80 -o "${_ldg_ptx}" "${_ldg_cil}")
             set_tests_properties(golden_device_il_to_ptx_ldg PROPERTIES
                 DEPENDS golden_frontend_ldg)
-            # 两个条件缺一不可：cvta.to.global（地址空间）+ ld.global.nc（metadata）。
+            # 三个条件必须同时满足：cvta.to.global（地址空间）+ ld.global.nc（metadata）
+            # + 向量宽度 v4（`__ldg` 的 float4/int4 重载真的发了一条 128 位读，
+            # 而不是被拆成 4 条标量读）。
             add_test(NAME golden_device_il_to_ptx_ldg_nc
-                COMMAND sh -c "grep -q 'cvta.to.global' \"$1\" && grep -q 'ld.global.nc' \"$1\""
+                COMMAND sh -c "grep -q 'cvta.to.global' \"$1\" && grep -q 'ld.global.nc' \"$1\" && grep -q 'ld.global.nc.v4' \"$1\""
                         _ "${_ldg_ptx}")
             set_tests_properties(golden_device_il_to_ptx_ldg_nc PROPERTIES
                 DEPENDS golden_device_il_to_ptx_ldg)
+        endif()
+
+        # P6/R7：块级归约栅栏 __syncthreads_count / _and / _or → PTX bar.red.*。
+        # LLVM 19 没有对应 NVVM intrinsic（spike 实测 `llvm.nvvm.bar.red.*` 会被当成
+        # 普通外部函数），故 hacc 用内联汇编发射 —— 形态断言就是这条路的唯一证据。
+        set(_e2e_sred_exe "${CMAKE_CURRENT_BINARY_DIR}/e2e_sync_red_run")
+        add_test(NAME e2e_hacc_sync_red_build
+            COMMAND hacc "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/sync_red.cu"
+                    -o "${_e2e_sred_exe}")
+        add_test(NAME e2e_hacc_sync_red_run
+            COMMAND "${_e2e_sred_exe}")
+        set_tests_properties(e2e_hacc_sync_red_run PROPERTIES
+            DEPENDS e2e_hacc_sync_red_build
+            SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "syncRed OK")
+
+        if(HACC_COOLRUNTIME_INCLUDE)
+            set(_sred_cil "${CMAKE_CURRENT_BINARY_DIR}/e2e_sync_red.cil")
+            set(_sred_ptx "${CMAKE_CURRENT_BINARY_DIR}/e2e_sync_red.ptx")
+            add_test(NAME golden_frontend_sync_red
+                COMMAND coolfe++ --cpfe "${HACC_DEFAULT_CPFE}"
+                        --edg-base-dir "${HACC_DEFAULT_EDG_BASE}"
+                        -o "${_sred_cil}"
+                        -I "${HACC_COOLRUNTIME_INCLUDE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/golden/e2e/sync_red.cu")
+            add_test(NAME golden_device_il_to_ptx_sync_red
+                COMMAND coolicc --from-il -arch=sm_80 -o "${_sred_ptx}" "${_sred_cil}")
+            set_tests_properties(golden_device_il_to_ptx_sync_red PROPERTIES
+                DEPENDS golden_frontend_sync_red)
+            # 三条 bar.red 必须**同时**出现（&& 而非「任一命中」）：这正是否定
+            # 「用 shared + 两次 __syncthreads 模拟」的依据。
+            add_test(NAME golden_device_il_to_ptx_sync_red_instr
+                COMMAND sh -c "grep -q 'bar\\.red\\.popc\\.u32' \"$1\" && grep -q 'bar\\.red\\.and\\.pred' \"$1\" && grep -q 'bar\\.red\\.or\\.pred' \"$1\""
+                        _ "${_sred_ptx}")
+            set_tests_properties(golden_device_il_to_ptx_sync_red_instr PROPERTIES
+                DEPENDS golden_device_il_to_ptx_sync_red)
         endif()
 
         # S2 T3 负向：需要 libdevice 的精确数学函数必须明确报错，不得静默降级为 .approx。

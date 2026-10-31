@@ -6,6 +6,58 @@
 
 ### Added
 
+- **块级归约栅栏 `__syncthreads_count` / `_and` / `_or`（P6 R7）**：新增
+  `try_translate_sync_red_call`，映射到 PTX `bar.red.{popc,and,or}` —— 一条指令完成
+  「栅栏 + 块内归约」，比「shared + 两次 `__syncthreads` + 树形归约」少一次栅栏。
+
+  **全仓唯一一处内联汇编**，原因是 **LLVM 19 没有对应的 NVVM intrinsic**：spike
+  实测声明 `llvm.nvvm.bar.red.popc.u32` 后 llc 不认为它是 intrinsic，PTX 里生成
+  `.extern .func` + `call.uni`，ptxas 阶段因符号未定义失败。改用 `llvm::InlineAsm`
+  后一字不差发射 `bar.red.*`。
+
+  **两个只在汇编期暴露的坑**（都已写进注释）：
+  ① `bar.red` 是**三个**操作数 —— `d, a, c`，中间那个是参与线程数（`0` = 取启动
+  配置的块大小）。只写两个会被 ptxas 判为 `Arguments mismatch`，而 PTX 文本看着
+  完全正常、llc 也不报错；正确形态是拿 nvcc 生成同一语义的 PTX 对照出来的。
+  ② 谓词操作数必须是 `.pred`，`.and/.or` 的结果也是谓词 → 用 `setp.ne.b32` 归一
+  输入、`selp.b32` 转回 0/1。
+
+  新增 `tests/golden/e2e/sync_red.cu`（128 线程 = 4 warp，跨 warp 才算数；数值断言
+  覆盖 `count(tid%3==0)=43` / `count` 全中与全不中 / `and` 全真与部分真 / `or`
+  部分真与全假）+ **三条 `bar.red` 形态断言同时命中**（这条形态断言正是否定
+  「用 shared 模拟」的依据）。`make check` **252/252**、零 SKIP。
+
+- **`__ldg` 向量重载（`float4` / `int4` / `uint4`）**：沿用标量路径——load 宽度由
+  调用表达式的类型决定，`__ldg(&v4[i])` 直接是一条 `ld.global.nc.v4.f32`。
+  golden 断言在原有 `cvta.to.global` + `ld.global.nc` 之外，**追加 `ld.global.nc.v4`**：
+  证明是 128 位单次读，而不是被拆成 4 条标量读。
+
+  **顺带发现一个语言子集缺口**：`out4[i].x = ...`（**成员左值**）会报
+  「不支持的左值表达式」——已登记 TODO C16，用例因此改为「聚合整体赋值 + 成员只读」。
+
+- **`roundf` / `rintf` / `fmaf`（数学内建补遗）**：`roundf` 是 CUDA 语义（.5 **远离零**），
+  `rintf` 是 .5 **到偶数**，`fmaf` 与已有的 `__fmaf_rn` 同一件事。
+
+  **这里差点埋一个静默错值**：`roundf` 直觉上该映射到 `cvt.rni`，但 spike 实测
+  NVPTX 把 `llvm.rint`/`llvm.nearbyint` 都降到 `cvt.rni.f32.f32` —— 即 `.rni` 是
+  rint 语义（.5 到偶数）。照直觉写，`roundf(2.5)` 会返回 2 而不是 3，编译、运行、
+  自测全绿，**只有 .5 边界值能发现**。正确做法是 `llvm.round.f32`（展开成
+  `copysign(0.5,x)+add.rn+cvt.rzi` 加两个边界 select，约 8 条指令，PTX 无单条
+  ties-away 指令）。
+
+  新增 `tests/golden/e2e/round_fma.cu`：输入**全部取 .5 边界**（0.5/1.5/2.5/-0.5/-1.5/-2.5），
+  让 round / rint / trunc 三者两两可分；`fmaf` 另有一组「只有真 fma 才对」的数据
+  （`fmaf(1+2^-23, 1-2^-23, -1) = -2^-46`，退化成先乘后加会得 0）。输入由主机传入而
+  非字面量（字面量会被常量折叠，golden 断言空转）。形态断言：`fma.rn.f32` +
+  `cvt.rni.f32.f32` + roundf 展开里的符号位掩码同时命中。
+
+  **三项的反向验证都做了**（红 → 回滚 → 绿）：
+  | 注入 | 结果 |
+  | --- | --- |
+  | `roundf` 改映射成 `llvm.rint.f32` | 数值 + 形态**双红**，报错点正是 0.5 / 2.5 / -0.5 / -2.5 |
+  | `bar.red.and` ↔ `or` 互换 | 数值红（`and(tid==0)`/`or(tid==0)` 两条），形态仍绿 —— 说明两档断言各管一件事 |
+  | 删掉 `!invariant.load` | 数值**全绿**、仅形态红（C15 结论在新向量路径上复现） |
+
 - **`__ldg`：只读数据缓存加载（P6 R5 第二批）**：新增 `try_translate_ldg_call`，把
   `__ldg(&a[i])` 映射为 `ld.global.nc`（非相干只读缓存）。
 

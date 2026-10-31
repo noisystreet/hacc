@@ -38,6 +38,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -1443,7 +1444,16 @@ constexpr MathBuiltinMapping kMathBuiltins[] = {
     {"floorf", "llvm.floor.f32", 1, MathMul::None, 0.0},
     {"ceilf", "llvm.ceil.f32", 1, MathMul::None, 0.0},
     {"truncf", "llvm.trunc.f32", 1, MathMul::None, 0.0},
+    // 取整语义两档，**不能混**（混合即静默错值）：
+    //   rintf  → 就近、.5 舍入到偶数 → cvt.rni.f32.f32（一条指令）
+    //   roundf → 就近、.5 远离零（CUDA 语义）→ PTX 无单条指令，llvm.round 展开成
+    //            copysign(0.5,x)+add.rn+cvt.rzi+两个边界 select（约 8 条）。
+    // spike 实测（build/spike_bar_red/）：llvm.round ≠ cvt.rni —— 把 roundf 直接
+    // 映射成 cvt.rni 会得到 rintf 的结果（2.5 → 2 而不是 3）。
+    {"rintf", "llvm.rint.f32", 1, MathMul::None, 0.0},
+    {"roundf", "llvm.round.f32", 1, MathMul::None, 0.0},
     {"__fmaf_rn", "llvm.fma.f32", 3, MathMul::None, 0.0},
+    {"fmaf", "llvm.fma.f32", 3, MathMul::None, 0.0},
     {"__fsqrt_rn", "llvm.nvvm.sqrt.rn.f", 1, MathMul::None, 0.0},
     {"__frcp_rn", "llvm.nvvm.rcp.rn.f", 1, MathMul::None, 0.0},
     {"rsqrtf", "llvm.nvvm.rsqrt.approx.f", 1, MathMul::None, 0.0},
@@ -1694,6 +1704,102 @@ llvm::Value* try_translate_ldg_call(an_expr_node_ptr expr, KernelContext& kc) {
     load->setMetadata(llvm::LLVMContext::MD_invariant_load,
                       llvm::MDNode::get(kc.ctx, llvm::ArrayRef<llvm::Metadata*>()));
     return load;
+}
+
+// ---------------------------------------------------------------------------
+// 块级归约栅栏（P6 R7）：__syncthreads_count / __syncthreads_and / __syncthreads_or
+// ---------------------------------------------------------------------------
+// 一条 PTX 指令完成「栅栏 + 块内归约」，比「写 shared + __syncthreads + 树形归约 +
+// 再 __syncthreads」少一次栅栏，也少一堆样板代码。
+//
+// **为什么这里用内联汇编**（全仓唯一一处）：LLVM 19 **没有**对应的 NVVM intrinsic。
+// spike 实测（hacc/build/spike_bar_red/barred.ll）：声明 `llvm.nvvm.bar.red.popc.u32`
+// 之后 llc 不认为它是 intrinsic，PTX 里生成 `.extern .func` + `call.uni` —— ptxas
+// 阶段会因为符号未定义而失败。换成内联汇编则一字不差发射 `bar.red.*`。
+//
+// PTX 形态（**三个操作数，中间那个不能省**；nvcc 对同一语义生成的是
+// `bar.red.popc.u32 %r2, 0, %p1;`）：
+//
+//   bar.red.{popc,and,or}.{u32,pred}  d, a, c;
+//
+// `a` 是参与线程数，`0` 表示「取启动配置里的块大小」。实测只写 `d, c` 两个操作数
+// 会被 ptxas 判为 `Arguments mismatch for instruction 'bar.red'` —— 而这**只在
+// 汇编期失败**：PTX 文本看着完全正常，llc 也不报错，必须拿 ptxas 或真机才暴露。
+//
+// 谓词操作数必须是 `.pred` 寄存器，而 IR 里传进来的是 i32 → 序列里先用
+// `setp.ne.b32` 归一；`.and/.or` 的硬件结果也是谓词 → 再用 `selp.b32` 转回 0/1
+// 的 i32（用户只需判断「非 0」，不依赖具体非零值）。
+// 内联汇编必须带 side effect：归约栅栏既不能被删掉，也不能被重排。
+struct SyncRedBuiltinMapping {
+    const char* name;
+    const char* asm_text;
+};
+
+constexpr SyncRedBuiltinMapping kSyncRedBuiltins[] = {
+    {"__syncthreads_count",
+     "{ .reg .pred %hacc_p; setp.ne.b32 %hacc_p, $1, 0; "
+     "bar.red.popc.u32 $0, 0, %hacc_p; }"},
+    {"__syncthreads_and",
+     "{ .reg .pred %hacc_p, %hacc_q; setp.ne.b32 %hacc_p, $1, 0; "
+     "bar.red.and.pred %hacc_q, 0, %hacc_p; selp.b32 $0, 1, 0, %hacc_q; }"},
+    {"__syncthreads_or",
+     "{ .reg .pred %hacc_p, %hacc_q; setp.ne.b32 %hacc_p, $1, 0; "
+     "bar.red.or.pred %hacc_q, 0, %hacc_p; selp.b32 $0, 1, 0, %hacc_q; }"},
+};
+
+// 按名字查块级归约内建；未命中返回 nullptr。
+const SyncRedBuiltinMapping* find_sync_red_builtin(const char* name) {
+    for (const SyncRedBuiltinMapping& m : kSyncRedBuiltins) {
+        if (std::strcmp(name, m.name) == 0) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+// 把谓词实参归一为 i32：布尔（i1）零扩展、窄整型无符号扩展。
+// 浮点谓词不是合法用法，明确报错而不是悄悄截断。
+llvm::Value* normalize_bar_red_predicate(llvm::Value* pred, const char* name, an_expr_node_ptr expr,
+                                         KernelContext& kc) {
+    if (!pred->getType()->isIntegerTy()) {
+        fail(std::string(name) + " 的谓词实参必须是整型或布尔", expr->position);
+    }
+    llvm::Type* i32 = llvm::Type::getInt32Ty(kc.ctx);
+    if (pred->getType() == i32) {
+        return pred;
+    }
+    return kc.builder.CreateIntCast(pred, i32, /*isSigned=*/false);
+}
+
+// 翻译块级归约栅栏调用。返回 nullptr 表示「不是这三个内建」。
+llvm::Value* try_translate_sync_red_call(an_expr_node_ptr expr, KernelContext& kc) {
+    an_expr_node_ptr callee = expr->variant.operation.operands;
+    if (callee == nullptr || callee->kind != enk_routine) {
+        return nullptr;
+    }
+    a_routine_ptr r = callee->variant.routine.ptr;
+    const char* name = (r != nullptr) ? r->source_corresp.name : nullptr;
+    if (name == nullptr) {
+        return nullptr;
+    }
+    const SyncRedBuiltinMapping* mapping = find_sync_red_builtin(name);
+    if (mapping == nullptr) {
+        return nullptr;
+    }
+
+    std::vector<llvm::Value*> args = translate_builtin_args(callee, kc);
+    if (args.size() != 1) {
+        fail(
+            std::string(name) + " 需要 1 个谓词实参（实际 " + std::to_string(args.size()) + " 个）",
+            expr->position);
+    }
+    llvm::Value* pred = normalize_bar_red_predicate(args[0], name, expr, kc);
+
+    llvm::Type* i32 = llvm::Type::getInt32Ty(kc.ctx);
+    llvm::FunctionType* fn_ty = llvm::FunctionType::get(i32, {i32}, /*isVarArg=*/false);
+    llvm::InlineAsm* asm_callee =
+        llvm::InlineAsm::get(fn_ty, mapping->asm_text, "=r,r", /*hasSideEffects=*/true);
+    return kc.builder.CreateCall(fn_ty, asm_callee, {pred});
 }
 
 // 翻译对同模块自定义 __device__ 函数的调用（M5.4）。
@@ -2156,9 +2262,9 @@ llvm::Value* op_dot_field(an_expr_operator_kind /*op*/, an_expr_node_ptr expr, K
 using CallTranslator = llvm::Value* (*)(an_expr_node_ptr expr, KernelContext& kc);
 
 constexpr CallTranslator kCallTranslators[] = {
-    try_translate_atomic_call, try_translate_wmma_call,    try_translate_math_call,
-    try_translate_int_call,    try_translate_builtin_call, try_translate_ldg_call,
-    try_translate_device_call,
+    try_translate_atomic_call, try_translate_wmma_call,     try_translate_math_call,
+    try_translate_int_call,    try_translate_sync_red_call, try_translate_builtin_call,
+    try_translate_ldg_call,    try_translate_device_call,
 };
 
 llvm::Value* op_call(an_expr_operator_kind /*op*/, an_expr_node_ptr expr, KernelContext& kc) {
