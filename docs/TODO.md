@@ -408,6 +408,14 @@
       - **开工前必须 spike**：EDG 判定「模板原型」的**可靠标志**。不能用签名嗅探——
         `__global__ void kt(T*)` 的指针把 `T` 藏住了，签名看起来完全正常。
 
+- [ ] **C13 CCN / 函数长度债务（`whitelizard.txt`）**：当前 **10 个函数 / 4 个文件**在豁免清单里
+      （`map_type` / `classify_operator` / `translate_operation` / `emit_ptx_from_il` / `launch_rewrite` 三件 /
+      `parse_args` / 前端 `main`）。门限为 CCN ≤ 10、函数长度 ≤ 200 行（`Makefile` 的
+      `CCN_THRESHOLD` / `FUNC_LENGTH_THRESHOLD`）。**增量清理，不一次性重写**：优先拆
+      `il_to_llvm.cpp` 的 `translate_operation` dispatch——S2 T3（数学内建）又往里加了分支，
+      是当前最容易继续恶化的一处。每清掉一个就从 `whitelizard.txt` 删一行，`make ccn` 保持绿。
+      （来源：原 `agent_space/m5-handoff.md` §5 的「CCN 债务」项，此前只在工作区文档里记，未落到本清单。）
+
 ---
 
 ## D. 已知缺陷（待排期修复）
