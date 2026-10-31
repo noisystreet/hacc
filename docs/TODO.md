@@ -424,6 +424,28 @@
       **踩坑**：e2e 操作数若全为字面量，LLVM 会常量折叠掉 intrinsic，PTX 里没有指令 →
       golden 断言空转；改为走主机传入的 seed。
 
+- [ ] **C15 `__ldg` 的 spike 结论（调研已完成，待实现）** —— 两条前置都有确定答案，
+      下次不用重做：
+
+      **LLVM / PTX 侧**（llc 19.1.7 + ptxas sm_89 实测）：
+      - 单加 `!invariant.load` **不够**：generic 指针上仍是 `ld.f32`；
+      - **`addrspace(1)`（global）+ `!invariant.load` 两个条件同时满足**才生成
+        `ld.global.nc.f32` / `.u32` / `.v4.f32`；
+      - 从 generic `addrspacecast` 到 `addrspace(1)` 也成立：PTX 出
+        `cvta.to.global.u64` + `ld.global.nc.*`，**ptxas sm_89 汇编通过**；
+      - 带 GEP 偏移（`__ldg(&a[i])`）同样成立。
+
+      **IL / 前端侧**：`__ldg` 声明**不带 `__device__`**（与 `__syncthreads` 一致）时，
+      EDG 接受在 kernel 内调用，`--emit=il` 正常产出；**若带 `__device__` 会撞 KI-5**
+      （被当成「只有声明没有定义的设备函数」）。
+
+      **实现路径（约 4 处）**：coolrt 头声明重载 → hacc 新增 `try_translate_ldg_call`
+      （用 `map_type(expr->type)` 取 load 类型，`CreateAddrSpaceCast` 到 as1，
+      load 后 `setMetadata(MD_invariant_load)`）→ e2e（数值 + PTX 断言 `ld.global.nc`
+      与 `cvta.to.global`）。
+      **红线**：把 shared / local 指针传给 `__ldg` 是未定义行为（CUDA 亦然），
+      与 KI-3 同属「hacc 侧不设防」类别，必须写进头注释。
+
 ---
 
 ## D. 已知缺陷（待排期修复）
